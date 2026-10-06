@@ -1,0 +1,41 @@
+# ===== 核心依赖 =====
+# 装法： pip install -r requirements.txt
+
+# Web 后端
+fastapi==0.136.3
+uvicorn==0.49.0
+python-multipart==0.0.32
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+pytest>=8,<9
+
+# TTS：自然嗓音 + 词级时间点
+edge-tts==7.2.8
+
+# 视频/音频提取（字幕优先，没字幕走下面的 Whisper）
+yt-dlp==2026.6.9
+
+# 无字幕时本地转写。
+# ⚠ ctranslate2 必须锁 4.4.0：新版在部分 CPU（如 AMD Ryzen 6000 系）上加载模型会直接段错误（exit 139），见 README「兼容性踩坑」
+faster-whisper==1.2.1
+ctranslate2>=4.6.0
+numpy==1.26.4          # 锁 <2，否则 ctranslate2/faster-whisper 报 "Failed to initialize NumPy"
+
+# 本地语义检索（CPU；首次使用时下载 all-MiniLM-L6-v2，不调用 OpenAI）
+sentence-transformers==6.1.0
+
+# 发音评测（Azure；可选功能，没配 key 会自动退回浏览器识别，不影响其余模式）
+azure-cognitiveservices-speech==1.50.0
+
+# 上传 PDF / Word 提取文字
+pypdf==6.13.2
+python-docx==1.2.0
+
+# 盲听免空格：按真实英文词切（word-break）
+wordsegment==1.3.1
+
+# 听力点词看音标：本地 CMU 词典→IPA（离线、覆盖广，不依赖国外词典 API）
+eng-to-ipa==0.0.2
+
+# ===== 可选：去背景音 / 人声分离（Demucs，还需要匹配的 torchaudio）=====
+# sentence-transformers 已经会安装 torch；启用该可选功能时请按 README 安装与当前 torch 匹配的 torchaudio 和 demucs。
