@@ -3,6 +3,7 @@ import { useState } from 'react'
 import SentenceCard from '../components/SentenceCard'
 import TrainingFlow from '../components/TrainingFlow'
 import { API_BASE_URL } from '../api/lesson'
+import { getDevStageOverride } from '../training/devStageJump'
 import type { Lesson } from '../types/lesson'
 import TrainingSession from './TrainingSession'
 
@@ -23,7 +24,10 @@ const AI_STATUS_STYLES: Record<Lesson['ai']['status'], string> = {
 }
 
 export default function LessonViewer({ lesson }: LessonViewerProps) {
-  const [isTraining, setIsTraining] = useState(false)
+  const [isTraining, setIsTraining] = useState(
+    () =>
+      getDevStageOverride(window.location.search, import.meta.env.DEV) !== null,
+  )
   const audioUrl = lesson.audio_url
     ? `${API_BASE_URL}${lesson.audio_url}`
     : null
