@@ -335,7 +335,7 @@ async def api_transcribe(audio: UploadFile = File(...)):
 def _clean_doc_text(t: str) -> str:
     """整理提取出的文本：去 PDF 断词换行、段内换行合成空格、保留段落分隔（每段一行）。
     这样前端 splitSentences 只按句末标点切句，不会被 PDF 的行内换行错切。"""
-    t = t.replace("\r", "\n")
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
     t = re.sub(r"-\n(\w)", r"\1", t)                 # 修 PDF 常见的断词换行 exam-\nple -> example
     out = []
     for para in re.split(r"\n\s*\n+", t):            # 空行分段
