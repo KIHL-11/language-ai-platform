@@ -173,18 +173,36 @@ _load_azure_from_file()
 
 def _to_wav16k(raw: bytes, suffix: str) -> str:
     """把上传的音频(webm/ogg/wav…)用 ffmpeg 转成 Azure 要的 16k 单声道 16bit PCM wav，返回临时文件路径。"""
-    fin = tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=False)
-    fin.write(raw); fin.close()
-    fout = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); fout.close()
+    input_path = ""
+    output_path = ""
+    transcode_succeeded = False
     try:
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=False) as fin:
+            input_path = fin.name
+            fin.write(raw)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fout:
+            output_path = fout.name
         subprocess.run(
-            ["ffmpeg", "-y", "-i", fin.name, "-ar", "16000", "-ac", "1", "-f", "wav", fout.name],
-            check=True, capture_output=True,
+            [
+                "ffmpeg", "-y", "-i", input_path,
+                "-ar", "16000", "-ac", "1", "-f", "wav", output_path,
+            ],
+            check=True,
+            capture_output=True,
         )
+        transcode_succeeded = True
+        return output_path
     finally:
-        try: os.unlink(fin.name)
-        except OSError: pass
-    return fout.name
+        if input_path:
+            try:
+                os.unlink(input_path)
+            except OSError:
+                pass
+        if output_path and not transcode_succeeded:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
 
 
 def _assess(wav_path: str, reference_text: str, language: str) -> dict:
