@@ -8,6 +8,7 @@ python-multipart==0.0.32
 requests>=2.31,<3
 python-dotenv>=1.0,<2
 pytest>=8,<9
+httpx2==2.13.1
 
 # TTS：自然嗓音 + 词级时间点
 edge-tts==7.2.8
