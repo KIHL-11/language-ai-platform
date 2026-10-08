@@ -315,13 +315,20 @@ def extract_media(
     sentences = []
     source = None
     vtt_paths = glob.glob(str(MEDIA / f"{video_id}*.vtt"))
-    if vtt_paths:
-        cues = parse_vtt(_select_vtt(vtt_paths, source_language))
-        if start is not None and end is not None:
-            cues = [cue for cue in cues if cue[1] > start and cue[0] < end]
-        sentences = cues_to_sentences(cues, offset)
-        if sentences:
-            source = "subtitles"
+    try:
+        if vtt_paths:
+            cues = parse_vtt(_select_vtt(vtt_paths, source_language))
+            if start is not None and end is not None:
+                cues = [cue for cue in cues if cue[1] > start and cue[0] < end]
+            sentences = cues_to_sentences(cues, offset)
+            if sentences:
+                source = "subtitles"
+    finally:
+        for vtt_path in vtt_paths:
+            try:
+                Path(vtt_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     if not sentences and audio_file:
         sentences = whisper_transcribe(str(MEDIA / audio_file), source_language)
