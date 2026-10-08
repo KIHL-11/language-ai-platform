@@ -1,9 +1,4 @@
-import {
-  OpenAIRealtimeWebRTC,
-  RealtimeAgent,
-  RealtimeSession,
-  type RealtimeItem,
-} from '@openai/agents/realtime'
+import type { RealtimeItem } from '@openai/agents/realtime'
 
 import {
   createRealtimeClientCredential,
@@ -46,7 +41,7 @@ export interface OpenAIRealtimeDependencies {
     credential: RealtimeClientCredential,
     context: VoiceDialogueContext,
     mediaStream: MediaStream,
-  ) => RealtimeSessionAdapter
+  ) => RealtimeSessionAdapter | Promise<RealtimeSessionAdapter>
   setTimeout: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>
   clearTimeout: (timer: ReturnType<typeof setTimeout>) => void
 }
@@ -98,11 +93,16 @@ export function transcriptFromRealtimeItem(
   }
 }
 
-function createSdkSession(
+async function createSdkSession(
   credential: RealtimeClientCredential,
   context: VoiceDialogueContext,
   mediaStream: MediaStream,
-): RealtimeSessionAdapter {
+): Promise<RealtimeSessionAdapter> {
+  const {
+    OpenAIRealtimeWebRTC,
+    RealtimeAgent,
+    RealtimeSession,
+  } = await import('@openai/agents/realtime')
   const transport = new OpenAIRealtimeWebRTC({ mediaStream })
   const agent = new RealtimeAgent({
     name: 'Language learning conversation partner',
@@ -238,7 +238,11 @@ export class OpenAIRealtimeDialogueProvider implements VoiceLiveDialogueProvider
     try {
       const credential = await this.dependencies.fetchCredential()
       this.mediaStream = await this.dependencies.getUserMedia()
-      this.session = this.dependencies.createSession(credential, context, this.mediaStream)
+      this.session = await this.dependencies.createSession(
+        credential,
+        context,
+        this.mediaStream,
+      )
       this.unsubscribeSession = this.session.subscribe({
         onHistory: (items) => this.handleHistory(items),
         onPartnerSpeaking: (speaking) => {
