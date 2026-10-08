@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 
 import { createLessonFromUrl } from '../api/lesson'
 import LessonViewer from './LessonViewer'
+import MediaDiscovery from '../components/MediaDiscovery'
 import type {
   Lesson,
   LessonLevel,
@@ -16,29 +17,35 @@ export default function LessonGenerator() {
   const [lesson, setLesson] = useState<Lesson | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [mode, setMode] = useState<'url' | 'discovery'>('url')
+  const generating = useRef(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (mode === 'url') await generateLesson(url)
+  }
+
+  async function generateLesson(selectedUrl: string) {
+    if (generating.current) return
+    generating.current = true
+    setUrl(selectedUrl)
     setError(null)
     setIsLoading(true)
 
     try {
       const result = await createLessonFromUrl({
-        url,
+        url: selectedUrl,
         source_language: sourceLanguage,
         target_language: 'zh-CN',
         level,
         vocals: false,
       })
       setLesson(result)
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : 'Lesson generation failed. Try again.',
-      )
+    } catch {
+      setError('Lesson generation failed. Please try again.')
     } finally {
       setIsLoading(false)
+      generating.current = false
     }
   }
 
@@ -63,11 +70,15 @@ export default function LessonGenerator() {
             Generate a lesson
           </h1>
 
+          <div role="group" className="mt-6 flex flex-wrap gap-3" aria-label="Lesson creation mode">
+            <button type="button" aria-pressed={mode === 'url'} disabled={isLoading} onClick={() => setMode('url')} className="min-h-11 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white focus:ring-2 focus:ring-[#176b5b]">Paste Video URL</button>
+            <button type="button" aria-pressed={mode === 'discovery'} disabled={isLoading} onClick={() => setMode('discovery')} className="min-h-11 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white focus:ring-2 focus:ring-[#176b5b]">Find a Video for Me</button>
+          </div>
           <form
             className="mt-8 border-y border-[#ccd6d1] bg-white px-5 py-6 sm:px-6"
             onSubmit={handleSubmit}
           >
-            <div>
+            {mode === 'url' && <div>
               <label
                 className="mb-2 block text-sm font-medium text-[#34413d]"
                 htmlFor="youtube-url"
@@ -83,7 +94,7 @@ export default function LessonGenerator() {
                 required
                 className="h-12 w-full border border-[#aebcb6] bg-white px-3.5 text-base outline-none transition-colors placeholder:text-[#8b9792] focus:border-[#176b5b] focus:ring-2 focus:ring-[#176b5b]/20"
               />
-            </div>
+            </div>}
 
             <div className="mt-5 grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
               <div className="min-w-0">
@@ -96,6 +107,7 @@ export default function LessonGenerator() {
                 <select
                   id="source-language"
                   value={sourceLanguage}
+                  disabled={isLoading}
                   onChange={(event) =>
                     setSourceLanguage(event.target.value as SourceLanguage)
                   }
@@ -116,6 +128,7 @@ export default function LessonGenerator() {
                 <select
                   id="lesson-level"
                   value={level}
+                  disabled={isLoading}
                   onChange={(event) =>
                     setLevel(event.target.value as LessonLevel)
                   }
@@ -127,15 +140,17 @@ export default function LessonGenerator() {
                 </select>
               </div>
 
-              <button
+              {mode === 'url' && <button
                 type="submit"
                 disabled={isLoading}
                 className="h-11 bg-[#176b5b] px-6 text-sm font-semibold text-white transition-colors hover:bg-[#115548] focus:outline-none focus:ring-2 focus:ring-[#176b5b] focus:ring-offset-2 disabled:cursor-wait disabled:bg-[#7d9992]"
               >
                 {isLoading ? 'Generating...' : 'Generate Lesson'}
-              </button>
+              </button>}
             </div>
           </form>
+          {mode === 'discovery' && <MediaDiscovery key={sourceLanguage} sourceLanguage={sourceLanguage} isGenerating={isLoading} onSelect={generateLesson} />}
+          {mode === 'discovery' && isLoading && <p role="status">Generating lesson...</p>}
         </section>
 
         <div className="mt-6 min-h-7" aria-live="polite">
