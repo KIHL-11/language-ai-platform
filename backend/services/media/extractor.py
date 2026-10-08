@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -197,31 +198,35 @@ def whisper_transcribe(path: str, source_language: str) -> list[dict]:
 
 
 def separate_vocals(audio_path: str) -> str:
-    outdir = MEDIA / "_demucs"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "demucs",
-            "--two-stems=vocals",
-            "--mp3",
-            "-o",
-            str(outdir),
-            audio_path,
-        ],
-        check=True,
-        capture_output=True,
-    )
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    found = glob.glob(str(outdir / "*" / base / "vocals.mp3"))
-    if not found:
-        raise RuntimeError("Demucs did not produce a vocals file")
-    destination = MEDIA / f"{base}.vocals.mp3"
-    if destination.exists():
-        destination.unlink()
-    shutil.move(found[0], destination)
-    shutil.rmtree(outdir, ignore_errors=True)
-    return str(destination)
+    output_root = MEDIA / "_demucs"
+    output_root.mkdir(parents=True, exist_ok=True)
+    outdir = Path(tempfile.mkdtemp(prefix=f"{base}-", dir=output_root))
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "demucs",
+                "--two-stems=vocals",
+                "--mp3",
+                "-o",
+                str(outdir),
+                audio_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        found = glob.glob(str(outdir / "*" / base / "vocals.mp3"))
+        if not found:
+            raise RuntimeError("Demucs did not produce a vocals file")
+        destination = MEDIA / f"{base}.vocals.mp3"
+        if destination.exists():
+            destination.unlink()
+        shutil.move(found[0], destination)
+        return str(destination)
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
 
 
 def _select_vtt(paths: list[str], source_language: str) -> str:
