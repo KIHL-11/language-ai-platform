@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -319,14 +320,22 @@ async def set_azure_config(request: Request):
 # ---------- 基础识别（本地 Whisper，免费离线；跟读没配 Azure 时的兜底，不依赖 Google）----------
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
 _whisper = None
+_whisper_init_lock = threading.Lock()
 
 
 def _transcribe_text(wav_path: str) -> str:
     """对一小段录音做本地转写，返回整段文字（用于跟读"基础"引擎的文字匹配）。"""
     global _whisper
     if _whisper is None:
-        from faster_whisper import WhisperModel
-        _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=6)
+        with _whisper_init_lock:
+            if _whisper is None:
+                from faster_whisper import WhisperModel
+                _whisper = WhisperModel(
+                    WHISPER_MODEL,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=6,
+                )
     segs, _ = _whisper.transcribe(wav_path, language="en", beam_size=1, condition_on_previous_text=False)
     return " ".join(s.text.strip() for s in segs).strip()
 
