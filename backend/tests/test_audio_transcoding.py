@@ -1,6 +1,8 @@
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +51,83 @@ def test_transcribe_text_initializes_local_whisper_model(monkeypatch, tmp_path):
         "beam_size": 1,
         "condition_on_previous_text": False,
     }
+
+
+def test_transcribe_text_initializes_model_once_for_concurrent_first_use(
+    monkeypatch,
+):
+    constructor_count = 0
+    constructor_count_lock = threading.Lock()
+    second_constructor_entered = threading.Event()
+    start_calls = threading.Barrier(2)
+
+    class FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            nonlocal constructor_count
+            with constructor_count_lock:
+                constructor_count += 1
+                call_number = constructor_count
+            if call_number == 1:
+                second_constructor_entered.wait(timeout=0.5)
+            else:
+                second_constructor_entered.set()
+
+        def transcribe(self, path, **kwargs):
+            return [SimpleNamespace(text=path)], None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    original_whisper = app_module._whisper
+    app_module._whisper = None
+
+    def transcribe(path):
+        start_calls.wait()
+        return app_module._transcribe_text(path)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(transcribe, ["first.wav", "second.wav"]))
+    finally:
+        app_module._whisper = original_whisper
+
+    assert constructor_count == 1
+    assert sorted(results) == ["first.wav", "second.wav"]
+
+
+def test_transcribe_text_retries_after_model_initialization_failure(monkeypatch):
+    constructor_count = 0
+
+    class FlakyWhisperModel:
+        def __init__(self, *args, **kwargs):
+            nonlocal constructor_count
+            constructor_count += 1
+            if constructor_count == 1:
+                raise RuntimeError("model initialization failed")
+
+        def transcribe(self, path, **kwargs):
+            return [SimpleNamespace(text="recovered")], None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FlakyWhisperModel),
+    )
+    original_whisper = app_module._whisper
+    app_module._whisper = None
+
+    try:
+        with pytest.raises(RuntimeError, match="model initialization failed"):
+            app_module._transcribe_text("first.wav")
+
+        assert app_module._whisper is None
+        assert app_module._transcribe_text("second.wav") == "recovered"
+    finally:
+        app_module._whisper = original_whisper
+
+    assert constructor_count == 2
 
 
 def test_failed_transcode_removes_all_temporary_files(monkeypatch, tmp_path):
