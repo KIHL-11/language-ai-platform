@@ -5,6 +5,7 @@ import type { Lesson } from '../types/lesson'
 import {
   OpenAIRealtimeDialogueProvider,
   transcriptFromRealtimeItem,
+  type OpenAIRealtimeDependencies,
   type RealtimeSessionAdapter,
 } from './openAIRealtimeDialogueProvider'
 import type { VoiceDialogueContext, VoiceEndReason } from './voiceLiveDialogueProvider'
@@ -70,10 +71,13 @@ function setupProvider() {
     model: 'gpt-realtime-2.1-mini',
     voice: 'marin',
   })
+  const createSession = vi.fn<OpenAIRealtimeDependencies['createSession']>(
+    () => adapter,
+  )
   const provider = new OpenAIRealtimeDialogueProvider({
     fetchCredential,
     getUserMedia,
-    createSession: vi.fn(() => adapter),
+    createSession,
   })
   return {
     provider,
@@ -81,6 +85,7 @@ function setupProvider() {
     stop,
     getUserMedia,
     fetchCredential,
+    createSession,
     callbacks: () => {
       if (!callbacks) {
         throw new Error('Session callbacks are not ready.')
@@ -125,6 +130,16 @@ describe('OpenAIRealtimeDialogueProvider', () => {
       role: 'partner',
       text: 'What did you see?',
     })
+  })
+
+  it('awaits asynchronous session loading before connecting', async () => {
+    const fixture = setupProvider()
+    fixture.createSession.mockImplementationOnce(async () => fixture.adapter)
+
+    await fixture.provider.connect(context)
+
+    expect(fixture.createSession).toHaveBeenCalledTimes(1)
+    expect(fixture.adapter.connect).toHaveBeenCalledWith('ek_test_only')
   })
 
   it('deduplicates history events and reports interruption', async () => {
