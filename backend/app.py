@@ -317,6 +317,10 @@ async def set_azure_config(request: Request):
 
 
 # ---------- 基础识别（本地 Whisper，免费离线；跟读没配 Azure 时的兜底，不依赖 Google）----------
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+_whisper = None
+
+
 def _transcribe_text(wav_path: str) -> str:
     """对一小段录音做本地转写，返回整段文字（用于跟读"基础"引擎的文字匹配）。"""
     global _whisper
