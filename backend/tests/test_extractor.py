@@ -1,7 +1,14 @@
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from services.media import extractor as extractor_module
 from services.media.extractor import (
     get_subtitle_languages,
     get_whisper_model,
     normalize_sentences,
+    separate_vocals,
 )
 
 
@@ -24,3 +31,41 @@ def test_normalize_sentences_assigns_ids_and_float_seconds():
     )
 
     assert normalized == [{"id": 1, "text": "Hallo.", "start": 1.0, "end": 2.75}]
+
+
+def test_separate_vocals_preserves_other_job_outputs(monkeypatch, tmp_path):
+    shared_output = tmp_path / "_demucs"
+    other_job_marker = shared_output / "other-job" / "in-progress"
+    other_job_marker.parent.mkdir(parents=True)
+    other_job_marker.write_text("keep", encoding="utf-8")
+
+    def fake_demucs(command, **kwargs):
+        output_dir = Path(command[command.index("-o") + 1])
+        source_name = Path(command[-1]).stem
+        vocals = output_dir / "model" / source_name / "vocals.mp3"
+        vocals.parent.mkdir(parents=True)
+        vocals.write_bytes(b"vocals")
+
+    monkeypatch.setattr(extractor_module, "MEDIA", tmp_path)
+    monkeypatch.setattr(extractor_module.subprocess, "run", fake_demucs)
+
+    result = Path(separate_vocals(str(tmp_path / "lesson.mp3")))
+
+    assert result.read_bytes() == b"vocals"
+    assert other_job_marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_separate_vocals_cleans_partial_output_after_failure(monkeypatch, tmp_path):
+    def fail_demucs(command, **kwargs):
+        output_dir = Path(command[command.index("-o") + 1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "partial.tmp").write_text("partial", encoding="utf-8")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(extractor_module, "MEDIA", tmp_path)
+    monkeypatch.setattr(extractor_module.subprocess, "run", fail_demucs)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        separate_vocals(str(tmp_path / "lesson.mp3"))
+
+    assert list(tmp_path.rglob("partial.tmp")) == []
