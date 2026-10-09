@@ -13,6 +13,20 @@ from services.schemas.lesson import SourceLanguage
 
 
 MediaAvailability = Literal["public", "private", "unavailable", "unknown"]
+TrainingGoal = Literal[
+    "general",
+    "blind_listening",
+    "comprehension",
+    "mini_dictation",
+    "shadowing",
+    "retell",
+]
+SCORE_COMPONENT_MAXIMA = {
+    "subtitle_quality": 30,
+    "query_relevance": 30,
+    "duration_fit": 20,
+    "training_goal_fit": 20,
+}
 
 
 class DiscoveryModel(BaseModel):
@@ -25,6 +39,7 @@ class MediaDiscoveryRequest(DiscoveryModel):
     min_duration_seconds: int = Field(default=60, ge=0, le=14_400)
     max_duration_seconds: int = Field(default=1_800, ge=1, le=14_400)
     limit: int = Field(default=5, ge=1, le=10)
+    training_goal: TrainingGoal = "general"
 
     @field_validator("query")
     @classmethod
@@ -51,9 +66,32 @@ class SubtitleTrackSummary(DiscoveryModel):
     has_automatic: bool = False
 
 
+class LearningSuitabilityBreakdown(DiscoveryModel):
+    subtitle_quality: float = Field(
+        ge=0, le=SCORE_COMPONENT_MAXIMA["subtitle_quality"]
+    )
+    query_relevance: float = Field(
+        ge=0, le=SCORE_COMPONENT_MAXIMA["query_relevance"]
+    )
+    duration_fit: float = Field(
+        ge=0, le=SCORE_COMPONENT_MAXIMA["duration_fit"]
+    )
+    training_goal_fit: float = Field(
+        ge=0, le=SCORE_COMPONENT_MAXIMA["training_goal_fit"]
+    )
+
+
 class LearningSuitabilityScore(DiscoveryModel):
     total: float = Field(ge=0, le=100)
-    reasons: list[str] = Field(min_length=3, max_length=3)
+    breakdown: LearningSuitabilityBreakdown
+    reasons: list[str] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_component_total(self):
+        component_total = round(sum(self.breakdown.model_dump().values()), 2)
+        if self.total != component_total:
+            raise ValueError("total must equal the sum of suitability components")
+        return self
 
 
 class MediaCandidate(DiscoveryModel):

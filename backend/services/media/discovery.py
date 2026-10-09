@@ -8,12 +8,12 @@ from urllib.parse import urlsplit
 from yt_dlp import YoutubeDL
 
 from services.schemas.media_discovery import (
-    LearningSuitabilityScore,
     MediaAvailability,
     MediaCandidate,
     MediaDiscoveryRequest,
     SubtitleTrackSummary,
 )
+from services.media.ranking import score_candidate
 
 
 MAX_PROVIDER_RESULTS = 25
@@ -200,55 +200,6 @@ def _caption_kind(
     return None
 
 
-def _terms(value: str) -> set[str]:
-    return {term for term in re.findall(r"\w+", value.casefold()) if term}
-
-
-def _score(
-    result: VideoSearchResult,
-    request: MediaDiscoveryRequest,
-    caption_kind: str,
-) -> LearningSuitabilityScore:
-    caption_score = 70 if caption_kind == "human" else 35
-    caption_reason = (
-        f"Human subtitles are available for target language "
-        f"'{request.target_language}'."
-        if caption_kind == "human"
-        else f"Automatic captions are available for target language "
-        f"'{request.target_language}'."
-    )
-
-    query_terms = _terms(request.query)
-    metadata_terms = _terms(f"{result.title} {result.channel or ''}")
-    matches = len(query_terms & metadata_terms)
-    query_score = 20 * matches / len(query_terms) if query_terms else 0
-    query_reason = (
-        f"Title/channel matches {matches} of {len(query_terms)} query terms."
-    )
-
-    duration = result.duration_seconds or 0
-    minimum = request.min_duration_seconds
-    maximum = request.max_duration_seconds
-    if maximum == minimum:
-        duration_score = 10.0
-    else:
-        midpoint = (minimum + maximum) / 2
-        half_range = (maximum - minimum) / 2
-        duration_score = max(0.0, 10 * (1 - abs(duration - midpoint) / half_range))
-    duration_label = (
-        int(duration) if float(duration).is_integer() else round(duration, 2)
-    )
-    duration_reason = (
-        f"Duration {duration_label}s is within the requested "
-        f"{minimum}-{maximum}s range."
-    )
-
-    return LearningSuitabilityScore(
-        total=round(caption_score + query_score + duration_score, 2),
-        reasons=[caption_reason, query_reason, duration_reason],
-    )
-
-
 class MediaDiscoveryService:
     def __init__(self, provider: VideoSearchProvider):
         self._provider = provider
@@ -298,7 +249,7 @@ class MediaDiscoveryService:
                     is_live=result.is_live,
                     availability=result.availability,
                     subtitle_tracks=result.subtitle_tracks,
-                    suitability=_score(result, request, caption_kind),
+                    suitability=score_candidate(result, request, caption_kind),
                 )
             )
 
