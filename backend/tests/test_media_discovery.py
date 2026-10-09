@@ -78,8 +78,8 @@ def request(**overrides):
 def test_human_subtitles_always_rank_above_automatic_captions():
     provider = FakeProvider(
         [
-            result("auto", title="Perfect English lesson", automatic=True),
-            result("human", title="Unrelated title", human=True),
+            result("auto", automatic=True),
+            result("human", human=True),
         ]
     )
 
@@ -154,9 +154,10 @@ def test_ranking_reasons_are_deterministic_and_explain_components():
 
     assert first == second
     assert first.reasons == [
-        "Human subtitles are available for target language 'en'.",
-        "Title/channel matches 2 of 2 query terms.",
-        "Duration 630s is within the requested 60-1200s range.",
+        "Human English subtitles available.",
+        "Title or channel closely matches your search topic.",
+        "Duration is near the center of your requested 1–20 minute range.",
+        "For this search, general practice uses your requested duration range.",
     ]
 
 
@@ -295,6 +296,9 @@ def test_api_returns_urls_accepted_by_existing_lesson_contract(monkeypatch):
 
     assert response.status_code == 200
     candidate = response.json()[0]
+    assert set(candidate["suitability"]) == {"total", "breakdown", "reasons"}
+    assert isinstance(candidate["suitability"]["total"], (int, float))
+    assert isinstance(candidate["suitability"]["reasons"], list)
     lesson_input = LessonFromUrlRequest(
         url=candidate["url"], source_language="en"
     )
