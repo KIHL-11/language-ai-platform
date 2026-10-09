@@ -35,6 +35,44 @@ async function openSearch() {
   return user
 }
 
+it('defaults Practice Goal to General and offers every backend-supported goal', async () => {
+  await openSearch()
+  const goal = screen.getByLabelText('Practice Goal') as HTMLSelectElement
+
+  expect(goal).toHaveValue('general')
+  expect(Array.from(goal.options, option => [option.value, option.text])).toEqual([
+    ['general', 'General'],
+    ['blind_listening', 'Blind Listening'],
+    ['comprehension', 'Comprehension'],
+    ['mini_dictation', 'Mini Dictation'],
+    ['shadowing', 'Shadowing'],
+    ['retell', 'Retell'],
+  ])
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['Shadowing', 'shadowing'],
+  ['Mini Dictation', 'mini_dictation'],
+])('sends the selected %s practice goal only after explicit search', async (label, value) => {
+  fetchMock.mockResolvedValue(response([]))
+  const user = await openSearch()
+
+  await user.selectOptions(screen.getByLabelText('Practice Goal'), value)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(screen.queryByRole('heading', { name: lesson.title })).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole('button', { name: 'Find videos' }))
+
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+    training_goal: value,
+  })
+  const selectedGoal = screen.getByLabelText('Practice Goal') as HTMLSelectElement
+  expect(selectedGoal).toHaveValue(value)
+  expect(selectedGoal.selectedOptions[0]).toHaveTextContent(label)
+})
+
 it('preserves URL generation and training navigation', async () => {
   fetchMock.mockResolvedValue(response(lesson))
   const user = userEvent.setup()
@@ -56,7 +94,7 @@ it('submits the backend contract and renders ranked captions without creating a 
   await user.click(screen.getByRole('button', { name: 'Find videos' }))
   expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/media\/discover$/)
-  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ query: 'science', target_language: 'de', min_duration_seconds: 60, max_duration_seconds: 1800, limit: 5 })
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ query: 'science', target_language: 'de', min_duration_seconds: 60, max_duration_seconds: 1800, limit: 5, training_goal: 'general' })
   expect(await screen.findByText(candidate.title)).toBeInTheDocument()
   expect(screen.getByText('Science channel · 2:05')).toBeInTheDocument()
   expect(screen.getByText('en: Human subtitles')).toBeInTheDocument()

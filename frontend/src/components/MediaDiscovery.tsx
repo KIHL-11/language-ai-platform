@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { discoverMedia, safeMediaUrl } from '../api/mediaDiscovery'
 import type { SourceLanguage } from '../types/lesson'
-import type { MediaCandidate } from '../types/mediaDiscovery'
+import type { MediaCandidate, TrainingGoal } from '../types/mediaDiscovery'
 
 interface Props {
   sourceLanguage: SourceLanguage
@@ -11,12 +11,21 @@ interface Props {
 
 const inputStyle = 'h-11 w-full border border-[#aebcb6] bg-white px-3 focus:ring-2 focus:ring-[#176b5b]/20'
 const buttonStyle = 'min-h-11 bg-[#176b5b] px-5 py-2 text-sm font-semibold text-white focus:ring-2 focus:ring-[#176b5b] focus:ring-offset-2 disabled:opacity-50'
+const practiceGoals: ReadonlyArray<{ value: TrainingGoal; label: string }> = [
+  { value: 'general', label: 'General' },
+  { value: 'blind_listening', label: 'Blind Listening' },
+  { value: 'comprehension', label: 'Comprehension' },
+  { value: 'mini_dictation', label: 'Mini Dictation' },
+  { value: 'shadowing', label: 'Shadowing' },
+  { value: 'retell', label: 'Retell' },
+]
 
 export default function MediaDiscovery({ sourceLanguage, isGenerating, onSelect }: Props) {
   const [query, setQuery] = useState('')
   const [minimum, setMinimum] = useState('60')
   const [maximum, setMaximum] = useState('1800')
   const [limit, setLimit] = useState('5')
+  const [practiceGoal, setPracticeGoal] = useState<TrainingGoal>('general')
   const [results, setResults] = useState<MediaCandidate[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -49,7 +58,8 @@ export default function MediaDiscovery({ sourceLanguage, isGenerating, onSelect 
     setResults(null)
     try {
       const candidates = await discoverMedia({ query: query.trim(), target_language: sourceLanguage,
-        min_duration_seconds: min, max_duration_seconds: max, limit: count }, request.signal)
+        training_goal: practiceGoal, min_duration_seconds: min, max_duration_seconds: max,
+        limit: count }, request.signal)
       if (controller.current === request) setResults(candidates)
     } catch (caught) {
       if (controller.current === request) setError(caught instanceof Error ? caught.message : 'Video search failed. Please try again.')
@@ -67,6 +77,17 @@ export default function MediaDiscovery({ sourceLanguage, isGenerating, onSelect 
         <input className={inputStyle} value={query} required maxLength={200}
           onChange={event => { invalidate(); setQuery(event.target.value) }} />
       </label>
+      <div className="max-w-sm">
+        <label className="block" htmlFor="practice-goal">Practice Goal</label>
+        <select id="practice-goal" className={inputStyle} value={practiceGoal}
+          aria-describedby="practice-goal-help"
+          onChange={event => { invalidate(); setPracticeGoal(event.target.value as TrainingGoal) }}>
+          {practiceGoals.map(goal => <option key={goal.value} value={goal.value}>{goal.label}</option>)}
+        </select>
+        <p id="practice-goal-help" className="mt-1 text-sm text-[#596560]">
+          Choose a goal to rank videos for the practice you want to do.
+        </p>
+      </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <label>Minimum duration (seconds)<input className={inputStyle} type="number" required min={0} max={14400} step={1} value={minimum} onChange={event => { invalidate(); setMinimum(event.target.value) }} /></label>
         <label>Maximum duration (seconds)<input className={inputStyle} type="number" required min={1} max={14400} step={1} value={maximum} onChange={event => { invalidate(); setMaximum(event.target.value) }} /></label>
