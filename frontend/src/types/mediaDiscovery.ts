@@ -1,8 +1,17 @@
 import type { SourceLanguage } from './lesson'
 
+export type TrainingGoal =
+  | 'general'
+  | 'blind_listening'
+  | 'comprehension'
+  | 'mini_dictation'
+  | 'shadowing'
+  | 'retell'
+
 export interface MediaDiscoveryRequest {
   query: string
   target_language: SourceLanguage
+  training_goal: TrainingGoal
   min_duration_seconds: number
   max_duration_seconds: number
   limit: number
