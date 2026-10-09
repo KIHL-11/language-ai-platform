@@ -2,6 +2,7 @@ import json
 
 import app as app_module
 from fastapi.testclient import TestClient
+from yt_dlp.utils import DownloadError
 
 from services.ai.llm_client import LLMRateLimitError, llm
 from services.api import lesson_api
@@ -140,3 +141,40 @@ def test_lesson_from_url_returns_fallback_lesson_on_ai_429(monkeypatch):
     assert response.json()["sentences"][0]["text"] == "Hello world."
     assert response.json()["sentences"][0]["ai_status"] == "failed"
     assert response.json()["ai"]["status"] == "failed"
+
+
+def test_lesson_from_url_accepts_whisper_fallback_transcript(monkeypatch):
+    extracted = extracted_media()
+    extracted["source"] = "whisper"
+    extracted["sentences"][0]["text"] = "Fallback transcript."
+    monkeypatch.setattr(
+        lesson_api,
+        "extract_media",
+        lambda url, start, end, vocals, source_language: extracted,
+    )
+    monkeypatch.setattr(llm, "chat", lambda messages: ai_response())
+
+    response = client.post(
+        "/api/lesson/from-url",
+        json={"url": "https://youtu.be/short", "source_language": "en"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "whisper"
+    assert response.json()["sentences"][0]["text"] == "Fallback transcript."
+
+
+def test_lesson_from_url_returns_controlled_error_for_media_failure(monkeypatch):
+    def fail_media(url, start, end, vocals, source_language):
+        raise DownloadError("Media download failed")
+
+    monkeypatch.setattr(lesson_api, "extract_media", fail_media)
+
+    response = client.post(
+        "/api/lesson/from-url",
+        json={"url": "https://youtu.be/unavailable", "source_language": "en"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Media download failed"}
+    assert "Traceback" not in response.text

@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import download_range_func
+from yt_dlp.utils import DownloadError, download_range_func
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -239,6 +239,18 @@ def _select_vtt(paths: list[str], source_language: str) -> str:
     return sorted(paths)[0]
 
 
+def _cleanup_job_files(video_id: str, keep: str | None = None) -> None:
+    keep_path = Path(keep).resolve() if keep else None
+    for path in MEDIA.glob(f"{video_id}*"):
+        try:
+            if keep_path is not None and path.resolve() == keep_path:
+                continue
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def extract_media(
     url: str,
     start: float | None,
@@ -252,26 +264,12 @@ def extract_media(
     accept_language = (
         "de-DE,de;q=0.9,en;q=0.8" if source_language == "de" else "en-US,en;q=0.9,zh-CN;q=0.8"
     )
-    options = {
-        "format": "18/bestaudio/best",
+    common_options = {
         "outtmpl": str(MEDIA / f"{video_id}.%(ext)s"),
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": subtitle_languages,
-        "subtitlesformat": "vtt",
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "128",
-            }
-        ],
         "quiet": False,
         "no_warnings": False,
         "noplaylist": True,
         "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
         "http_headers": {
             "User-Agent": UA,
             "Accept-Language": accept_language,
@@ -286,36 +284,72 @@ def extract_media(
         if candidate.exists():
             cookie_file = str(candidate)
     if cookie_file and os.path.exists(cookie_file):
-        options["cookiefile"] = cookie_file
+        common_options["cookiefile"] = cookie_file
 
     cookie_browser = os.getenv("YT_COOKIES_BROWSER")
     if cookie_browser:
-        options["cookiesfrombrowser"] = (cookie_browser,)
+        common_options["cookiesfrombrowser"] = (cookie_browser,)
+
+    subtitle_options = {
+        **common_options,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": subtitle_languages,
+        "subtitlesformat": "vtt",
+        "skip_download": True,
+        "retries": 0,
+        "fragment_retries": 0,
+    }
+    try:
+        with YoutubeDL(subtitle_options) as downloader:
+            downloader.extract_info(url, download=True)
+    except DownloadError:
+        _cleanup_job_files(video_id)
+    except Exception:
+        _cleanup_job_files(video_id)
+        raise
+
+    media_options = {
+        **common_options,
+        "format": "18/bestaudio/best",
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "128",
+            }
+        ],
+        "retries": 5,
+        "fragment_retries": 5,
+    }
 
     if start is not None and end is not None and end > start:
-        options["download_ranges"] = download_range_func(None, [(start, end)])
-        options["force_keyframes_at_cuts"] = True
+        media_options["download_ranges"] = download_range_func(
+            None, [(start, end)]
+        )
+        media_options["force_keyframes_at_cuts"] = True
 
-    with YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=True)
-
-    mp3_paths = glob.glob(str(MEDIA / f"{video_id}*.mp3"))
-    audio_file = os.path.basename(mp3_paths[0]) if mp3_paths else None
-    offset = start if start is not None and end is not None else 0.0
-    vocals_ok = None
-
-    if vocals and audio_file:
-        try:
-            vocals_path = separate_vocals(str(MEDIA / audio_file))
-            audio_file = os.path.basename(vocals_path)
-            vocals_ok = True
-        except Exception:
-            vocals_ok = False
-
-    sentences = []
-    source = None
-    vtt_paths = glob.glob(str(MEDIA / f"{video_id}*.vtt"))
+    keep_audio = None
     try:
+        with YoutubeDL(media_options) as downloader:
+            info = downloader.extract_info(url, download=True)
+
+        mp3_paths = glob.glob(str(MEDIA / f"{video_id}*.mp3"))
+        audio_file = os.path.basename(mp3_paths[0]) if mp3_paths else None
+        offset = start if start is not None and end is not None else 0.0
+        vocals_ok = None
+
+        if vocals and audio_file:
+            try:
+                vocals_path = separate_vocals(str(MEDIA / audio_file))
+                audio_file = os.path.basename(vocals_path)
+                vocals_ok = True
+            except Exception:
+                vocals_ok = False
+
+        sentences = []
+        source = None
+        vtt_paths = glob.glob(str(MEDIA / f"{video_id}*.vtt"))
         if vtt_paths:
             cues = parse_vtt(_select_vtt(vtt_paths, source_language))
             if start is not None and end is not None:
@@ -323,24 +357,24 @@ def extract_media(
             sentences = cues_to_sentences(cues, offset)
             if sentences:
                 source = "subtitles"
+
+        if not sentences and audio_file:
+            sentences = whisper_transcribe(str(MEDIA / audio_file), source_language)
+            if sentences:
+                source = "whisper"
+
+        if source and audio_file:
+            keep_audio = str(MEDIA / audio_file)
+
+        return {
+            "title": info.get("title", ""),
+            "audio_url": f"/media/{audio_file}" if keep_audio else None,
+            "sentences": normalize_sentences(sentences),
+            "source": source,
+            "vocals": vocals_ok,
+        }
     finally:
-        for vtt_path in vtt_paths:
-            try:
-                Path(vtt_path).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    if not sentences and audio_file:
-        sentences = whisper_transcribe(str(MEDIA / audio_file), source_language)
-        source = "whisper"
-
-    return {
-        "title": info.get("title", ""),
-        "audio_url": f"/media/{audio_file}" if audio_file else None,
-        "sentences": normalize_sentences(sentences),
-        "source": source,
-        "vocals": vocals_ok,
-    }
+        _cleanup_job_files(video_id, keep=keep_audio)
 
 
 run_extract = extract_media
