@@ -5,14 +5,20 @@ from services.media.discovery import (
     VideoSearchProviderError,
     YtDlpVideoSearchProvider,
 )
+from services.media.subtitle_enrichment import YtDlpSubtitleEnrichmentProvider
 from services.schemas.media_discovery import MediaCandidate, MediaDiscoveryRequest
 
 
 router = APIRouter()
-discovery_service = MediaDiscoveryService(YtDlpVideoSearchProvider())
+discovery_service = MediaDiscoveryService(
+    YtDlpVideoSearchProvider(), YtDlpSubtitleEnrichmentProvider()
+)
 
 
-@router.post("/media/discover", response_model=list[MediaCandidate])
+@router.post(
+    "/media/discover",
+    response_model=list[MediaCandidate],
+)
 def discover_media(request: MediaDiscoveryRequest):
     try:
         return discovery_service.discover(request)
