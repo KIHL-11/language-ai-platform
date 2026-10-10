@@ -10,9 +10,14 @@ from pydantic import (
 )
 
 from services.schemas.lesson import SourceLanguage
+from services.schemas.transcript_features import TranscriptLearningFeatures
 
 
 MediaAvailability = Literal["public", "private", "unavailable", "unknown"]
+SubtitleEnrichmentStatus = Literal[
+    "success", "unavailable", "failed", "rate_limited"
+]
+SubtitleKind = Literal["human", "automatic"]
 TrainingGoal = Literal[
     "general",
     "blind_listening",
@@ -27,6 +32,8 @@ SCORE_COMPONENT_MAXIMA = {
     "duration_fit": 20,
     "training_goal_fit": 20,
 }
+DEFAULT_ENRICHMENT_LIMIT = 2
+MAX_ENRICHMENT_LIMIT = 3
 
 
 class DiscoveryModel(BaseModel):
@@ -40,6 +47,10 @@ class MediaDiscoveryRequest(DiscoveryModel):
     max_duration_seconds: int = Field(default=1_800, ge=1, le=14_400)
     limit: int = Field(default=5, ge=1, le=10)
     training_goal: TrainingGoal = "general"
+    enrich_transcript: bool = False
+    enrichment_limit: int = Field(
+        default=DEFAULT_ENRICHMENT_LIMIT, ge=1, le=MAX_ENRICHMENT_LIMIT
+    )
 
     @field_validator("query")
     @classmethod
@@ -94,6 +105,23 @@ class LearningSuitabilityScore(DiscoveryModel):
         return self
 
 
+class TranscriptEnrichment(DiscoveryModel):
+    status: SubtitleEnrichmentStatus
+    subtitle_kind: SubtitleKind | None = None
+    features: TranscriptLearningFeatures | None = None
+
+    @model_validator(mode="after")
+    def validate_success_payload(self):
+        has_payload = self.subtitle_kind is not None and self.features is not None
+        if self.status == "success" and not has_payload:
+            raise ValueError("successful enrichment requires kind and features")
+        if self.status != "success" and (
+            self.subtitle_kind is not None or self.features is not None
+        ):
+            raise ValueError("unsuccessful enrichment cannot include payload")
+        return self
+
+
 class MediaCandidate(DiscoveryModel):
     provider: Literal["youtube"]
     provider_id: str = Field(min_length=1, max_length=64)
@@ -106,3 +134,4 @@ class MediaCandidate(DiscoveryModel):
     availability: MediaAvailability = "unknown"
     subtitle_tracks: list[SubtitleTrackSummary] = Field(max_length=100)
     suitability: LearningSuitabilityScore
+    transcript_enrichment: TranscriptEnrichment | None = None
