@@ -19,6 +19,7 @@ class ChunkRetriever:
         query: str,
         source_language: SourceLanguage,
         top_k: int = 5,
+        user_id: str = "legacy",
     ) -> list[RetrievedChunk]:
         if not query.strip():
             raise ValueError("query must not be empty")
@@ -29,6 +30,8 @@ class ChunkRetriever:
             chunk
             for chunk in self.store.read_chunks()
             if chunk.source_language == source_language
+            and chunk.user_id == user_id
+            and chunk.active
         ]
         if not candidates:
             return []
@@ -56,7 +59,11 @@ class ChunkRetriever:
         ]
 
 
-def add_lesson_chunks(lesson: Lesson, store: ChunkStore) -> list[StoredChunk]:
+def add_lesson_chunks(
+    lesson: Lesson,
+    store: ChunkStore,
+    user_id: str = "legacy",
+) -> list[StoredChunk]:
     created_at = datetime.now(timezone.utc)
     chunks = []
     for sentence in lesson.sentences:
@@ -66,11 +73,13 @@ def add_lesson_chunks(lesson: Lesson, store: ChunkStore) -> list[StoredChunk]:
             chunks.append(
                 StoredChunk(
                     id=uuid.uuid4().hex,
+                    user_id=user_id,
                     text=chunk.text,
                     meaning=chunk.meaning,
                     source_language=lesson.source_language,
                     source_lesson_id=lesson.id,
                     source_sentence_id=sentence.id,
+                    source_stage="lesson",
                     created_at=created_at,
                 )
             )
@@ -85,6 +94,9 @@ def retrieve_chunks(
     query: str,
     source_language: SourceLanguage,
     top_k: int = 5,
+    user_id: str = "legacy",
 ) -> list[RetrievedChunk]:
-    return _default_retriever.retrieve_chunks(query, source_language, top_k)
+    return _default_retriever.retrieve_chunks(
+        query, source_language, top_k, user_id
+    )
 

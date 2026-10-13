@@ -16,9 +16,11 @@ def stored_chunk(
     language: str = "en",
     lesson_id: str = "lesson-1",
     sentence_id: int = 1,
+    user_id: str = "legacy",
 ) -> StoredChunk:
     return StoredChunk(
         id=chunk_id,
+        user_id=user_id,
         text=text,
         meaning=f"Meaning of {text}",
         source_language=language,
@@ -81,12 +83,13 @@ def test_saving_chunks_persists_and_ignores_same_provenance_duplicate(tmp_path):
     assert ChunkStore(path).read_chunks() == [first]
 
 
-def test_same_text_from_different_sentence_keeps_both_provenance_records(tmp_path):
+def test_same_text_from_different_sentence_is_deduplicated_for_legacy_user(tmp_path):
     store = ChunkStore(tmp_path / "chunk_bank.json")
     first = stored_chunk("chunk-1", "Sounds good.", sentence_id=1)
     second = stored_chunk("chunk-2", "Sounds good.", sentence_id=2)
 
-    assert store.add_chunks([first, second]) == [first, second]
+    assert store.add_chunks([first, second]) == [first]
+    assert store.read_chunks() == [first]
 
 
 def test_malformed_chunk_bank_raises_clear_error(tmp_path):
@@ -128,6 +131,33 @@ def test_retrieval_filters_language_honors_top_k_and_orders_by_cosine(tmp_path):
     assert results[0].score > results[1].score
 
 
+def test_semantic_retrieval_is_user_scoped_and_excludes_archived(tmp_path):
+    store = ChunkStore(tmp_path / "chunk_bank.json")
+    user_chunk = stored_chunk("user", "My phrase", user_id="user-1")
+    other_chunk = stored_chunk(
+        "other", "Other phrase", sentence_id=2, user_id="user-2"
+    )
+    archived_chunk = stored_chunk(
+        "archived", "Archived phrase", sentence_id=3, user_id="user-1"
+    ).model_copy(update={"active": False})
+    store.add_chunks([user_chunk, other_chunk, archived_chunk])
+    retriever = ChunkRetriever(
+        store,
+        FakeEmbedder(
+            {
+                "query": [1.0, 0.0],
+                "My phrase": [1.0, 0.0],
+            }
+        ),
+    )
+
+    results = retriever.retrieve_chunks(
+        "query", source_language="en", user_id="user-1"
+    )
+
+    assert [result.id for result in results] == ["user"]
+
+
 def test_add_lesson_chunks_preserves_lesson_sentence_and_language(tmp_path):
     store = ChunkStore(tmp_path / "chunk_bank.json")
 
@@ -137,4 +167,5 @@ def test_add_lesson_chunks_preserves_lesson_sentence_and_language(tmp_path):
     assert {chunk.source_lesson_id for chunk in added} == {"lesson-42"}
     assert {chunk.source_sentence_id for chunk in added} == {1}
     assert {chunk.source_language for chunk in added} == {"en"}
+    assert {chunk.source_stage for chunk in added} == {"lesson"}
 
