@@ -193,6 +193,8 @@ def score_candidate(
     total = round(sum(breakdown.model_dump().values()), 2)
     return LearningSuitabilityScore(
         total=total,
+        metadata_total=total,
+        transcript_adjustment=0,
         breakdown=breakdown,
         reasons=[
             _subtitle_reason(request.target_language, caption_kind),

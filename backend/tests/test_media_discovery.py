@@ -296,8 +296,19 @@ def test_api_returns_urls_accepted_by_existing_lesson_contract(monkeypatch):
 
     assert response.status_code == 200
     candidate = response.json()[0]
-    assert set(candidate["suitability"]) == {"total", "breakdown", "reasons"}
+    assert set(candidate["suitability"]) == {
+        "total",
+        "metadata_total",
+        "transcript_adjustment",
+        "breakdown",
+        "reasons",
+    }
     assert isinstance(candidate["suitability"]["total"], (int, float))
+    assert (
+        candidate["suitability"]["metadata_total"]
+        == candidate["suitability"]["total"]
+    )
+    assert candidate["suitability"]["transcript_adjustment"] == 0
     assert isinstance(candidate["suitability"]["reasons"], list)
     lesson_input = LessonFromUrlRequest(
         url=candidate["url"], source_language="en"

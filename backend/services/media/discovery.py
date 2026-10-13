@@ -20,6 +20,7 @@ from services.media.subtitle_enrichment import (
     SubtitleEnrichmentResult,
 )
 from services.media.transcript_features import extract_transcript_learning_features
+from services.media.transcript_ranking import apply_transcript_ranking
 
 
 MAX_PROVIDER_RESULTS = 25
@@ -235,9 +236,10 @@ class MediaDiscoveryService:
         self,
         candidates: list[MediaCandidate],
         request: MediaDiscoveryRequest,
-    ) -> None:
+    ) -> bool:
         if not request.enrich_transcript or self._enrichment_provider is None:
-            return
+            return False
+        scored_transcript = False
         for candidate in candidates[: request.enrichment_limit]:
             try:
                 result = self._enrichment_provider.enrich(
@@ -246,8 +248,29 @@ class MediaDiscoveryService:
             except Exception:
                 result = SubtitleEnrichmentResult(status="failed")
             candidate.transcript_enrichment = self._public_enrichment(result)
+            public_enrichment = candidate.transcript_enrichment
+            if (
+                public_enrichment.status == "success"
+                and public_enrichment.features is not None
+            ):
+                candidate.suitability = apply_transcript_ranking(
+                    candidate.suitability,
+                    public_enrichment.features,
+                    request.training_goal,
+                )
+                scored_transcript = True
             if result.status == "rate_limited":
                 break
+        return scored_transcript
+
+    @staticmethod
+    def _sort_key(candidate: MediaCandidate) -> tuple:
+        return (
+            -candidate.suitability.total,
+            candidate.title.casefold(),
+            candidate.provider,
+            candidate.provider_id,
+        )
 
     def discover(self, request: MediaDiscoveryRequest) -> list[MediaCandidate]:
         search_limit = min(MAX_PROVIDER_RESULTS, max(10, request.limit * 3))
@@ -298,14 +321,8 @@ class MediaDiscoveryService:
                 )
             )
 
-        candidates.sort(
-            key=lambda candidate: (
-                -candidate.suitability.total,
-                candidate.title.casefold(),
-                candidate.provider,
-                candidate.provider_id,
-            )
-        )
+        candidates.sort(key=self._sort_key)
         candidates = candidates[: request.limit]
-        self._enrich(candidates, request)
+        if self._enrich(candidates, request):
+            candidates.sort(key=self._sort_key)
         return candidates
