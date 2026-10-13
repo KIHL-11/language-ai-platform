@@ -12,8 +12,14 @@ from services.schemas.media_discovery import (
     MediaCandidate,
     MediaDiscoveryRequest,
     SubtitleTrackSummary,
+    TranscriptEnrichment,
 )
 from services.media.ranking import score_candidate
+from services.media.subtitle_enrichment import (
+    SubtitleEnrichmentProvider,
+    SubtitleEnrichmentResult,
+)
+from services.media.transcript_features import extract_transcript_learning_features
 
 
 MAX_PROVIDER_RESULTS = 25
@@ -201,8 +207,47 @@ def _caption_kind(
 
 
 class MediaDiscoveryService:
-    def __init__(self, provider: VideoSearchProvider):
+    def __init__(
+        self,
+        provider: VideoSearchProvider,
+        enrichment_provider: SubtitleEnrichmentProvider | None = None,
+    ):
         self._provider = provider
+        self._enrichment_provider = enrichment_provider
+
+    @staticmethod
+    def _public_enrichment(result: SubtitleEnrichmentResult) -> TranscriptEnrichment:
+        if result.status != "success" or result.subtitle_kind is None:
+            return TranscriptEnrichment(status=result.status)
+        try:
+            features = extract_transcript_learning_features(
+                [cue.as_mapping() for cue in result.cues]
+            )
+        except Exception:
+            return TranscriptEnrichment(status="failed")
+        return TranscriptEnrichment(
+            status="success",
+            subtitle_kind=result.subtitle_kind,
+            features=features,
+        )
+
+    def _enrich(
+        self,
+        candidates: list[MediaCandidate],
+        request: MediaDiscoveryRequest,
+    ) -> None:
+        if not request.enrich_transcript or self._enrichment_provider is None:
+            return
+        for candidate in candidates[: request.enrichment_limit]:
+            try:
+                result = self._enrichment_provider.enrich(
+                    candidate, request.target_language
+                )
+            except Exception:
+                result = SubtitleEnrichmentResult(status="failed")
+            candidate.transcript_enrichment = self._public_enrichment(result)
+            if result.status == "rate_limited":
+                break
 
     def discover(self, request: MediaDiscoveryRequest) -> list[MediaCandidate]:
         search_limit = min(MAX_PROVIDER_RESULTS, max(10, request.limit * 3))
@@ -261,4 +306,6 @@ class MediaDiscoveryService:
                 candidate.provider_id,
             )
         )
-        return candidates[: request.limit]
+        candidates = candidates[: request.limit]
+        self._enrich(candidates, request)
+        return candidates
