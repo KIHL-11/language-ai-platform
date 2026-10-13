@@ -94,14 +94,25 @@ class LearningSuitabilityBreakdown(DiscoveryModel):
 
 class LearningSuitabilityScore(DiscoveryModel):
     total: float = Field(ge=0, le=100)
+    metadata_total: float = Field(ge=0, le=100)
+    transcript_adjustment: float = Field(ge=-10, le=10)
     breakdown: LearningSuitabilityBreakdown
-    reasons: list[str] = Field(min_length=4, max_length=4)
+    reasons: list[str] = Field(min_length=4, max_length=5)
 
     @model_validator(mode="after")
     def validate_component_total(self):
         component_total = round(sum(self.breakdown.model_dump().values()), 2)
-        if self.total != component_total:
-            raise ValueError("total must equal the sum of suitability components")
+        if self.metadata_total != component_total:
+            raise ValueError(
+                "metadata_total must equal the sum of suitability components"
+            )
+        expected_total = round(
+            self.metadata_total + self.transcript_adjustment, 2
+        )
+        if self.total != expected_total:
+            raise ValueError(
+                "total must equal metadata_total plus transcript_adjustment"
+            )
         return self
 
 

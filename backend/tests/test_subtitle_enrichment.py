@@ -175,7 +175,7 @@ def test_enrichment_disabled_makes_no_subtitle_calls_and_matches_metadata_only()
     assert all(item.transcript_enrichment is None for item in enriched_capable)
 
 
-def test_enrichment_defaults_to_ranked_top_two_and_preserves_order_and_scores():
+def test_enrichment_defaults_to_ranked_top_two_and_preserves_metadata_scores():
     results = [search_result(value) for value in ["d", "b", "a", "c"]]
     enricher = FakeEnrichmentProvider(
         {value: success_result() for value in ["a", "b", "c", "d"]}
@@ -189,15 +189,21 @@ def test_enrichment_defaults_to_ranked_top_two_and_preserves_order_and_scores():
     ).discover(discovery_request(enrich_transcript=True))
 
     assert enricher.calls == [("a", "en"), ("b", "en")]
+    by_id = {item.provider_id: item for item in enriched}
+    baseline_by_id = {item.provider_id: item for item in baseline}
     assert [item.provider_id for item in enriched] == [
         item.provider_id for item in baseline
     ]
-    assert [item.suitability for item in enriched] == [
-        item.suitability for item in baseline
-    ]
-    assert enriched[0].transcript_enrichment.status == "success"
-    assert enriched[1].transcript_enrichment.status == "success"
-    assert all(item.transcript_enrichment is None for item in enriched[2:])
+    for provider_id in ("a", "b"):
+        assert by_id[provider_id].transcript_enrichment.status == "success"
+        assert (
+            by_id[provider_id].suitability.metadata_total
+            == baseline_by_id[provider_id].suitability.total
+        )
+    assert all(
+        by_id[provider_id].transcript_enrichment is None
+        for provider_id in ("c", "d")
+    )
 
 
 def test_custom_limit_three_is_allowed_but_more_than_three_is_rejected():
@@ -225,10 +231,11 @@ def test_generic_enrichment_failure_is_sanitized_and_next_candidate_is_attempted
     ).discover(discovery_request(enrich_transcript=True))
 
     assert [item[0] for item in enricher.calls] == ["a", "b"]
-    assert candidates[0].transcript_enrichment.model_dump(exclude_none=True) == {
+    by_id = {item.provider_id: item for item in candidates}
+    assert by_id["a"].transcript_enrichment.model_dump(exclude_none=True) == {
         "status": "failed"
     }
-    assert candidates[1].transcript_enrichment.status == "success"
+    assert by_id["b"].transcript_enrichment.status == "success"
     assert "private upstream" not in str(candidates)
 
     monkeypatch.setattr(
