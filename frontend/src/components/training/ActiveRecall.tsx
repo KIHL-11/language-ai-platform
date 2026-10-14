@@ -1,162 +1,232 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import {
-  compareRecallAnswer,
-  normalizeDictationText,
-  type DictationResult,
-} from '../../training/dictation'
-import type { LessonSentence } from '../../types/lesson'
+  chunkMemoryClient,
+  type ChunkMemory,
+  type ChunkMemoryClient,
+  type PracticeOutcome,
+} from '../../api/chunkMemory'
+import type { Lesson } from '../../types/lesson'
 
 interface ActiveRecallProps {
-  sentence: LessonSentence
-  sentenceIndex: number
-  sentenceCount: number
-  onNext: () => void
+  lesson: Lesson
+  learnerId: string
+  onComplete: () => void
+  client?: ChunkMemoryClient
+}
+
+type RecallState =
+  | { status: 'loading' }
+  | { status: 'available'; chunks: ChunkMemory[] }
+  | { status: 'empty' }
+  | { status: 'unavailable' }
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }
 
 export default function ActiveRecall({
-  sentence,
-  sentenceIndex,
-  sentenceCount,
-  onNext,
+  lesson,
+  learnerId,
+  onComplete,
+  client = chunkMemoryClient,
 }: ActiveRecallProps) {
-  const [attempt, setAttempt] = useState<{
-    sentenceId: number
-    answer: string
-    result: DictationResult | null
-  }>({ sentenceId: sentence.id, answer: '', result: null })
-  const answer = attempt.sentenceId === sentence.id ? attempt.answer : ''
-  const result = attempt.sentenceId === sentence.id ? attempt.result : null
-  const isFinalSentence = sentenceIndex === sentenceCount - 1
-  const safeChunks = sentence.chunks
-    .filter(
-      (chunk) =>
-        normalizeDictationText(chunk.text) !==
-        normalizeDictationText(sentence.text),
-    )
-    .slice(0, 2)
+  const [recall, setRecall] = useState<RecallState>({ status: 'loading' })
+  const [chunkIndex, setChunkIndex] = useState(0)
+  const [revealed, setRevealed] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [submissionFailed, setSubmissionFailed] = useState(false)
+  const submissionLock = useRef(false)
+  const mounted = useRef(true)
 
-  function handleCheck(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setAttempt({
-      sentenceId: sentence.id,
-      answer,
-      result: compareRecallAnswer(sentence.text, answer),
-    })
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let current = true
+
+    void client
+      .fetchActiveRecallChunks(
+        {
+          learnerId,
+          language: lesson.source_language,
+          currentLessonId: lesson.id,
+          limit: 5,
+        },
+        controller.signal,
+      )
+      .then((chunks) => {
+        if (!current) return
+        setRecall(
+          chunks.length > 0
+            ? { status: 'available', chunks }
+            : { status: 'empty' },
+        )
+      })
+      .catch((error: unknown) => {
+        if (current && !isAbortError(error)) {
+          setRecall({ status: 'unavailable' })
+        }
+      })
+
+    return () => {
+      current = false
+      controller.abort()
+    }
+  }, [client, learnerId, lesson.id, lesson.source_language])
+
+  function advance(chunks: ChunkMemory[]) {
+    submissionLock.current = false
+    setSubmitting(false)
+    setSubmissionFailed(false)
+    setRevealed(false)
+    if (chunkIndex + 1 >= chunks.length) {
+      onComplete()
+      return
+    }
+    setChunkIndex((current) => current + 1)
   }
+
+  async function submitOutcome(
+    chunk: ChunkMemory,
+    chunks: ChunkMemory[],
+    outcome: PracticeOutcome,
+  ) {
+    if (submissionLock.current) return
+    submissionLock.current = true
+    setSubmitting(true)
+    setSubmissionFailed(false)
+    try {
+      await client.recordChunkPractice(learnerId, chunk.id, outcome)
+      if (mounted.current) advance(chunks)
+    } catch {
+      if (mounted.current) {
+        setSubmitting(false)
+        setSubmissionFailed(true)
+      }
+    }
+  }
+
+  if (recall.status === 'loading') {
+    return (
+      <section aria-labelledby="active-recall-title">
+        <h2 id="active-recall-title" className="text-2xl font-semibold text-[#18211f]">
+          Recall saved language
+        </h2>
+        <p className="mt-4 text-[#596560]" role="status">
+          Loading earlier chunks…
+        </p>
+        <button
+          type="button"
+          onClick={onComplete}
+          className="mt-6 h-10 border border-[#aebcb6] bg-white px-5 text-sm font-semibold text-[#293430]"
+        >
+          Continue without memory
+        </button>
+      </section>
+    )
+  }
+
+  if (recall.status === 'empty' || recall.status === 'unavailable') {
+    return (
+      <section aria-labelledby="active-recall-title">
+        <h2 id="active-recall-title" className="text-2xl font-semibold text-[#18211f]">
+          Recall saved language
+        </h2>
+        <p className="mt-4 text-[#596560]" role="status">
+          {recall.status === 'empty'
+            ? 'No earlier chunks are ready for review yet.'
+            : 'Saved language is unavailable right now. You can continue training.'}
+        </p>
+        <button
+          type="button"
+          onClick={onComplete}
+          className="mt-6 h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white"
+        >
+          Complete Active Recall
+        </button>
+      </section>
+    )
+  }
+
+  const chunk = recall.chunks[chunkIndex]
 
   return (
     <section aria-labelledby="active-recall-title">
       <div className="mb-5">
         <p className="text-sm tabular-nums text-[#66726e]">
-          Sentence {sentenceIndex + 1} of {sentenceCount}
+          Saved chunk {chunkIndex + 1} of {recall.chunks.length}
         </p>
         <h2 id="active-recall-title" className="mt-1 text-2xl font-semibold text-[#18211f]">
-          Retrieve the sentence
+          Recall saved language
         </h2>
       </div>
 
       <div className="border-y border-[#c9d5d0] bg-white px-5 py-5 sm:px-6">
         <p className="text-xs font-medium text-[#66726e]">Meaning</p>
         <p className="mt-2 text-lg leading-8 text-[#18211f]">
-          {sentence.translation || 'Translation unavailable.'}
+          {chunk.meaning || 'Meaning unavailable.'}
         </p>
-
-        {safeChunks.length > 0 && (
-          <div className="mt-5 border-t border-[#dfe7e3] pt-4">
-            <p className="text-xs font-medium text-[#66726e]">Useful chunks</p>
-            <ul className="mt-2 flex flex-wrap gap-2">
-              {safeChunks.map((chunk) => (
-                <li key={chunk.text} className="border border-[#c9d5d0] bg-[#f3f7f5] px-3 py-2 text-sm text-[#34413d]">
-                  <span className="font-medium">{chunk.text}</span>
-                  {chunk.meaning && <span className="ml-2 text-[#66726e]">{chunk.meaning}</span>}
-                </li>
-              ))}
-            </ul>
+        {revealed ? (
+          <div className="mt-5 border-t border-[#dfe7e3] pt-4" aria-live="polite">
+            <p className="text-xs font-medium text-[#66726e]">Saved chunk</p>
+            <p className="mt-2 text-lg font-medium leading-8 text-[#18211f]">
+              {chunk.text}
+            </p>
           </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setRevealed(true)}
+            className="mt-5 h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white"
+          >
+            Reveal chunk
+          </button>
         )}
       </div>
 
-      <form className="mt-6" onSubmit={handleCheck}>
-        <label htmlFor="recall-answer" className="mb-2 block text-sm font-medium text-[#34413d]">
-          Rebuild the original sentence
-        </label>
-        <textarea
-          id="recall-answer"
-          rows={4}
-          value={answer}
-          onChange={(event) =>
-            setAttempt({
-              sentenceId: sentence.id,
-              answer: event.target.value,
-              result: null,
-            })
-          }
-          disabled={result !== null}
-          className="w-full resize-y border border-[#aebcb6] bg-white px-3.5 py-3 text-base leading-7 outline-none placeholder:text-[#8b9792] focus:border-[#176b5b] focus:ring-2 focus:ring-[#176b5b]/20 disabled:bg-[#f5f7f6]"
-          placeholder="Write the sentence in the source language"
-        />
-        <div className="mt-3 flex justify-end">
-          <button
-            type="submit"
-            disabled={answer.trim().length === 0 || result !== null}
-            className="h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white hover:bg-[#115548] focus:outline-none focus:ring-2 focus:ring-[#176b5b] focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#9aaba5]"
-          >
-            Check
-          </button>
-        </div>
-      </form>
-
-      {result && (
-        <div className="mt-6 border border-[#c9d5d0] bg-white p-5 sm:p-6" aria-live="polite">
-          <div className="flex flex-wrap items-end justify-between gap-4 border-b border-[#dfe7e3] pb-4">
-            <div>
-              <p className="text-sm text-[#66726e]">Accuracy</p>
-              <p className="mt-1 text-3xl font-semibold tabular-nums text-[#18211f]">
-                {result.accuracy}%
-              </p>
-            </div>
-            <span className="text-sm text-[#66726e]">
-              {result.correctWords.length} words matched
-            </span>
-          </div>
-
-          <div className="mt-5">
-            <p className="text-xs font-medium text-[#66726e]">Target</p>
-            <p className="mt-1 leading-7 text-[#18211f]">{sentence.text}</p>
-          </div>
-          <div className="mt-4">
-            <p className="text-xs font-medium text-[#66726e]">Your answer</p>
-            <p className="mt-1 leading-7 text-[#18211f]">{answer}</p>
-          </div>
-
-          <div className="mt-4 flex flex-wrap gap-1.5" aria-label="Recall word comparison">
-            {result.targetWords.map((word, index) => (
-              <span
-                key={`${word.value}-${index}`}
-                className={`px-1.5 py-0.5 text-sm ${
-                  word.status === 'correct'
-                    ? 'bg-[#e2eee9] text-[#135c4e]'
-                    : 'bg-[#fbe7e5] text-[#9d241b] line-through'
-                }`}
+      {revealed && !submissionFailed && (
+        <div className="mt-6" aria-label="Rate your recall">
+          <p className="text-sm font-medium text-[#34413d]">How well did you remember it?</p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            {([
+              ['Got it', 'success'],
+              ['Almost', 'partial'],
+              ['Missed', 'failure'],
+            ] as const).map(([label, outcome]) => (
+              <button
+                key={outcome}
+                type="button"
+                disabled={submitting}
+                onClick={() => void submitOutcome(chunk, recall.chunks, outcome)}
+                className="h-10 border border-[#176b5b] bg-white px-5 text-sm font-semibold text-[#176b5b] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {word.value}
-              </span>
+                {label}
+              </button>
             ))}
           </div>
         </div>
       )}
 
-      <div className="mt-5 flex justify-end">
-        <button
-          type="button"
-          onClick={onNext}
-          disabled={result === null}
-          className="h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white hover:bg-[#115548] focus:outline-none focus:ring-2 focus:ring-[#176b5b] focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#9aaba5]"
-        >
-          {isFinalSentence ? 'Complete stage' : 'Next sentence'}
-        </button>
-      </div>
+      {submissionFailed && (
+        <div className="mt-6 border border-[#d9a39d] bg-[#fff5f4] p-4" role="alert">
+          <p className="text-sm text-[#7d2018]">
+            Your rating could not be saved. You can continue without blocking this session.
+          </p>
+          <button
+            type="button"
+            onClick={() => advance(recall.chunks)}
+            className="mt-3 h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white"
+          >
+            Continue
+          </button>
+        </div>
+      )}
     </section>
   )
 }

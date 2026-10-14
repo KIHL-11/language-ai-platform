@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 
+import {
+  chunkMemoryClient,
+  type ChunkMemoryClient,
+} from '../api/chunkMemory'
 import ActiveRecall from '../components/training/ActiveRecall'
 import BlindListening from '../components/training/BlindListening'
 import Comprehension from '../components/training/Comprehension'
@@ -21,6 +25,7 @@ import {
 import { createConfiguredRealtimeDialogueProvider } from '../training/openAIRealtimeDialogueProvider'
 import type { VoiceLiveDialogueProvider } from '../training/voiceLiveDialogueProvider'
 import { useTrainingSession } from '../training/useTrainingSession'
+import { getOrCreateLearnerId } from '../session/learnerSession'
 import type { Lesson, TrainingStage } from '../types/lesson'
 
 interface TrainingSessionProps {
@@ -29,11 +34,11 @@ interface TrainingSessionProps {
   onExit: () => void
   liveDialogueProvider?: LiveDialogueProvider
   voiceLiveDialogueProvider?: VoiceLiveDialogueProvider
+  memoryClient?: ChunkMemoryClient
   devMode?: boolean
 }
 
 const SENTENCE_STAGES = new Set<TrainingStage>([
-  'active_recall',
   'blind_listening',
   'comprehension',
   'mini_dictation',
@@ -46,6 +51,7 @@ export default function TrainingSession({
   onExit,
   liveDialogueProvider = localMockDialogueProvider,
   voiceLiveDialogueProvider,
+  memoryClient = chunkMemoryClient,
   devMode = true,
 }: TrainingSessionProps) {
   const isDevelopment = import.meta.env.DEV && devMode
@@ -54,6 +60,8 @@ export default function TrainingSession({
     isDevelopment,
   )
   const progressionLock = useRef(false)
+  const importedLessons = useRef(new Set<string>())
+  const [learnerId] = useState(getOrCreateLearnerId)
   const [devOverride, setDevOverride] = useState<{
     stage: TrainingStage
     sentenceIndex: number
@@ -98,6 +106,19 @@ export default function TrainingSession({
   useEffect(() => {
     progressionLock.current = false
   }, [currentStage, sentenceIndex])
+
+  useEffect(() => {
+    const hasChunks = lesson.sentences.some((sentence) =>
+      sentence.chunks.some((chunk) => chunk.text.trim().length > 0),
+    )
+    const importKey = `${learnerId}:${lesson.id}`
+    if (!hasChunks || importedLessons.current.has(importKey)) return
+
+    importedLessons.current.add(importKey)
+    void memoryClient.importLessonChunks(learnerId, lesson).catch(() => {
+      // Persistence enriches later sessions but never blocks this lesson.
+    })
+  }, [learnerId, lesson, memoryClient])
 
   function setDevelopmentStage(stage: TrainingStage) {
     progressionLock.current = false
@@ -237,14 +258,14 @@ export default function TrainingSession({
       )
     }
 
-    if (currentStage === 'active_recall' && currentSentence) {
+    if (currentStage === 'active_recall') {
       return (
         <ActiveRecall
-          key={`${currentStage}-${currentSentence.id}-${devOverride?.revision ?? 0}`}
-          sentence={currentSentence}
-          sentenceIndex={sentenceIndex}
-          sentenceCount={lesson.sentences.length}
-          onNext={handleSentenceAdvance}
+          key={`${currentStage}-${lesson.id}-${lesson.source_language}-${devOverride?.revision ?? 0}`}
+          lesson={lesson}
+          learnerId={learnerId}
+          client={memoryClient}
+          onComplete={advanceOneStage}
         />
       )
     }

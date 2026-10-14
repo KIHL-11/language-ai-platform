@@ -170,9 +170,18 @@ const stageCases: Array<[TrainingStage, string]> = Object.entries(
 describe('TrainingSession development stage jump', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ chunks: [] }),
+      }),
+    )
   })
 
   afterEach(() => {
+    vi.unstubAllGlobals()
     window.history.replaceState({}, '', '/')
   })
 
@@ -188,7 +197,7 @@ describe('TrainingSession development stage jump', () => {
     )
 
     expect(screen.getByRole('heading', { name: label, level: 1 })).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent(`DEV override: ${label}`)
+    expect(screen.getByText(`DEV override: ${label}`)).toBeInTheDocument()
   })
 
   it('uses normal training start when no stage parameter is present', () => {

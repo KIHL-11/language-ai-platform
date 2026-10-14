@@ -19,3 +19,12 @@ Production validation:
 npm run lint
 npm run build
 ```
+
+## Local learner memory
+
+The browser stores one random opaque learner identifier in local storage under
+`language_ai_learner_id_v1`. It is a persistence key for lesson chunk memory,
+not an account, login, credential, or cross-device identity. It contains no
+personal information and is sent only to this application's backend when a
+lesson saves chunks or Active Recall reads and rates earlier chunks. Clearing
+site data creates a new local learner identity and does not affect lesson use.
