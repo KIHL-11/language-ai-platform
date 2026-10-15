@@ -8,6 +8,7 @@ from services.retrieval.chunk_memory import (
     MAX_ACTIVE_RECALL_LIMIT,
     ChunkMemoryService,
 )
+from services.retrieval.chunk_quality import ChunkTextRejected
 from services.retrieval.chunk_store import ChunkStore
 from services.retrieval.retriever import ChunkRetriever, add_lesson_chunks
 from services.schemas.lesson import Lesson, SourceLanguage
@@ -69,16 +70,19 @@ def save_lesson_chunk_memory(request: StoreLessonMemoryRequest):
         for chunk in sentence.chunks:
             if not chunk.text.strip():
                 continue
-            _, created = chunk_memory_service.save_chunk(
-                user_id=request.user_id,
-                text=chunk.text,
-                meaning=chunk.meaning,
-                language=request.lesson.source_language,
-                source_lesson_id=request.lesson.id,
-                source_media_id=request.source_media_id,
-                source_sentence_id=sentence.id,
-                source_stage="lesson",
-            )
+            try:
+                _, created = chunk_memory_service.save_chunk(
+                    user_id=request.user_id,
+                    text=chunk.text,
+                    meaning=chunk.meaning,
+                    language=request.lesson.source_language,
+                    source_lesson_id=request.lesson.id,
+                    source_media_id=request.source_media_id,
+                    source_sentence_id=sentence.id,
+                    source_stage="lesson",
+                )
+            except ChunkTextRejected:
+                continue
             added += int(created)
     total = len(chunk_memory_service.list_chunks(request.user_id))
     return StoreLessonChunksResponse(added=added, total=total)

@@ -2,12 +2,12 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+from services.retrieval.chunk_quality import prepare_chunk_text
 from services.retrieval.chunk_store import ChunkStore
 from services.schemas.lesson import SourceLanguage
 from services.schemas.retrieval import (
     PracticeOutcome,
     StoredChunk,
-    normalize_chunk_text,
 )
 
 
@@ -58,15 +58,13 @@ class ChunkMemoryService:
         source_sentence_id: int | None = None,
         source_stage: str | None = None,
     ) -> tuple[StoredChunk, bool]:
-        normalized_text = normalize_chunk_text(text, language)
-        if not normalized_text:
-            raise ValueError("chunk text must contain meaningful characters")
+        prepared = prepare_chunk_text(text, language)
         now = self._now()
         chunk = StoredChunk(
             id=self._id_factory(),
             user_id=user_id,
-            text=text,
-            normalized_text=normalized_text,
+            text=prepared.text,
+            normalized_text=prepared.normalized_text,
             meaning=meaning,
             source_language=language,
             source_lesson_id=source_lesson_id,
