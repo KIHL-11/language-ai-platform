@@ -1,24 +1,58 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useCallback, useRef, useState, type FormEvent } from 'react'
 
 import { createLessonFromUrl } from '../api/lesson'
 import LessonViewer from './LessonViewer'
 import MediaDiscovery from '../components/MediaDiscovery'
 import type {
-  Lesson,
   LessonLevel,
   SourceLanguage,
 } from '../types/lesson'
+import {
+  createPersonalSession,
+  loadPersonalSession,
+  savePersonalSession,
+  type PersonalSession,
+} from '../session/personalSession'
+import type { TrainingSessionState } from '../training/trainingMachine'
 
 export default function LessonGenerator() {
-  const [url, setUrl] = useState('')
+  const [personalSession, setPersonalSession] = useState(loadPersonalSession)
+  const [sessionRevision, setSessionRevision] = useState(0)
+  const sessionRef = useRef(personalSession)
+  const [url, setUrl] = useState(personalSession?.lesson.source_url ?? '')
   const [sourceLanguage, setSourceLanguage] =
-    useState<SourceLanguage>('en')
-  const [level, setLevel] = useState<LessonLevel>('B2')
-  const [lesson, setLesson] = useState<Lesson | null>(null)
+    useState<SourceLanguage>(personalSession?.lesson.source_language ?? 'en')
+  const [level, setLevel] = useState<LessonLevel>(personalSession?.lesson.level ?? 'B2')
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [mode, setMode] = useState<'url' | 'discovery'>('url')
   const generating = useRef(false)
+
+  function replaceSession(session: PersonalSession) {
+    savePersonalSession(session)
+    sessionRef.current = session
+    setPersonalSession(session)
+    setSessionRevision((current) => current + 1)
+  }
+
+  const handleSessionChange = useCallback((
+    isTraining: boolean,
+    trainingState: TrainingSessionState,
+  ) => {
+    const current = sessionRef.current
+    if (!current) return
+    const next = { ...current, isTraining, trainingState }
+    savePersonalSession(next)
+    sessionRef.current = next
+  }, [])
+
+  const handleLessonMemoryImported = useCallback(() => {
+    const current = sessionRef.current
+    if (!current || current.lessonMemoryImported) return
+    const next = { ...current, lessonMemoryImported: true }
+    savePersonalSession(next)
+    sessionRef.current = next
+  }, [])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -40,7 +74,7 @@ export default function LessonGenerator() {
         level,
         vocals: false,
       })
-      setLesson(result)
+      replaceSession(createPersonalSession(result))
     } catch {
       setError('Lesson generation failed. Please try again.')
     } finally {
@@ -161,7 +195,17 @@ export default function LessonGenerator() {
           )}
         </div>
 
-        {lesson && <LessonViewer lesson={lesson} />}
+        {personalSession && (
+          <LessonViewer
+            key={`${personalSession.lesson.id}:${sessionRevision}`}
+            lesson={personalSession.lesson}
+            initialIsTraining={personalSession.isTraining}
+            initialTrainingState={personalSession.trainingState}
+            lessonMemoryImported={personalSession.lessonMemoryImported}
+            onSessionChange={handleSessionChange}
+            onLessonMemoryImported={handleLessonMemoryImported}
+          />
+        )}
       </div>
     </main>
   )

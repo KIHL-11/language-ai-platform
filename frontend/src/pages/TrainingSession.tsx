@@ -18,6 +18,7 @@ import {
   updateDevStageQuery,
 } from '../training/devStageJump'
 import { TRAINING_STAGE_LABELS } from '../training/trainingMachine'
+import type { TrainingSessionState } from '../training/trainingMachine'
 import {
   localMockDialogueProvider,
   type LiveDialogueProvider,
@@ -36,6 +37,10 @@ interface TrainingSessionProps {
   voiceLiveDialogueProvider?: VoiceLiveDialogueProvider
   memoryClient?: ChunkMemoryClient
   devMode?: boolean
+  initialState?: TrainingSessionState
+  lessonMemoryImported?: boolean
+  onStateChange?: (state: TrainingSessionState) => void
+  onLessonMemoryImported?: () => void
 }
 
 const SENTENCE_STAGES = new Set<TrainingStage>([
@@ -53,6 +58,10 @@ export default function TrainingSession({
   voiceLiveDialogueProvider,
   memoryClient = chunkMemoryClient,
   devMode = true,
+  initialState,
+  lessonMemoryImported = false,
+  onStateChange,
+  onLessonMemoryImported,
 }: TrainingSessionProps) {
   const isDevelopment = import.meta.env.DEV && devMode
   const initialDevStage = getDevStageOverride(
@@ -83,7 +92,11 @@ export default function TrainingSession({
     previousSentence: previousSequentialSentence,
     restartStage: restartSequentialStage,
     restartSession: restartSequentialSession,
-  } = useTrainingSession(lesson.training_order, lesson.sentences.length)
+  } = useTrainingSession(
+    lesson.training_order,
+    lesson.sentences.length,
+    initialState,
+  )
 
   const currentStage = devOverride?.stage ?? sequentialStage
   const sentenceIndex = devOverride?.sentenceIndex ?? state.sentenceIndex
@@ -108,17 +121,27 @@ export default function TrainingSession({
   }, [currentStage, sentenceIndex])
 
   useEffect(() => {
+    if (!devOverride) onStateChange?.(state)
+  }, [devOverride, onStateChange, state])
+
+  useEffect(() => {
     const hasChunks = lesson.sentences.some((sentence) =>
       sentence.chunks.some((chunk) => chunk.text.trim().length > 0),
     )
     const importKey = `${learnerId}:${lesson.id}`
+    if (lessonMemoryImported) {
+      importedLessons.current.add(importKey)
+      return
+    }
     if (!hasChunks || importedLessons.current.has(importKey)) return
 
     importedLessons.current.add(importKey)
-    void memoryClient.importLessonChunks(learnerId, lesson).catch(() => {
+    void memoryClient.importLessonChunks(learnerId, lesson).then(() => {
+      onLessonMemoryImported?.()
+    }).catch(() => {
       // Persistence enriches later sessions but never blocks this lesson.
     })
-  }, [learnerId, lesson, memoryClient])
+  }, [learnerId, lesson, lessonMemoryImported, memoryClient, onLessonMemoryImported])
 
   function setDevelopmentStage(stage: TrainingStage) {
     progressionLock.current = false

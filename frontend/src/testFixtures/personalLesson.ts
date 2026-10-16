@@ -1,0 +1,48 @@
+import type { Lesson } from '../types/lesson'
+
+export const personalLesson: Lesson = {
+  id: 'personal-lesson',
+  title: 'Daily lesson',
+  source_url: 'https://www.youtube.com/watch?v=personal',
+  source_language: 'en',
+  target_language: 'zh-CN',
+  level: 'B2',
+  audio_url: '/media/personal.mp3',
+  source: 'subtitles',
+  sentences: [1, 2, 3].map((id) => ({
+    id,
+    text: `Sentence ${id}.`,
+    translation: `句子 ${id}。`,
+    start: id - 1,
+    end: id,
+    keywords: [],
+    chunks: [],
+    grammar: '',
+    training: {
+      blind_listening: true,
+      dictation: true,
+      shadowing: true,
+      retell: true,
+    },
+    ai_status: 'ok',
+  })),
+  training_plan: {
+    active_recall: { enabled: true, count: 5 },
+    blind_listening: { enabled: true },
+    comprehension: { enabled: true },
+    mini_dictation: { enabled: true },
+    shadowing: { enabled: true },
+    retell: { enabled: true },
+    live_dialogue: { enabled: true },
+  },
+  training_order: [
+    'active_recall',
+    'blind_listening',
+    'comprehension',
+    'mini_dictation',
+    'shadowing',
+    'retell',
+    'live_dialogue',
+  ],
+  ai: { provider: 'mock', status: 'complete' },
+}

@@ -30,6 +30,19 @@ The frontend uses React, TypeScript, and Vite. It guides learners through:
 
 Live Dialogue supports Local Text Practice and optional Realtime Voice Practice.
 
+### Personal session persistence
+
+The browser stores the current validated lesson and canonical training progress
+under the versioned local key `language_ai_personal_session_v1`. Refreshing the
+page restores the lesson, stage, and sentence position. The saved lesson keeps
+only its backend-relative media URL; it never stores audio blobs, recordings,
+credentials, or Realtime secrets.
+
+Generated media is still temporary backend state. A browser refresh can reuse
+it while that backend media remains available, but a backend restart or media
+cleanup can invalidate the restored audio URL. Regenerating the lesson is the
+current recovery path.
+
 ## Development safety
 
 - `AI_MODE=mock` is the normal local-development baseline.
