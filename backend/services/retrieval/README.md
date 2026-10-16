@@ -40,11 +40,30 @@ readable and the next write upgrades the file to version 2. Each record stores:
 
 ## Save and deduplication
 
-Chunk text is normalized with Unicode NFKC, collapsed whitespace, and ignored
-terminal sentence punctuation. English is case-folded. German case is preserved
-because capitalization can be meaningful. The deduplication key is
+Before persistence, chunk text receives one standard-library HTML entity decode,
+Unicode NFKC normalization, collapsed whitespace, and conservative removal of
+cue-boundary `>>`/music-note markers and recognized caption annotations such as
+`[music]`, `[applause]`, and `[laughter]`. Empty, symbol-only, and repeated pure
+interjection fragments are rejected. Direct memory saves return HTTP 422 for
+rejected text; lesson imports skip rejected chunks and continue with valid ones.
+
+The cleaned text is then normalized with ignored terminal sentence punctuation.
+English is case-folded. German case is preserved because capitalization can be
+meaningful. The deduplication key is
 `user_id + source_language + normalized_text`. An upsert keeps the original ID
 and creation provenance, while allowing a non-empty meaning to be refreshed.
+
+Existing banks are never rewritten automatically. To prepare a reviewed cleaned
+copy, run the explicit utility from `backend` with different source and output
+paths:
+
+```bash
+.venv/bin/python -m scripts.cleanup_chunk_memory storage/chunk_bank.json /tmp/chunk_bank.cleaned.json
+```
+
+The source is never overwritten, practice/mastery/timestamp fields are preserved,
+and records that would collide after sanitation remain unchanged in the output
+and are reported under `collision_ids` for manual resolution.
 
 ## Active Recall selection
 

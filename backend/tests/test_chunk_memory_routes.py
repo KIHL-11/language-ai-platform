@@ -97,6 +97,42 @@ def test_store_lesson_chunks_for_user_is_idempotent(tmp_path, monkeypatch):
     assert second.json() == {"added": 0, "total": 1}
 
 
+def test_store_lesson_chunks_skips_noise_without_blocking_valid_chunks(
+    tmp_path, monkeypatch
+):
+    value = service(tmp_path, monkeypatch)
+    payload = {
+        "user_id": "user-api",
+        "lesson": lesson_payload(),
+        "source_media_id": "youtube:lesson",
+    }
+    payload["lesson"]["sentences"][0]["chunks"] = [
+        {"text": "[music]", "meaning": ""},
+        {"text": "&gt;&gt; Sounds good.", "meaning": "好主意。"},
+    ]
+
+    response = client.post("/api/chunks/memory/from-lesson", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"added": 1, "total": 1}
+    assert [chunk.text for chunk in value.list_chunks("user-api")] == [
+        "Sounds good."
+    ]
+
+
+def test_direct_memory_save_rejects_invalid_sanitized_text(tmp_path, monkeypatch):
+    service(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/chunks/memory", json=create_payload(text="[music]")
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "chunk text must contain reusable spoken language"
+    }
+
+
 def test_active_recall_endpoint_excludes_current_lesson(tmp_path, monkeypatch):
     service(tmp_path, monkeypatch)
     current = client.post(
