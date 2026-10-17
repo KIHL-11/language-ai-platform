@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 
 import type { TrainingStage } from '../types/lesson'
+import type { TrainingSessionState } from './trainingMachine'
 import {
   createTrainingState,
   getCurrentStage,
@@ -15,8 +16,9 @@ import {
 export function useTrainingSession(
   order: TrainingStage[],
   sentenceCount: number,
+  initialState?: TrainingSessionState,
 ) {
-  const [state, setState] = useState(() => createTrainingState(order))
+  const [state, setState] = useState(() => initialState ?? createTrainingState(order))
 
   const nextStage = useCallback(() => {
     setState((current) => advanceStage(current))

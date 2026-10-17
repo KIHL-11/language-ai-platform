@@ -90,16 +90,38 @@ describe('TrainingSession persistent memory integration', () => {
 
   it('imports a lesson once with the stable learner ID across rerenders', async () => {
     const client = memoryClient()
+    const imported = vi.fn()
     const view = render(
-      <TrainingSession lesson={lesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,
+      <TrainingSession lesson={lesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} onLessonMemoryImported={imported} />,
     )
 
     await waitFor(() => expect(client.importLessonChunks).toHaveBeenCalledOnce())
     expect(client.importLessonChunks).toHaveBeenCalledWith(LEARNER_ID, lesson)
+    expect(imported).toHaveBeenCalledOnce()
     view.rerender(
       <TrainingSession lesson={{ ...lesson }} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,
     )
     expect(client.importLessonChunks).toHaveBeenCalledOnce()
+  })
+
+  it('skips an already persisted lesson import after a restored page load', async () => {
+    const client = memoryClient()
+    const imported = vi.fn()
+    render(
+      <TrainingSession
+        lesson={lesson}
+        audioUrl={null}
+        onExit={vi.fn()}
+        memoryClient={client}
+        devMode={false}
+        lessonMemoryImported
+        onLessonMemoryImported={imported}
+      />,
+    )
+
+    await screen.findByText('No earlier chunks are ready for review yet.')
+    expect(client.importLessonChunks).not.toHaveBeenCalled()
+    expect(imported).not.toHaveBeenCalled()
   })
 
   it('uses source language and current lesson exclusion, then advances to Blind Listening', async () => {

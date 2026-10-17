@@ -1,14 +1,24 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
 import SentenceCard from '../components/SentenceCard'
 import TrainingFlow from '../components/TrainingFlow'
 import { API_BASE_URL } from '../api/lesson'
 import { getDevStageOverride } from '../training/devStageJump'
+import { createTrainingState } from '../training/trainingMachine'
+import type { TrainingSessionState } from '../training/trainingMachine'
 import type { Lesson } from '../types/lesson'
 import TrainingSession from './TrainingSession'
 
 interface LessonViewerProps {
   lesson: Lesson
+  initialIsTraining?: boolean
+  initialTrainingState?: TrainingSessionState
+  lessonMemoryImported?: boolean
+  onSessionChange?: (
+    isTraining: boolean,
+    state: TrainingSessionState,
+  ) => void
+  onLessonMemoryImported?: () => void
 }
 
 const AI_STATUS_LABELS: Record<Lesson['ai']['status'], string> = {
@@ -23,21 +33,59 @@ const AI_STATUS_STYLES: Record<Lesson['ai']['status'], string> = {
   failed: 'bg-[#fbe7e5] text-[#9d241b]',
 }
 
-export default function LessonViewer({ lesson }: LessonViewerProps) {
-  const [isTraining, setIsTraining] = useState(
-    () =>
-      getDevStageOverride(window.location.search, import.meta.env.DEV) !== null,
+export default function LessonViewer({
+  lesson,
+  initialIsTraining = false,
+  initialTrainingState,
+  lessonMemoryImported = false,
+  onSessionChange,
+  onLessonMemoryImported,
+}: LessonViewerProps) {
+  const devStageOverride = getDevStageOverride(
+    window.location.search,
+    import.meta.env.DEV,
   )
+  const [isTraining, setIsTraining] = useState(
+    () => initialIsTraining || devStageOverride !== null,
+  )
+  const [trainingState, setTrainingState] = useState(
+    initialTrainingState ?? createTrainingState(lesson.training_order),
+  )
+  const [memoryImported, setMemoryImported] = useState(lessonMemoryImported)
   const audioUrl = lesson.audio_url
     ? `${API_BASE_URL}${lesson.audio_url}`
     : null
+
+  const handleStateChange = useCallback((state: TrainingSessionState) => {
+    setTrainingState(state)
+    onSessionChange?.(true, state)
+  }, [onSessionChange])
+
+  const handleMemoryImported = useCallback(() => {
+    setMemoryImported(true)
+    onLessonMemoryImported?.()
+  }, [onLessonMemoryImported])
+
+  function handleExit() {
+    setIsTraining(false)
+    onSessionChange?.(false, trainingState)
+  }
+
+  function handleStart() {
+    setIsTraining(true)
+    onSessionChange?.(true, trainingState)
+  }
 
   if (isTraining) {
     return (
       <TrainingSession
         lesson={lesson}
         audioUrl={audioUrl}
-        onExit={() => setIsTraining(false)}
+        initialState={trainingState}
+        lessonMemoryImported={memoryImported}
+        onStateChange={handleStateChange}
+        onLessonMemoryImported={handleMemoryImported}
+        onExit={handleExit}
       />
     )
   }
@@ -106,7 +154,7 @@ export default function LessonViewer({ lesson }: LessonViewerProps) {
             </span>
             <button
               type="button"
-              onClick={() => setIsTraining(true)}
+              onClick={handleStart}
               className="h-10 bg-[#176b5b] px-5 text-sm font-semibold text-white hover:bg-[#115548] focus:outline-none focus:ring-2 focus:ring-[#176b5b] focus:ring-offset-2"
             >
               Start Training
