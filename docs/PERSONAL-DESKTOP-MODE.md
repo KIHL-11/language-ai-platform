@@ -71,8 +71,8 @@ Remove only the registered service, plist, and generated launcher:
 ```
 
 Uninstall preserves the repository, backend configuration, virtual
-environment, Chunk Memory, learner data, generated media, browser storage, and
-logs.
+environment, Chunk Memory, the Learning Library and its persistent audio,
+generated media, browser storage, and logs.
 
 ## Browser storage migration note
 
@@ -82,9 +82,11 @@ Browser localStorage belongs to an exact origin. A session previously saved at
 with a new browser session and learner identity. Backend Chunk Memory is stored
 separately and is not changed or deleted by installation, update, or uninstall.
 
-Lesson media remains temporary backend state. Refresh works while the referenced
-file remains in `backend/media`, but existing cleanup or a missing file can make
-an old lesson audio URL unavailable.
+Unsaved Lesson media remains temporary backend state. My Library copies an
+available safe local training-audio file into ignored persistent storage under
+`backend/storage/library_media`; a Lesson is still saved with audio marked
+unavailable when no source file can be copied. See
+[LEARNING-LIBRARY.md](LEARNING-LIBRARY.md) for exact behavior.
 
 ## Required post-merge macOS smoke test
 

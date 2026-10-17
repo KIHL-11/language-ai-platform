@@ -24,7 +24,7 @@ const lesson: Lesson = {
 }
 const fetchMock = vi.fn()
 const response = (body: unknown, status = 200) => ({ ok: status === 200, status, json: async () => body })
-beforeEach(() => { vi.stubGlobal('fetch', fetchMock); fetchMock.mockReset(); window.history.replaceState({}, '', '/') })
+beforeEach(() => { localStorage.clear(); vi.stubGlobal('fetch', fetchMock); fetchMock.mockReset(); window.history.replaceState({}, '', '/') })
 afterEach(() => vi.unstubAllGlobals())
 
 async function openSearch() {
