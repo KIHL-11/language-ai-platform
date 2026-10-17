@@ -34,13 +34,14 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 from services.api.lesson_api import router as lesson_router
 from services.api.chunk_api import router as chunk_router
 from services.api.realtime_api import router as realtime_router
 from services.api.media_discovery_api import router as media_discovery_router
+from services.api.library_api import router as library_router
 
 app.include_router(
     lesson_router,
@@ -56,6 +57,10 @@ app.include_router(
 )
 app.include_router(
     media_discovery_router,
+    prefix="/api"
+)
+app.include_router(
+    library_router,
     prefix="/api"
 )
 # 口音 + 性别 → 默认嗓音（用对话级新嗓音，比老的 Aria/Guy 自然很多）

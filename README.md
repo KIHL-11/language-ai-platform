@@ -14,6 +14,7 @@ The FastAPI backend provides:
 - a validated Lesson schema
 - mock-first or configured AI lesson analysis
 - local semantic chunk storage and retrieval
+- a persistent local Learning Library with durable Lesson snapshots and audio
 - a server-side endpoint for temporary OpenAI Realtime credentials
 
 ### Frontend
@@ -38,10 +39,12 @@ page restores the lesson, stage, and sentence position. The saved lesson keeps
 only its backend-relative media URL; it never stores audio blobs, recordings,
 credentials, or Realtime secrets.
 
-Generated media is still temporary backend state. A browser refresh can reuse
-it while that backend media remains available, but a backend restart or media
-cleanup can invalidate the restored audio URL. Regenerating the lesson is the
-current recovery path.
+The browser session is the active lesson, while My Library is the durable
+collection. Saving a Lesson copies a safe local training-audio asset into
+Library-owned storage when it is available; otherwise the Lesson and transcript
+are still saved with audio marked unavailable. See
+[docs/LEARNING-LIBRARY.md](docs/LEARNING-LIBRARY.md) for storage, recovery, and
+manual smoke-test details.
 
 ## Development safety
 

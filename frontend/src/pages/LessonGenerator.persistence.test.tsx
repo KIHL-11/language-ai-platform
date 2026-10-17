@@ -11,6 +11,7 @@ import {
 import { createTrainingState } from '../training/trainingMachine'
 import type { TrainingSessionState } from '../training/trainingMachine'
 import { personalLesson } from '../testFixtures/personalLesson'
+import { libraryItem } from '../testFixtures/libraryItem'
 import LessonGenerator from './LessonGenerator'
 
 
@@ -47,20 +48,24 @@ describe('LessonGenerator personal session restore', () => {
     localStorage.clear()
     window.history.replaceState({}, '', '/')
     fetchMock.mockReset()
-    fetchMock.mockResolvedValue(response({ chunks: [] }))
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/library/items')) return response(libraryItem)
+      return response({ chunks: [] })
+    })
     vi.stubGlobal('fetch', fetchMock)
   })
 
   afterEach(() => vi.unstubAllGlobals())
 
-  it('restores a valid saved lesson in review mode without a network request', () => {
+  it('restores a valid saved lesson and ensures it in the Library', async () => {
     savePersonalSession(createPersonalSession(personalLesson))
 
     render(<LessonGenerator />)
 
     expect(screen.getByRole('heading', { name: personalLesson.title })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Start Training' })).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0][0]).toContain('/api/library/items')
   })
 
   it.each([
@@ -101,7 +106,11 @@ describe('LessonGenerator personal session restore', () => {
       source_url: 'https://www.youtube.com/watch?v=replacement',
     }
     savePersonalSession(createPersonalSession(personalLesson))
-    fetchMock.mockResolvedValueOnce(response(nextLesson))
+    fetchMock.mockImplementation(async (requestUrl: string) =>
+      String(requestUrl).includes('/api/lesson/from-url')
+        ? response(nextLesson)
+        : response({ ...libraryItem, lesson: nextLesson }),
+    )
     render(<LessonGenerator />)
 
     await user.clear(screen.getByLabelText('YouTube URL'))
@@ -120,7 +129,12 @@ describe('LessonGenerator personal session restore', () => {
   it('retains the saved lesson when replacement generation fails', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))
-    fetchMock.mockRejectedValueOnce(new Error('temporarily offline'))
+    fetchMock.mockImplementation(async (requestUrl: string) => {
+      if (String(requestUrl).includes('/api/lesson/from-url')) {
+        throw new Error('temporarily offline')
+      }
+      return response(libraryItem)
+    })
     render(<LessonGenerator />)
 
     await user.clear(screen.getByLabelText('YouTube URL'))
@@ -173,11 +187,11 @@ describe('LessonGenerator personal session restore', () => {
       url: String(url),
       method: options?.method ?? 'GET',
     }))
-    expect(requests).toHaveLength(1)
-    expect(requests[0]).toMatchObject({ method: 'GET' })
-    expect(requests[0].url).toContain('/active-recall')
-    expect(requests[0].url).not.toContain('/from-lesson')
-    expect(requests[0].url).not.toContain('/practice')
+    expect(requests).toHaveLength(2)
+    expect(requests.some((request) => request.method === 'POST' && request.url.includes('/api/library/items'))).toBe(true)
+    expect(requests.some((request) => request.method === 'GET' && request.url.includes('/active-recall'))).toBe(true)
+    expect(requests.every((request) => !request.url.includes('/from-lesson'))).toBe(true)
+    expect(requests.every((request) => !request.url.includes('/practice'))).toBe(true)
   })
 
   it('ignores invalid storage and returns to lesson generation safely', () => {

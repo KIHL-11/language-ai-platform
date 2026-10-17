@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 
 import { createLessonFromUrl } from '../api/lesson'
+import { saveLibraryItem, updateLibraryProgress } from '../api/library'
 import LessonViewer from './LessonViewer'
 import MediaDiscovery from '../components/MediaDiscovery'
 import type {
@@ -14,6 +15,7 @@ import {
   type PersonalSession,
 } from '../session/personalSession'
 import type { TrainingSessionState } from '../training/trainingMachine'
+import type { LibraryProgress } from '../types/library'
 
 export default function LessonGenerator() {
   const [personalSession, setPersonalSession] = useState(loadPersonalSession)
@@ -26,9 +28,62 @@ export default function LessonGenerator() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [mode, setMode] = useState<'url' | 'discovery'>('url')
+  const [libraryWarning, setLibraryWarning] = useState<string | null>(null)
   const generating = useRef(false)
+  const libraryItemId = useRef<string | null>(null)
+  const lastSyncedProgress = useRef<string | null>(null)
+  const lastQueuedProgress = useRef<string | null>(null)
+  const progressSyncTail = useRef<Promise<void>>(Promise.resolve())
+
+  const progressForSession = useCallback((session: PersonalSession): LibraryProgress => ({
+    is_training: session.isTraining,
+    stage_index: session.trainingState.stageIndex,
+    sentence_index: session.trainingState.sentenceIndex,
+    completed_stages: session.trainingState.completedStages,
+    training_order: session.trainingState.order,
+    lesson_memory_imported: session.lessonMemoryImported,
+  }), [])
+
+  const queueLibraryProgress = useCallback((itemId: string, progress: LibraryProgress) => {
+    const serialized = JSON.stringify(progress)
+    const syncKey = `${itemId}:${serialized}`
+    if (syncKey === lastSyncedProgress.current || syncKey === lastQueuedProgress.current) return
+    lastQueuedProgress.current = syncKey
+    progressSyncTail.current = progressSyncTail.current.then(async () => {
+      await updateLibraryProgress(itemId, progress)
+      lastSyncedProgress.current = syncKey
+    }).catch(() => {
+      // Progress persistence is best-effort and must never interrupt training.
+    }).finally(() => {
+      if (lastQueuedProgress.current === syncKey) lastQueuedProgress.current = null
+    })
+  }, [])
+
+  const ensureLibraryItem = useCallback(async (session: PersonalSession) => {
+    try {
+      const progress = progressForSession(session)
+      const item = await saveLibraryItem(session.lesson, progress)
+      libraryItemId.current = item.id
+      lastSyncedProgress.current = `${item.id}:${JSON.stringify(progress)}`
+      setLibraryWarning(null)
+      const current = sessionRef.current
+      if (current?.lesson.id === session.lesson.id) {
+        queueLibraryProgress(item.id, progressForSession(current))
+      }
+    } catch {
+      setLibraryWarning('Lesson ready, but it could not be saved to My Library.')
+    }
+  }, [progressForSession, queueLibraryProgress])
+
+  useEffect(() => {
+    const restored = sessionRef.current
+    if (restored) void ensureLibraryItem(restored)
+  }, [ensureLibraryItem])
 
   function replaceSession(session: PersonalSession) {
+    libraryItemId.current = null
+    lastSyncedProgress.current = null
+    lastQueuedProgress.current = null
     savePersonalSession(session)
     sessionRef.current = session
     setPersonalSession(session)
@@ -44,7 +99,9 @@ export default function LessonGenerator() {
     const next = { ...current, isTraining, trainingState }
     savePersonalSession(next)
     sessionRef.current = next
-  }, [])
+    const progress = progressForSession(next)
+    if (libraryItemId.current) queueLibraryProgress(libraryItemId.current, progress)
+  }, [progressForSession, queueLibraryProgress])
 
   const handleLessonMemoryImported = useCallback(() => {
     const current = sessionRef.current
@@ -52,7 +109,9 @@ export default function LessonGenerator() {
     const next = { ...current, lessonMemoryImported: true }
     savePersonalSession(next)
     sessionRef.current = next
-  }, [])
+    const progress = progressForSession(next)
+    if (libraryItemId.current) queueLibraryProgress(libraryItemId.current, progress)
+  }, [progressForSession, queueLibraryProgress])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -74,7 +133,9 @@ export default function LessonGenerator() {
         level,
         vocals: false,
       })
-      replaceSession(createPersonalSession(result))
+      const session = createPersonalSession(result)
+      replaceSession(session)
+      void ensureLibraryItem(session)
     } catch {
       setError('Lesson generation failed. Please try again.')
     } finally {
@@ -84,17 +145,7 @@ export default function LessonGenerator() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f3f7f5] font-['Aptos','Segoe_UI',sans-serif] text-[#18211f]">
-      <header className="border-b border-[#ccd6d1] bg-white">
-        <div className="mx-auto flex h-16 max-w-5xl items-center px-5 sm:px-8">
-          <span className="text-sm font-semibold text-[#176b5b]">
-            Language AI
-          </span>
-          <span className="mx-3 h-4 w-px bg-[#ccd6d1]" aria-hidden="true" />
-          <span className="text-sm text-[#58635f]">Lesson Generator</span>
-        </div>
-      </header>
-
+    <main className="min-h-screen bg-[#f3f7f5] text-[#18211f]">
       <div className="mx-auto max-w-5xl px-5 py-10 sm:px-8 sm:py-14">
         <section aria-labelledby="generator-title">
           <h1
@@ -192,6 +243,15 @@ export default function LessonGenerator() {
             <p className="border-l-4 border-[#b42318] bg-white px-4 py-3 text-sm text-[#8f1d14]">
               {error}
             </p>
+          )}
+          {libraryWarning && (
+            <div className="border-l-4 border-[#b7791f] bg-white px-4 py-3 text-sm">
+              <span>{libraryWarning}</span>{' '}
+              <button type="button" className="font-semibold text-[#176b5b]" onClick={() => {
+                const current = sessionRef.current
+                if (current) void ensureLibraryItem(current)
+              }}>Retry save</button>
+            </div>
           )}
         </div>
 
