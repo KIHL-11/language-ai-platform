@@ -1,5 +1,5 @@
 import type { Lesson, SourceLanguage } from '../types/lesson'
-import { API_BASE_URL } from './lesson'
+import { API_BASE_URL } from './apiBase'
 
 export type PracticeOutcome = 'success' | 'partial' | 'failure'
 

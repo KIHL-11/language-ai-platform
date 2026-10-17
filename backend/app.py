@@ -15,10 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 import edge_tts
-from fastapi import FastAPI, File, Form, UploadFile, Request
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from services.media.extractor import extract_media
@@ -26,6 +25,7 @@ from services.schemas.lesson import SourceLanguage
 
 BASE = Path(__file__).parent
 MEDIA = BASE / "media"
+FRONTEND_DIST = BASE.parent / "frontend" / "dist"
 MEDIA.mkdir(exist_ok=True)
 app = FastAPI(title="英语听说训练器")
 app.add_middleware(
@@ -507,9 +507,63 @@ async def api_ipa(word: str = ""):
 async def health():
     return {"ok": True, "azure": bool(AZURE_KEY), "region": AZURE_REGION}
 
-# 首页 + 静态资源（放最后，避免盖住上面的 /api 路由）
-@app.get("/")
-async def index():
-    return FileResponse(BASE / "index.html")
+def _safe_static_file(root: Path, relative_path: str) -> Path:
+    """Resolve one public file without allowing traversal or symlink escapes."""
+    resolved_root = root.resolve()
+    candidate = (resolved_root / relative_path).resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return candidate
 
-app.mount("/", StaticFiles(directory=str(BASE)), name="static")
+
+def _personal_frontend_index():
+    index_path = FRONTEND_DIST / "index.html"
+    if not index_path.is_file():
+        return PlainTextResponse(
+            "Personal frontend build is missing at frontend/dist/index.html. "
+            "Run `cd frontend && npm run build`, or use the Vite development "
+            "server at http://localhost:5173.",
+            status_code=503,
+        )
+    return FileResponse(index_path)
+
+
+# Explicit public-file routes stay ahead of the SPA fallback. API routers above
+# remain authoritative for /api/*, while generated media never shares the
+# frontend asset root.
+@app.get("/media/{media_path:path}", include_in_schema=False)
+async def media_file(media_path: str):
+    return FileResponse(_safe_static_file(MEDIA, media_path))
+
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+async def frontend_asset(asset_path: str):
+    return FileResponse(
+        _safe_static_file(FRONTEND_DIST / "assets", asset_path)
+    )
+
+
+@app.get("/", include_in_schema=False)
+async def index():
+    return _personal_frontend_index()
+
+
+@app.get("/{frontend_path:path}", include_in_schema=False)
+async def frontend_route(frontend_path: str):
+    if frontend_path == "api" or frontend_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API route not found")
+    if frontend_path == "media" or frontend_path.startswith("media/"):
+        raise HTTPException(status_code=404, detail="Media file not found")
+    if frontend_path == "assets" or frontend_path.startswith("assets/"):
+        raise HTTPException(status_code=404, detail="Frontend asset not found")
+    try:
+        public_file = _safe_static_file(FRONTEND_DIST, frontend_path)
+    except HTTPException:
+        pass
+    else:
+        return FileResponse(public_file)
+    return _personal_frontend_index()

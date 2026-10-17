@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 
 import SentenceCard from '../components/SentenceCard'
 import TrainingFlow from '../components/TrainingFlow'
-import { API_BASE_URL } from '../api/lesson'
+import { API_BASE_URL } from '../api/apiBase'
 import { getDevStageOverride } from '../training/devStageJump'
 import { createTrainingState } from '../training/trainingMachine'
 import type { TrainingSessionState } from '../training/trainingMachine'

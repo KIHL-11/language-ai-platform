@@ -81,6 +81,21 @@ npm run dev
 
 The development server is available at `http://127.0.0.1:5173` by default.
 
+## macOS personal desktop mode
+
+After the normal backend and frontend dependencies are installed, macOS users
+can build the frontend, register a local-only background service, and create
+`~/Applications/Language AI.app` with:
+
+```bash
+./scripts/install_personal_app_macos.sh
+```
+
+Daily use then needs only the generated application; FastAPI serves both the
+React build and existing APIs at `http://127.0.0.1:8000`. See
+[docs/PERSONAL-DESKTOP-MODE.md](docs/PERSONAL-DESKTOP-MODE.md) for update,
+status, uninstall, localStorage migration, and post-merge smoke-test details.
+
 ## Migration status
 
 See [docs/HANDOFF-2026-10-06.md](docs/HANDOFF-2026-10-06.md) for the verified
