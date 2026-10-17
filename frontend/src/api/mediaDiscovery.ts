@@ -1,4 +1,4 @@
-import { API_BASE_URL } from './lesson'
+import { API_BASE_URL } from './apiBase'
 import type { MediaCandidate, MediaDiscoveryRequest } from '../types/mediaDiscovery'
 
 export async function discoverMedia(request: MediaDiscoveryRequest, signal?: AbortSignal): Promise<MediaCandidate[]> {

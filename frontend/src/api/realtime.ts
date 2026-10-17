@@ -1,4 +1,4 @@
-import { API_BASE_URL } from './lesson'
+import { API_BASE_URL } from './apiBase'
 
 export interface RealtimeClientCredential {
   value: string
