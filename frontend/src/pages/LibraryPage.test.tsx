@@ -95,6 +95,16 @@ describe('My Library', () => {
     expect(await screen.findByRole('button', { name: 'Curate Words & Chunks' })).toBeEnabled()
   })
 
+  it('opens the shared Listening Workspace entry point from Library detail', async () => {
+    const user = userEvent.setup()
+    const onListen = vi.fn()
+    render(<LibraryPage onOpen={vi.fn()} onListen={onListen} />)
+    await user.click(await screen.findByRole('button', { name: /Daily lesson/ }))
+    await user.click(await screen.findByRole('button', { name: 'Open Listening Workspace' }))
+
+    expect(onListen).toHaveBeenCalledWith(libraryItem)
+  })
+
   it('continues from the saved stage and sentence without regeneration', async () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()

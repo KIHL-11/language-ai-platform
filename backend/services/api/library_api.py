@@ -7,6 +7,7 @@ from services.schemas.library import (
     LibraryListResponse,
     LibraryProgressRequest,
     LibrarySaveRequest,
+    ListeningProgressRequest,
 )
 
 
@@ -48,6 +49,18 @@ def get_library_item(item_id: str):
 def update_library_progress(item_id: str, request: LibraryProgressRequest):
     item = _store_error(
         lambda: library_store.update_progress(item_id, request.model_dump())
+    )
+    return library_store.item_for_response(item)
+
+
+@router.patch("/library/items/{item_id}/listening-progress", response_model=LibraryItem)
+def update_library_listening_progress(
+    item_id: str, request: ListeningProgressRequest
+):
+    item = _store_error(
+        lambda: library_store.update_listening_progress(
+            item_id, request.model_dump()
+        )
     )
     return library_store.item_for_response(item)
 

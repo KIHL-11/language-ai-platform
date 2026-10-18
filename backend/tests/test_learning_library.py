@@ -14,6 +14,7 @@ from services.library.store import (
     LibraryStoreError,
     source_key_for_lesson,
 )
+from services.schemas.library import ListeningProgress
 from services.schemas.lesson import Lesson
 
 
@@ -88,7 +89,7 @@ def test_create_and_full_lesson_round_trip(tmp_path):
 
     assert created.lesson == original
     assert library.get_item(created.id) == created
-    assert json.loads(library.path.read_text())["version"] == 1
+    assert json.loads(library.path.read_text())["version"] == 2
 
 
 def test_list_is_lightweight_recent_first_summary(tmp_path):
@@ -196,6 +197,167 @@ def test_invalid_stored_progress_resets_only_progress(tmp_path):
     assert restored.progress.is_training is False
 
 
+def test_v1_library_remains_readable_without_rewriting_and_gets_listening_defaults(tmp_path):
+    library = store(tmp_path)
+    item = library.save_item(lesson())
+    payload = json.loads(library.path.read_text())
+    payload["version"] = 1
+    payload["items"][0].pop("listening_progress")
+    original = json.dumps(payload)
+    library.path.write_text(original, encoding="utf-8")
+
+    restored = library.get_item(item.id)
+
+    assert restored.listening_progress == ListeningProgress()
+    assert library.path.read_text(encoding="utf-8") == original
+
+
+def test_next_safe_v1_mutation_migrates_to_v2_and_preserves_guided_progress(tmp_path):
+    library = store(tmp_path)
+    item = library.save_item(lesson(), progress(stage=1, completed=["active_recall"]))
+    payload = json.loads(library.path.read_text())
+    payload["version"] = 1
+    payload["items"][0].pop("listening_progress")
+    library.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    updated = library.update_listening_progress(
+        item.id,
+        {
+            "last_position_seconds": 2.5,
+            "current_sentence_id": 1,
+            "playback_rate": 0.75,
+            "source_visible": False,
+            "translation_visible": True,
+            "mode": "blind",
+        },
+    )
+
+    assert updated.progress.stage_index == 1
+    assert updated.progress.completed_stages == ["active_recall"]
+    assert json.loads(library.path.read_text())["version"] == 2
+
+
+def test_v1_to_v2_migration_preserves_persistent_audio(tmp_path):
+    library = store(tmp_path)
+    library.source_media_root.mkdir(parents=True)
+    (library.source_media_root / "lesson.mp3").write_bytes(b"persistent")
+    item = library.save_item(lesson(audio_url="/media/lesson.mp3"))
+    payload = json.loads(library.path.read_text())
+    payload["version"] = 1
+    payload["items"][0].pop("listening_progress")
+    library.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    updated = library.update_listening_progress(
+        item.id, {"last_position_seconds": 2, "current_sentence_id": 1}
+    )
+
+    assert updated.persistent_audio == item.persistent_audio
+    assert library.audio_path(item.id)[0].read_bytes() == b"persistent"
+
+
+def test_v2_listening_progress_round_trip_and_summary(tmp_path):
+    library = store(tmp_path)
+    item = library.save_item(lesson())
+    expected = {
+        "last_position_seconds": 2.5,
+        "current_sentence_id": 1,
+        "playback_rate": 1.25,
+        "source_visible": True,
+        "translation_visible": False,
+        "mode": "dictation",
+    }
+
+    updated = library.update_listening_progress(item.id, expected)
+    summary = library.list_summaries()[0]
+
+    assert updated.listening_progress.model_dump() == expected
+    assert library.get_item(item.id).listening_progress == updated.listening_progress
+    assert summary.last_position_seconds == 2.5
+    assert summary.has_listening_progress is True
+
+
+def test_listening_update_preserves_lesson_guided_progress_and_audio(tmp_path):
+    library = store(tmp_path)
+    library.source_media_root.mkdir(parents=True)
+    (library.source_media_root / "lesson.mp3").write_bytes(b"audio")
+    item = library.save_item(
+        lesson(audio_url="/media/lesson.mp3"),
+        progress(stage=1, completed=["active_recall"]),
+    )
+
+    updated = library.update_listening_progress(
+        item.id,
+        {"last_position_seconds": 2, "current_sentence_id": 1},
+    )
+
+    assert updated.lesson == item.lesson
+    assert updated.progress == item.progress
+    assert updated.persistent_audio == item.persistent_audio
+    assert library.audio_path(item.id)[0].read_bytes() == b"audio"
+
+
+@pytest.mark.parametrize(
+    "patch,error",
+    [
+        ({"last_position_seconds": -1}, "Invalid Listening progress"),
+        ({"last_position_seconds": 99}, "Listening position is out of range"),
+        ({"current_sentence_id": 999}, "Listening sentence id is out of range"),
+        ({"playback_rate": 2}, "Invalid Listening progress"),
+        ({"mode": "shadowing"}, "Invalid Listening progress"),
+    ],
+)
+def test_invalid_listening_update_is_rejected_without_corruption(tmp_path, patch, error):
+    library = store(tmp_path)
+    item = library.save_item(lesson())
+
+    with pytest.raises(ValueError, match=error):
+        library.update_listening_progress(
+            item.id, {**ListeningProgress().model_dump(), **patch}
+        )
+
+    assert library.get_item(item.id) == item
+
+
+def test_invalid_stored_listening_progress_resets_only_listening_state(tmp_path):
+    library = store(tmp_path)
+    item = library.save_item(lesson(), progress(stage=1, completed=["active_recall"]))
+    payload = json.loads(library.path.read_text())
+    payload["items"][0]["listening_progress"]["last_position_seconds"] = 999
+    library.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = library.get_item(item.id)
+
+    assert restored.lesson == item.lesson
+    assert restored.progress == item.progress
+    assert restored.listening_progress == ListeningProgress()
+
+
+def test_listening_update_has_deterministic_updated_at(tmp_path):
+    times = iter([NOW, LATER])
+    library = store(tmp_path, clock=lambda: next(times))
+    item = library.save_item(lesson())
+
+    updated = library.update_listening_progress(
+        item.id, {"last_position_seconds": 2, "current_sentence_id": 1}
+    )
+
+    assert item.updated_at == NOW
+    assert updated.updated_at == LATER
+
+
+def test_regenerating_lesson_preserves_listening_state(tmp_path):
+    times = iter([NOW, LATER, datetime(2026, 10, 17, 10, 0, tzinfo=timezone.utc)])
+    library = store(tmp_path, clock=lambda: next(times))
+    item = library.save_item(lesson())
+    library.update_listening_progress(
+        item.id, {"last_position_seconds": 2, "current_sentence_id": 1}
+    )
+
+    regenerated = library.save_item(lesson(title="Regenerated"))
+
+    assert regenerated.listening_progress.last_position_seconds == 2
+
+
 def test_delete_removes_only_selected_item(tmp_path):
     library = store(tmp_path)
     first = library.save_item(lesson())
@@ -247,6 +409,23 @@ def test_process_local_lock_serializes_concurrent_upserts(tmp_path):
         list(executor.map(lambda _: library.save_item(lesson()), range(20)))
 
     assert len(library.list_items()) == 1
+
+
+def test_process_local_lock_serializes_listening_updates(tmp_path):
+    library = store(tmp_path)
+    item = library.save_item(lesson())
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(
+            lambda position: library.update_listening_progress(
+                item.id,
+                {"last_position_seconds": position, "current_sentence_id": 1},
+            ),
+            [value / 10 for value in range(20)],
+        ))
+
+    assert 0 <= library.get_item(item.id).listening_progress.last_position_seconds <= 1.9
+    assert json.loads(library.path.read_text())["version"] == 2
 
 
 def test_safe_media_audio_is_copied_and_survives_source_deletion(tmp_path):
@@ -352,6 +531,21 @@ def test_library_api_create_list_get_progress_delete(api_store):
     assert patched.status_code == 200
     assert patched.json()["progress"]["stage_index"] == 1
 
+    listening = client.patch(
+        f"/api/library/items/{item_id}/listening-progress",
+        json={
+            "last_position_seconds": 2,
+            "current_sentence_id": 1,
+            "playback_rate": 0.75,
+            "source_visible": False,
+            "translation_visible": True,
+            "mode": "blind",
+        },
+    )
+    assert listening.status_code == 200
+    assert listening.json()["listening_progress"]["mode"] == "blind"
+    assert listening.json()["progress"]["stage_index"] == 1
+
     deleted = client.delete(f"/api/library/items/{item_id}")
     assert deleted.status_code == 204
     assert client.get(f"/api/library/items/{item_id}").status_code == 404
@@ -386,3 +580,17 @@ def test_library_api_invalid_progress_does_not_change_lesson(api_store):
     assert response.status_code == 422
     restored = client.get(f"/api/library/items/{item['id']}").json()
     assert restored["lesson"] == item["lesson"]
+
+
+def test_library_api_rejects_invalid_listening_position(api_store):
+    item = client.post(
+        "/api/library/items", json={"lesson": lesson().model_dump(mode="json")}
+    ).json()
+
+    response = client.patch(
+        f"/api/library/items/{item['id']}/listening-progress",
+        json={**ListeningProgress().model_dump(), "last_position_seconds": 99},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/api/library/items/{item['id']}").json()["lesson"] == item["lesson"]

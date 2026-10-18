@@ -18,6 +18,7 @@ from services.schemas.library import (
     LibraryItem,
     LibraryItemSummary,
     LibraryProgress,
+    ListeningProgress,
     PersistentAudio,
 )
 
@@ -63,6 +64,25 @@ def validated_progress(value: Any, lesson: Lesson) -> LibraryProgress:
         for stage in progress.completed_stages
     ):
         raise ValueError("Completed stages exceed current progress")
+    return progress
+
+
+def validated_listening_progress(value: Any, lesson: Lesson) -> ListeningProgress:
+    try:
+        progress = ListeningProgress.model_validate(value)
+    except ValidationError as exc:
+        raise ValueError("Invalid Listening progress") from exc
+    duration = max((sentence.end for sentence in lesson.sentences), default=0.0)
+    if duration == 0 and progress.last_position_seconds != 0:
+        raise ValueError("Listening position is out of range")
+    if duration > 0 and progress.last_position_seconds > duration:
+        raise ValueError("Listening position is out of range")
+    sentence_ids = {sentence.id for sentence in lesson.sentences}
+    if (
+        progress.current_sentence_id is not None
+        and progress.current_sentence_id not in sentence_ids
+    ):
+        raise ValueError("Listening sentence id is out of range")
     return progress
 
 
@@ -160,6 +180,14 @@ class LearningLibraryStore:
             )
             item_id = existing.id if existing else uuid.uuid4().hex
             audio = self._persist_audio(lesson, item_id, existing)
+            listening_progress = ListeningProgress()
+            if existing:
+                try:
+                    listening_progress = validated_listening_progress(
+                        existing.listening_progress, lesson
+                    )
+                except ValueError:
+                    pass
             item = LibraryItem(
                 id=item_id,
                 source_key=source_key,
@@ -168,6 +196,7 @@ class LearningLibraryStore:
                 lesson=lesson,
                 progress=progress,
                 persistent_audio=audio,
+                listening_progress=listening_progress,
             )
             if existing_index is None:
                 items.append(item)
@@ -185,6 +214,26 @@ class LearningLibraryStore:
                 progress = validated_progress(progress_value, item.lesson)
                 updated = item.model_copy(
                     update={"progress": progress, "updated_at": self._now()}
+                )
+                items[index] = updated
+                self._write_items(items)
+                return updated
+        raise KeyError(item_id)
+
+    def update_listening_progress(
+        self, item_id: str, progress_value: Any
+    ) -> LibraryItem:
+        with self._lock:
+            items = self._read_items()
+            for index, item in enumerate(items):
+                if item.id != item_id:
+                    continue
+                progress = validated_listening_progress(progress_value, item.lesson)
+                updated = item.model_copy(
+                    update={
+                        "listening_progress": progress,
+                        "updated_at": self._now(),
+                    }
                 )
                 items[index] = updated
                 self._write_items(items)
@@ -232,7 +281,7 @@ class LearningLibraryStore:
             raise LibraryStoreError(f"Malformed Learning Library JSON: {self.path}") from exc
         except OSError as exc:
             raise LibraryStoreError(f"Could not read Learning Library: {self.path}") from exc
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
             raise LibraryStoreError(f"Unsupported Learning Library version: {self.path}")
         records = payload.get("items")
         if not isinstance(records, list):
@@ -247,9 +296,20 @@ class LearningLibraryStore:
                     progress = validated_progress(record.get("progress"), lesson)
                 except ValueError:
                     progress = default_progress(lesson)
+                try:
+                    listening_progress = validated_listening_progress(
+                        record.get("listening_progress", {}), lesson
+                    )
+                except ValueError:
+                    listening_progress = ListeningProgress()
                 items.append(
                     LibraryItem.model_validate(
-                        {**record, "lesson": lesson, "progress": progress}
+                        {
+                            **record,
+                            "lesson": lesson,
+                            "progress": progress,
+                            "listening_progress": listening_progress,
+                        }
                     )
                 )
             except ValidationError as exc:
@@ -260,7 +320,7 @@ class LearningLibraryStore:
 
     def _write_items(self, items: list[LibraryItem]) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
             "items": [item.model_dump(mode="json") for item in items],
         }
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
@@ -369,4 +429,6 @@ class LearningLibraryStore:
             updated_at=item.updated_at,
             progress_status=status,
             audio_available=item.persistent_audio.status == "available",
+            last_position_seconds=item.listening_progress.last_position_seconds,
+            has_listening_progress=item.listening_progress.last_position_seconds > 0,
         )

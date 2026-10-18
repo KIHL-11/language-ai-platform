@@ -73,12 +73,14 @@ practice history. If there are no active curated chunks, Active Recall returns a
 legitimate empty state and does not fall back to legacy automatically imported
 candidates. Existing `chunk_bank.json` records are never migrated or deleted.
 
-## Future boundary
+## Listening and future boundary
 
-The provenance timestamps are intended for M4.3 Listening Workspace. Word and
-chunk items are intended for M4.4 Daily Review and the future Speaking Agent.
-M4.2 does not add a media player, A/B repeat, SRS scheduling, due counts, mastery
-for words, Sync Shadowing scoring, agent conversations, or cloud sync.
+M4.3 Listening Workspace now uses provenance timestamps to show current-sentence
+candidates and saves them through this same Study Bank. It does not duplicate
+candidate generation or persistence. Word and chunk items remain intended for
+M4.4 Daily Review and the future Speaking Agent. Neither M4.2 nor M4.3 adds SRS
+scheduling, due counts, mastery for words, Sync Shadowing scoring, agent
+conversations, or cloud sync.
 
 ## Required real-Mac smoke after merge
 
