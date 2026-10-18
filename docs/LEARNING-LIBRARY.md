@@ -86,8 +86,10 @@ does not add authentication, multi-user storage, cloud sync, playlists, folders,
 tags, training history, or analytics.
 
 Lesson keywords and candidate chunks are preserved exactly as source Lesson
-data. They are not automatically promoted to a curated long-term vocabulary or
-chunk bank. That curation boundary belongs to M4.2.
+data. They are not automatically promoted. M4.2 implements explicit selection
+into the separate Study Bank documented in [STUDY-BANK.md](STUDY-BANK.md).
+Deleting a Library item does not delete curated items because each Study Bank
+provenance record retains its own small source snapshot.
 
 ## Manual macOS smoke test after merge
 

@@ -103,16 +103,6 @@ export default function LessonGenerator() {
     if (libraryItemId.current) queueLibraryProgress(libraryItemId.current, progress)
   }, [progressForSession, queueLibraryProgress])
 
-  const handleLessonMemoryImported = useCallback(() => {
-    const current = sessionRef.current
-    if (!current || current.lessonMemoryImported) return
-    const next = { ...current, lessonMemoryImported: true }
-    savePersonalSession(next)
-    sessionRef.current = next
-    const progress = progressForSession(next)
-    if (libraryItemId.current) queueLibraryProgress(libraryItemId.current, progress)
-  }, [progressForSession, queueLibraryProgress])
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (mode === 'url') await generateLesson(url)
@@ -261,9 +251,7 @@ export default function LessonGenerator() {
             lesson={personalSession.lesson}
             initialIsTraining={personalSession.isTraining}
             initialTrainingState={personalSession.trainingState}
-            lessonMemoryImported={personalSession.lessonMemoryImported}
             onSessionChange={handleSessionChange}
-            onLessonMemoryImported={handleLessonMemoryImported}
           />
         )}
       </div>

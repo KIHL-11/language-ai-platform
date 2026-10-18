@@ -13,12 +13,10 @@ interface LessonViewerProps {
   lesson: Lesson
   initialIsTraining?: boolean
   initialTrainingState?: TrainingSessionState
-  lessonMemoryImported?: boolean
   onSessionChange?: (
     isTraining: boolean,
     state: TrainingSessionState,
   ) => void
-  onLessonMemoryImported?: () => void
 }
 
 const AI_STATUS_LABELS: Record<Lesson['ai']['status'], string> = {
@@ -37,9 +35,7 @@ export default function LessonViewer({
   lesson,
   initialIsTraining = false,
   initialTrainingState,
-  lessonMemoryImported = false,
   onSessionChange,
-  onLessonMemoryImported,
 }: LessonViewerProps) {
   const devStageOverride = getDevStageOverride(
     window.location.search,
@@ -51,7 +47,6 @@ export default function LessonViewer({
   const [trainingState, setTrainingState] = useState(
     initialTrainingState ?? createTrainingState(lesson.training_order),
   )
-  const [memoryImported, setMemoryImported] = useState(lessonMemoryImported)
   const audioUrl = lesson.audio_url
     ? `${API_BASE_URL}${lesson.audio_url}`
     : null
@@ -60,11 +55,6 @@ export default function LessonViewer({
     setTrainingState(state)
     onSessionChange?.(true, state)
   }, [onSessionChange])
-
-  const handleMemoryImported = useCallback(() => {
-    setMemoryImported(true)
-    onLessonMemoryImported?.()
-  }, [onLessonMemoryImported])
 
   function handleExit() {
     setIsTraining(false)
@@ -82,9 +72,7 @@ export default function LessonViewer({
         lesson={lesson}
         audioUrl={audioUrl}
         initialState={trainingState}
-        lessonMemoryImported={memoryImported}
         onStateChange={handleStateChange}
-        onLessonMemoryImported={handleMemoryImported}
         onExit={handleExit}
       />
     )

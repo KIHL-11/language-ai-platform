@@ -140,7 +140,7 @@ export default function ActiveRecall({
         </h2>
         <p className="mt-4 text-[#596560]" role="status">
           {recall.status === 'empty'
-            ? 'No earlier chunks are ready for review yet.'
+            ? 'No curated chunks yet. Save useful chunks from your Library first.'
             : 'Saved language is unavailable right now. You can continue training.'}
         </p>
         <button

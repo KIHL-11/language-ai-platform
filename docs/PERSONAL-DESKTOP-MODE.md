@@ -72,7 +72,7 @@ Remove only the registered service, plist, and generated launcher:
 
 Uninstall preserves the repository, backend configuration, virtual
 environment, Chunk Memory, the Learning Library and its persistent audio,
-generated media, browser storage, and logs.
+the Words & Chunks Study Bank, generated media, browser storage, and logs.
 
 ## Browser storage migration note
 

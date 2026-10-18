@@ -182,7 +182,7 @@ describe('LessonGenerator personal session restore', () => {
 
     render(<LessonGenerator />)
 
-    await screen.findByText('No earlier chunks are ready for review yet.')
+    await screen.findByText('No curated chunks yet. Save useful chunks from your Library first.')
     const requests = fetchMock.mock.calls.map(([url, options]) => ({
       url: String(url),
       method: options?.method ?? 'GET',

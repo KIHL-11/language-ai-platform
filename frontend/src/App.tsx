@@ -2,11 +2,12 @@ import { useState } from 'react'
 
 import LessonGenerator from './pages/LessonGenerator'
 import LibraryPage from './pages/LibraryPage'
+import StudyBankPage from './pages/StudyBankPage'
 import { createPersonalSession, savePersonalSession } from './session/personalSession'
 import type { LibraryItem } from './types/library'
 
 function App() {
-  const [view, setView] = useState<'learn' | 'library'>('learn')
+  const [view, setView] = useState<'learn' | 'library' | 'study-bank'>('learn')
   const [lessonRevision, setLessonRevision] = useState(0)
 
   function openLibraryItem(item: LibraryItem, startTraining: boolean) {
@@ -35,13 +36,16 @@ function App() {
           <nav aria-label="Primary" className="flex gap-2">
             <button type="button" aria-current={view === 'learn' ? 'page' : undefined} onClick={() => setView('learn')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Learn</button>
             <button type="button" aria-current={view === 'library' ? 'page' : undefined} onClick={() => setView('library')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">My Library</button>
+            <button type="button" aria-current={view === 'study-bank' ? 'page' : undefined} onClick={() => setView('study-bank')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Words & Chunks</button>
           </nav>
         </div>
       </header>
       {view === 'learn' ? (
         <LessonGenerator key={lessonRevision} />
-      ) : (
+      ) : view === 'library' ? (
         <LibraryPage onOpen={openLibraryItem} />
+      ) : (
+        <StudyBankPage />
       )}
     </div>
   )

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from services.api import chunk_api
+from services.api import study_bank_api
 from services.retrieval.chunk_memory import ChunkMemoryService
 from services.retrieval.chunk_store import ChunkStore
 
@@ -19,6 +20,16 @@ def service(tmp_path, monkeypatch):
         id_factory=lambda: next(identifiers),
     )
     monkeypatch.setattr(chunk_api, "chunk_memory_service", value)
+    class ExistingMemoryIsEligible:
+        def active_chunk_keys(self, user_id, language):
+            return {
+                chunk.normalized_text
+                for chunk in value.list_chunks(user_id, language)
+            }
+
+    monkeypatch.setattr(
+        study_bank_api, "study_bank_store", ExistingMemoryIsEligible()
+    )
     return value
 
 

@@ -87,6 +87,14 @@ describe('My Library', () => {
     expect(screen.getByText('2.0–3.0s')).toBeInTheDocument()
   })
 
+  it('exposes explicit Words & Chunks curation from a Library item', async () => {
+    const user = userEvent.setup()
+    render(<LibraryPage onOpen={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: /Daily lesson/ }))
+
+    expect(await screen.findByRole('button', { name: 'Curate Words & Chunks' })).toBeEnabled()
+  })
+
   it('continues from the saved stage and sentence without regeneration', async () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()

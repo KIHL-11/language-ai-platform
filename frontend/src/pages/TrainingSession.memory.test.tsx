@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -88,25 +88,21 @@ describe('TrainingSession persistent memory integration', () => {
     localStorage.setItem(LEARNER_ID_STORAGE_KEY, LEARNER_ID)
   })
 
-  it('imports a lesson once with the stable learner ID across rerenders', async () => {
+  it('does not bulk-import Lesson candidates when training opens or rerenders', async () => {
     const client = memoryClient()
-    const imported = vi.fn()
     const view = render(
-      <TrainingSession lesson={lesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} onLessonMemoryImported={imported} />,
+      <TrainingSession lesson={lesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,
     )
 
-    await waitFor(() => expect(client.importLessonChunks).toHaveBeenCalledOnce())
-    expect(client.importLessonChunks).toHaveBeenCalledWith(LEARNER_ID, lesson)
-    expect(imported).toHaveBeenCalledOnce()
+    await screen.findByText('No curated chunks yet. Save useful chunks from your Library first.')
     view.rerender(
       <TrainingSession lesson={{ ...lesson }} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,
     )
-    expect(client.importLessonChunks).toHaveBeenCalledOnce()
+    expect(client.importLessonChunks).not.toHaveBeenCalled()
   })
 
-  it('skips an already persisted lesson import after a restored page load', async () => {
+  it('keeps the legacy import API unused for a restored page load', async () => {
     const client = memoryClient()
-    const imported = vi.fn()
     render(
       <TrainingSession
         lesson={lesson}
@@ -114,14 +110,11 @@ describe('TrainingSession persistent memory integration', () => {
         onExit={vi.fn()}
         memoryClient={client}
         devMode={false}
-        lessonMemoryImported
-        onLessonMemoryImported={imported}
       />,
     )
 
-    await screen.findByText('No earlier chunks are ready for review yet.')
+    await screen.findByText('No curated chunks yet. Save useful chunks from your Library first.')
     expect(client.importLessonChunks).not.toHaveBeenCalled()
-    expect(imported).not.toHaveBeenCalled()
   })
 
   it('uses source language and current lesson exclusion, then advances to Blind Listening', async () => {
@@ -156,14 +149,14 @@ describe('TrainingSession persistent memory integration', () => {
       <TrainingSession lesson={germanLesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,
     )
 
-    await screen.findByText('No earlier chunks are ready for review yet.')
+    await screen.findByText('No curated chunks yet. Save useful chunks from your Library first.')
     expect(client.fetchActiveRecallChunks).toHaveBeenCalledWith(
       expect.objectContaining({ language: 'de', currentLessonId: 'de-current' }),
       expect.any(AbortSignal),
     )
   })
 
-  it('does not block training or start voice activity when import and recall are unavailable', async () => {
+  it('does not block training or start voice activity when curated recall is unavailable', async () => {
     const user = userEvent.setup()
     const getUserMedia = vi.fn()
     Object.defineProperty(navigator, 'mediaDevices', {
@@ -171,7 +164,6 @@ describe('TrainingSession persistent memory integration', () => {
       value: { getUserMedia },
     })
     const client = memoryClient()
-    vi.mocked(client.importLessonChunks).mockRejectedValue(new Error('offline'))
     vi.mocked(client.fetchActiveRecallChunks).mockRejectedValue(new Error('offline'))
     render(
       <TrainingSession lesson={lesson} audioUrl={null} onExit={vi.fn()} memoryClient={client} devMode={false} />,

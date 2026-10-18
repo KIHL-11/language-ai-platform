@@ -61,7 +61,7 @@ function isChunkMemory(value: unknown): value is ChunkMemory {
     Number.isInteger(value.failure_count) &&
     typeof value.mastery_score === 'number' &&
     Number.isFinite(value.mastery_score) &&
-    value.active === true
+    typeof value.active === 'boolean'
   )
 }
 

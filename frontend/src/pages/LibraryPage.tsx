@@ -7,6 +7,7 @@ import {
   updateLibraryProgress,
 } from '../api/library'
 import { createTrainingState } from '../training/trainingMachine'
+import StudyCuration from '../components/StudyCuration'
 import type { LibraryItem, LibraryItemSummary } from '../types/library'
 
 
@@ -30,6 +31,7 @@ export default function LibraryPage({ onOpen }: LibraryPageProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [transcriptVisible, setTranscriptVisible] = useState(false)
+  const [curating, setCurating] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -95,6 +97,9 @@ export default function LibraryPage({ onOpen }: LibraryPageProps) {
   }
 
   if (selected) {
+    if (curating) {
+      return <main className="mx-auto max-w-5xl px-5 py-10 sm:px-8"><StudyCuration item={selected} onBack={() => setCurating(false)} /></main>
+    }
     return (
       <main className="mx-auto max-w-5xl px-5 py-10 sm:px-8">
         <button type="button" onClick={() => setSelected(null)} className="text-sm font-semibold text-[#176b5b]">
@@ -115,6 +120,7 @@ export default function LibraryPage({ onOpen }: LibraryPageProps) {
           <button type="button" onClick={() => onOpen(selected, true)} className="h-10 bg-[#176b5b] px-4 text-white">Continue Training</button>
           <button type="button" onClick={trainAgain} className="h-10 border border-[#176b5b] px-4">Train Again</button>
           <button type="button" onClick={() => setTranscriptVisible((value) => !value)} className="h-10 border border-[#aebcb6] px-4">View Transcript</button>
+          <button type="button" onClick={() => setCurating(true)} className="h-10 border border-[#176b5b] px-4">Curate Words & Chunks</button>
           <a href={selected.lesson.source_url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center border border-[#aebcb6] px-4">Open original source</a>
           <button type="button" onClick={removeSelected} className="h-10 border border-[#b42318] px-4 text-[#b42318]">Delete from Library</button>
         </div>

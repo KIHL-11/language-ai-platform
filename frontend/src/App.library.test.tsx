@@ -61,6 +61,17 @@ describe('App Library navigation', () => {
     })
   })
 
+  it('provides top-level Words & Chunks navigation without changing the active session', async () => {
+    const user = userEvent.setup()
+    savePersonalSession(createPersonalSession(personalLesson))
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Words & Chunks' }))
+
+    expect(await screen.findByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
+    expect(loadPersonalSession()?.lesson.id).toBe(personalLesson.id)
+  })
+
   it('does not delete the active Personal Session when its Library item is deleted', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))
