@@ -25,6 +25,15 @@ class PersistentAudio(LibraryModel):
     content_type: str | None = None
 
 
+class ListeningProgress(LibraryModel):
+    last_position_seconds: float = Field(default=0, ge=0)
+    current_sentence_id: int | None = None
+    playback_rate: Literal[0.5, 0.75, 1.0, 1.25] = 1.0
+    source_visible: bool = True
+    translation_visible: bool = True
+    mode: Literal["listen", "blind", "dictation"] = "listen"
+
+
 class LibraryItem(LibraryModel):
     id: str
     source_key: str
@@ -33,6 +42,7 @@ class LibraryItem(LibraryModel):
     lesson: Lesson
     progress: LibraryProgress
     persistent_audio: PersistentAudio = Field(default_factory=PersistentAudio)
+    listening_progress: ListeningProgress = Field(default_factory=ListeningProgress)
 
 
 class LibraryItemSummary(LibraryModel):
@@ -50,6 +60,8 @@ class LibraryItemSummary(LibraryModel):
     updated_at: datetime
     progress_status: Literal["not_started", "in_progress", "complete"]
     audio_available: bool
+    last_position_seconds: float
+    has_listening_progress: bool
 
 
 class LibraryListResponse(LibraryModel):
@@ -68,3 +80,7 @@ class LibraryProgressRequest(LibraryModel):
     completed_stages: list[TrainingStage]
     training_order: list[TrainingStage]
     lesson_memory_imported: bool
+
+
+class ListeningProgressRequest(ListeningProgress):
+    pass

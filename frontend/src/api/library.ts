@@ -4,6 +4,7 @@ import type { Lesson, TrainingStage } from '../types/lesson'
 import type {
   LibraryItem,
   LibraryItemSummary,
+  ListeningProgress,
   LibraryProgress,
 } from '../types/library'
 
@@ -32,12 +33,22 @@ function isProgress(value: unknown): value is LibraryProgress {
     typeof value.lesson_memory_imported === 'boolean'
 }
 
+function isListeningProgress(value: unknown): value is ListeningProgress {
+  return isRecord(value) && typeof value.last_position_seconds === 'number' &&
+    Number.isFinite(value.last_position_seconds) && value.last_position_seconds >= 0 &&
+    (value.current_sentence_id === null || Number.isInteger(value.current_sentence_id)) &&
+    [0.5, 0.75, 1, 1.25].includes(Number(value.playback_rate)) &&
+    typeof value.source_visible === 'boolean' &&
+    typeof value.translation_visible === 'boolean' &&
+    ['listen', 'blind', 'dictation'].includes(String(value.mode))
+}
+
 function isItem(value: unknown): value is LibraryItem {
   if (!isRecord(value) || !isRecord(value.lesson) || !isRecord(value.persistent_audio)) return false
   if (!(typeof value.id === 'string' && typeof value.source_key === 'string' &&
     typeof value.created_at === 'string' && typeof value.updated_at === 'string' &&
     typeof value.lesson.id === 'string' && typeof value.lesson.title === 'string' &&
-    isProgress(value.progress) &&
+    isProgress(value.progress) && isListeningProgress(value.listening_progress) &&
     (value.persistent_audio.status === 'available' || value.persistent_audio.status === 'unavailable'))) {
     return false
   }
@@ -71,7 +82,10 @@ function isSummary(value: unknown): value is LibraryItemSummary {
     (value.duration_seconds === null || typeof value.duration_seconds === 'number') &&
     typeof value.created_at === 'string' && typeof value.updated_at === 'string' &&
     ['not_started', 'in_progress', 'complete'].includes(String(value.progress_status)) &&
-    typeof value.audio_available === 'boolean'
+    typeof value.audio_available === 'boolean' &&
+    typeof value.last_position_seconds === 'number' &&
+    Number.isFinite(value.last_position_seconds) && value.last_position_seconds >= 0 &&
+    typeof value.has_listening_progress === 'boolean'
 }
 
 async function jsonResponse(response: Response, action: string): Promise<unknown> {
@@ -133,6 +147,25 @@ export async function updateLibraryProgress(
     'Saving Library progress failed',
   )
   if (!isItem(value)) throw new Error('Library progress returned an unexpected response.')
+  return value
+}
+
+export async function updateListeningProgress(
+  itemId: string,
+  progress: ListeningProgress,
+): Promise<LibraryItem> {
+  const value = await jsonResponse(
+    await fetch(
+      `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/listening-progress`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(progress),
+      },
+    ),
+    'Saving listening progress failed',
+  )
+  if (!isItem(value)) throw new Error('Listening progress returned an unexpected response.')
   return value
 }
 

@@ -2,13 +2,15 @@ import { useState } from 'react'
 
 import LessonGenerator from './pages/LessonGenerator'
 import LibraryPage from './pages/LibraryPage'
+import ListeningPage from './pages/ListeningPage'
 import StudyBankPage from './pages/StudyBankPage'
 import { createPersonalSession, savePersonalSession } from './session/personalSession'
 import type { LibraryItem } from './types/library'
 
 function App() {
-  const [view, setView] = useState<'learn' | 'library' | 'study-bank'>('learn')
+  const [view, setView] = useState<'learn' | 'listening' | 'library' | 'study-bank'>('learn')
   const [lessonRevision, setLessonRevision] = useState(0)
+  const [listeningItem, setListeningItem] = useState<LibraryItem | null>(null)
 
   function openLibraryItem(item: LibraryItem, startTraining: boolean) {
     const session = {
@@ -28,13 +30,19 @@ function App() {
     setView('learn')
   }
 
+  function openListening(item: LibraryItem) {
+    setListeningItem(item)
+    setView('listening')
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f7f5] font-['Aptos','Segoe_UI',sans-serif] text-[#18211f]">
       <header className="border-b border-[#ccd6d1] bg-white">
         <div className="mx-auto flex min-h-16 max-w-5xl items-center justify-between gap-5 px-5 py-3 sm:px-8">
           <span className="text-sm font-semibold text-[#176b5b]">Language AI</span>
-          <nav aria-label="Primary" className="flex gap-2">
+          <nav aria-label="Primary" className="flex flex-wrap justify-end gap-2">
             <button type="button" aria-current={view === 'learn' ? 'page' : undefined} onClick={() => setView('learn')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Learn</button>
+            <button type="button" aria-current={view === 'listening' ? 'page' : undefined} onClick={() => { setListeningItem(null); setView('listening') }} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Listening</button>
             <button type="button" aria-current={view === 'library' ? 'page' : undefined} onClick={() => setView('library')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">My Library</button>
             <button type="button" aria-current={view === 'study-bank' ? 'page' : undefined} onClick={() => setView('study-bank')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Words & Chunks</button>
           </nav>
@@ -42,8 +50,10 @@ function App() {
       </header>
       {view === 'learn' ? (
         <LessonGenerator key={lessonRevision} />
+      ) : view === 'listening' ? (
+        <ListeningPage key={listeningItem?.id ?? 'listening-home'} initialItem={listeningItem} onCloseInitialItem={() => setListeningItem(null)} />
       ) : view === 'library' ? (
-        <LibraryPage onOpen={openLibraryItem} />
+        <LibraryPage onOpen={openLibraryItem} onListen={openListening} />
       ) : (
         <StudyBankPage />
       )}

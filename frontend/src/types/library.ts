@@ -15,6 +15,18 @@ export interface PersistentAudio {
   content_type: string | null
 }
 
+export type ListeningMode = 'listen' | 'blind' | 'dictation'
+export type ListeningPlaybackRate = 0.5 | 0.75 | 1 | 1.25
+
+export interface ListeningProgress {
+  last_position_seconds: number
+  current_sentence_id: number | null
+  playback_rate: ListeningPlaybackRate
+  source_visible: boolean
+  translation_visible: boolean
+  mode: ListeningMode
+}
+
 export interface LibraryItem {
   id: string
   source_key: string
@@ -23,6 +35,7 @@ export interface LibraryItem {
   lesson: Lesson
   progress: LibraryProgress
   persistent_audio: PersistentAudio
+  listening_progress: ListeningProgress
 }
 
 export interface LibraryItemSummary {
@@ -40,4 +53,6 @@ export interface LibraryItemSummary {
   updated_at: string
   progress_status: 'not_started' | 'in_progress' | 'complete'
   audio_available: boolean
+  last_position_seconds: number
+  has_listening_progress: boolean
 }

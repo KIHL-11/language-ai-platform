@@ -72,6 +72,18 @@ describe('App Library navigation', () => {
     expect(loadPersonalSession()?.lesson.id).toBe(personalLesson.id)
   })
 
+  it('provides top-level Listening navigation backed by Library summaries', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Listening' }))
+
+    expect(await screen.findByRole('heading', { name: 'Listening' })).toBeInTheDocument()
+    expect(screen.getByText(librarySummary.title)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Continue Listening/ })).toBeInTheDocument()
+    expect(document.querySelector('#language-ai-youtube-iframe-api')).toBeNull()
+  })
+
   it('does not delete the active Personal Session when its Library item is deleted', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))

@@ -23,6 +23,14 @@ export const libraryItem: LibraryItem = {
     filename: 'audio.mp3',
     content_type: 'audio/mpeg',
   },
+  listening_progress: {
+    last_position_seconds: 1.25,
+    current_sentence_id: 2,
+    playback_rate: 1,
+    source_visible: true,
+    translation_visible: true,
+    mode: 'listen',
+  },
 }
 
 export const librarySummary: LibraryItemSummary = {
@@ -40,4 +48,6 @@ export const librarySummary: LibraryItemSummary = {
   updated_at: libraryItem.updated_at,
   progress_status: 'in_progress',
   audio_available: true,
+  last_position_seconds: libraryItem.listening_progress.last_position_seconds,
+  has_listening_progress: true,
 }
