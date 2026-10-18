@@ -99,7 +99,7 @@ describe('ActiveRecall', () => {
       <ActiveRecall lesson={lesson} learnerId="learner" onComplete={onComplete} client={clientWith([])} />,
     )
 
-    expect(await screen.findByText('No earlier chunks are ready for review yet.')).toBeInTheDocument()
+    expect(await screen.findByText('No curated chunks yet. Save useful chunks from your Library first.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Complete Active Recall' }))
     expect(onComplete).toHaveBeenCalledOnce()
   })

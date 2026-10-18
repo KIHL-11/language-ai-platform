@@ -1,0 +1,108 @@
+import { useEffect, useState } from 'react'
+
+import {
+  deleteStudyItem,
+  listStudyItems,
+  updateStudyItem,
+} from '../api/studyBank'
+import { getOrCreateLearnerId } from '../session/learnerSession'
+import type { SourceLanguage } from '../types/lesson'
+import type { StudyItem, StudyKind } from '../types/studyBank'
+
+
+export default function StudyBankPage() {
+  const [learnerId] = useState(getOrCreateLearnerId)
+  const [kind, setKind] = useState<StudyKind>('word')
+  const [language, setLanguage] = useState<SourceLanguage | 'all'>('all')
+  const [active, setActive] = useState(true)
+  const [search, setSearch] = useState('')
+  const [items, setItems] = useState<StudyItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let current = true
+    void listStudyItems({
+      userId: learnerId,
+      kind,
+      active,
+      ...(language === 'all' ? {} : { language }),
+      search,
+    }).then((values) => {
+      if (current) {
+        setItems(values)
+        setError(null)
+      }
+    }).catch(() => {
+      if (current) setError('Words & Chunks is unavailable. Please try again.')
+    }).finally(() => {
+      if (current) setLoading(false)
+    })
+    return () => { current = false }
+  }, [active, kind, language, learnerId, search])
+
+  async function setItemActive(item: StudyItem, value: boolean) {
+    try {
+      await updateStudyItem(learnerId, item.id, { active: value })
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id))
+    } catch {
+      setError('The Study Bank item could not be updated.')
+    }
+  }
+
+  async function remove(item: StudyItem) {
+    if (!window.confirm('Permanently delete this Study Bank item?\nPractice history will be preserved.')) return
+    try {
+      await deleteStudyItem(learnerId, item.id)
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id))
+    } catch {
+      setError('The Study Bank item could not be deleted.')
+    }
+  }
+
+  return (
+    <main className="mx-auto max-w-5xl px-5 py-10 sm:px-8">
+      <h1 className="text-3xl font-semibold">Words & Chunks</h1>
+      <p className="mt-2 text-sm text-[#66726e]">Your explicitly curated long-term study material.</p>
+      <div className="mt-6 flex flex-wrap gap-2">
+        {(['word', 'chunk'] as const).map((value) => <button key={value} type="button" aria-pressed={kind === value} onClick={() => setKind(value)} className="h-10 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white">{value === 'word' ? 'Words' : 'Chunks'}</button>)}
+        {(['all', 'en', 'de'] as const).map((value) => <button key={value} type="button" aria-pressed={language === value} onClick={() => setLanguage(value)} className="h-10 border border-[#aebcb6] px-4 aria-pressed:bg-[#dce9e4]">{value === 'all' ? 'All' : value === 'en' ? 'English' : 'German'}</button>)}
+        <button type="button" aria-pressed={active} onClick={() => setActive(true)} className="h-10 border border-[#aebcb6] px-4 aria-pressed:bg-[#dce9e4]">Active</button>
+        <button type="button" aria-pressed={!active} onClick={() => setActive(false)} className="h-10 border border-[#aebcb6] px-4 aria-pressed:bg-[#dce9e4]">Archived</button>
+        <label className="sr-only" htmlFor="study-search">Search Words & Chunks</label>
+        <input id="study-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Words & Chunks" className="h-10 min-w-64 border border-[#aebcb6] px-3" />
+      </div>
+      {loading && <p role="status" className="mt-8">Loading Words & Chunks…</p>}
+      {error && <p role="alert" className="mt-8 text-[#8f1d14]">{error}</p>}
+      {!loading && !error && items.length === 0 && <p className="mt-8 border-y border-[#ccd6d1] bg-white p-6">No {active ? 'active' : 'archived'} {kind === 'word' ? 'words' : 'chunks'} yet.</p>}
+      <ul className="mt-8 space-y-4">
+        {items.map((item) => (
+          <li key={item.id} className="border-y border-[#ccd6d1] bg-white p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">{item.text}</h2>
+                <p className="mt-1">{item.meaning || 'Meaning unavailable'}</p>
+                <p className="mt-2 text-sm text-[#66726e]">{item.source_language === 'en' ? 'English' : 'German'} · {item.provenance.length} source{item.provenance.length === 1 ? '' : 's'} · {item.active ? 'Active' : 'Archived'} · Saved {new Date(item.created_at).toLocaleDateString()}</p>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => void setItemActive(item, !item.active)} className="h-9 border border-[#176b5b] px-3">{item.active ? 'Archive' : 'Restore'}</button>
+                <button type="button" onClick={() => void remove(item)} className="h-9 border border-[#b42318] px-3 text-[#b42318]">Delete</button>
+              </div>
+            </div>
+            <details className="mt-4">
+              <summary className="cursor-pointer font-medium">Sources</summary>
+              <ul className="mt-3 space-y-3">
+                {item.provenance.map((source) => <li key={`${source.library_item_id}:${source.sentence_id}:${source.start}`} className="border-l-2 border-[#ccd6d1] pl-3">
+                  <p className="font-medium">{source.media_title}</p>
+                  <p className="text-xs text-[#66726e]">{source.start.toFixed(1)}–{source.end.toFixed(1)}s</p>
+                  <p className="mt-1 text-sm">{source.sentence_text}</p>
+                  <p className="mt-1 text-sm text-[#66726e]">{source.sentence_translation}</p>
+                </li>)}
+              </ul>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </main>
+  )
+}

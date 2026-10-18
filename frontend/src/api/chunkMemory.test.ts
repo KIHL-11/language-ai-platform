@@ -147,18 +147,17 @@ describe('chunk memory API client', () => {
     expect(result).toEqual(updated)
   })
 
-  it('rejects archived or malformed recall results instead of displaying them', async () => {
+  it('accepts a curated recall result even if its legacy memory active flag is false', async () => {
+    const archived = { ...chunk('archived', 'Alt'), active: false }
     fetchMock.mockResolvedValue(
-      response({ chunks: [{ ...chunk('archived', 'Alt'), active: false }] }),
+      response({ chunks: [archived] }),
     )
 
-    await expect(
-      fetchActiveRecallChunks({
-        learnerId: 'learner-id',
-        language: 'de',
-        currentLessonId: lesson.id,
-        limit: 5,
-      }),
-    ).rejects.toThrow('unexpected response')
+    await expect(fetchActiveRecallChunks({
+      learnerId: 'learner-id',
+      language: 'de',
+      currentLessonId: lesson.id,
+      limit: 5,
+    })).resolves.toEqual([archived])
   })
 })

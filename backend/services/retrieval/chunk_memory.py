@@ -139,13 +139,22 @@ class ChunkMemoryService:
         *,
         current_lesson_id: str | None = None,
         limit: int = DEFAULT_ACTIVE_RECALL_LIMIT,
+        eligible_normalized_texts: set[str] | None = None,
     ) -> list[StoredChunk]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
         bounded_limit = max(1, min(limit, MAX_ACTIVE_RECALL_LIMIT))
         candidates = [
             chunk
-            for chunk in self.list_chunks(user_id, language)
+            for chunk in self.list_chunks(
+                user_id,
+                language,
+                include_archived=eligible_normalized_texts is not None,
+            )
+            if (
+                eligible_normalized_texts is None
+                or chunk.normalized_text in eligible_normalized_texts
+            )
             if current_lesson_id is None
             or chunk.source_lesson_id != current_lesson_id
         ]
@@ -167,4 +176,12 @@ class ChunkMemoryService:
                 chunk.id,
             )
 
-        return sorted(candidates, key=priority)[:bounded_limit]
+        ordered = sorted(candidates, key=priority)
+        unique: list[StoredChunk] = []
+        seen: set[str] = set()
+        for chunk in ordered:
+            if chunk.normalized_text in seen:
+                continue
+            seen.add(chunk.normalized_text)
+            unique.append(chunk)
+        return unique[:bounded_limit]

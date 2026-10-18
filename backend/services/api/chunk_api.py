@@ -115,11 +115,22 @@ def select_active_recall_memory(
         int, Query(ge=1, le=MAX_ACTIVE_RECALL_LIMIT)
     ] = DEFAULT_ACTIVE_RECALL_LIMIT,
 ):
+    from services.api import study_bank_api
+
+    try:
+        eligible = study_bank_api.study_bank_store.active_chunk_keys(
+            user_id, language
+        )
+    except study_bank_api.StudyBankStoreError as exc:
+        raise HTTPException(
+            status_code=500, detail="Could not read curated Study Bank"
+        ) from exc
     chunks = chunk_memory_service.select_for_active_recall(
         user_id,
         language,
         current_lesson_id=current_lesson_id,
         limit=limit,
+        eligible_normalized_texts=eligible,
     )
     return ActiveRecallResponse(chunks=chunks)
 

@@ -15,6 +15,7 @@ The FastAPI backend provides:
 - mock-first or configured AI lesson analysis
 - local semantic chunk storage and retrieval
 - a persistent local Learning Library with durable Lesson snapshots and audio
+- an explicit Words & Chunks Study Bank with source provenance
 - a server-side endpoint for temporary OpenAI Realtime credentials
 
 ### Frontend
@@ -45,6 +46,12 @@ Library-owned storage when it is available; otherwise the Lesson and transcript
 are still saved with audio marked unavailable. See
 [docs/LEARNING-LIBRARY.md](docs/LEARNING-LIBRARY.md) for storage, recovery, and
 manual smoke-test details.
+
+Lesson keywords and chunks remain candidates until the learner explicitly saves
+them. Curated items live in the local Study Bank; only active curated chunks are
+eligible for normal Active Recall. See
+[docs/STUDY-BANK.md](docs/STUDY-BANK.md) for curation, provenance, legacy Chunk
+Memory compatibility, and the M4.2 smoke plan.
 
 ## Development safety
 
