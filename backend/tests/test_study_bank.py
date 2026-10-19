@@ -124,7 +124,8 @@ def test_study_bank_starts_empty_and_persists_words_and_chunks(tmp_path):
     assert created == 2
     assert [item.kind for item in saved] == ["word", "chunk"]
     assert StudyBankStore(value.path).list_items("learner-one", active=None) == list(reversed(saved))
-    assert json.loads(value.path.read_text())["version"] == 1
+    assert json.loads(value.path.read_text())["version"] == 2
+    assert all(item.review.due_at == item.created_at for item in saved)
 
 
 def test_word_dedup_prefers_lemma_and_preserves_learner_fields(tmp_path):

@@ -84,6 +84,24 @@ describe('App Library navigation', () => {
     expect(document.querySelector('#language-ai-youtube-iframe-api')).toBeNull()
   })
 
+  it('provides Daily Review navigation without changing the active Personal Session', async () => {
+    const user = userEvent.setup()
+    savePersonalSession(createPersonalSession(personalLesson))
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/api/review/summary')) return Promise.resolve(response({
+        due_words: 0, due_chunks: 0, new_words: 0, new_chunks: 0,
+        active_words: 0, active_chunks: 0,
+      }))
+      return routeFetch(url, options)
+    })
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Daily Review' }))
+
+    expect(await screen.findByRole('heading', { name: 'Daily Review' })).toBeInTheDocument()
+    expect(loadPersonalSession()?.lesson.id).toBe(personalLesson.id)
+  })
+
   it('does not delete the active Personal Session when its Library item is deleted', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))

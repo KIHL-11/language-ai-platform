@@ -10,6 +10,14 @@ import type { SourceLanguage } from '../types/lesson'
 import type { StudyItem, StudyKind } from '../types/studyBank'
 
 
+function reviewLabel(item: StudyItem): string {
+  if (item.review.review_count === 0) return 'New'
+  const due = new Date(item.review.due_at)
+  if (due.getTime() <= Date.now()) return 'Due now'
+  return `Next review: ${due.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+}
+
+
 export default function StudyBankPage() {
   const [learnerId] = useState(getOrCreateLearnerId)
   const [kind, setKind] = useState<StudyKind>('word')
@@ -82,7 +90,7 @@ export default function StudyBankPage() {
               <div>
                 <h2 className="text-lg font-semibold">{item.text}</h2>
                 <p className="mt-1">{item.meaning || 'Meaning unavailable'}</p>
-                <p className="mt-2 text-sm text-[#66726e]">{item.source_language === 'en' ? 'English' : 'German'} · {item.provenance.length} source{item.provenance.length === 1 ? '' : 's'} · {item.active ? 'Active' : 'Archived'} · Saved {new Date(item.created_at).toLocaleDateString()}</p>
+                <p className="mt-2 text-sm text-[#66726e]">{item.source_language === 'en' ? 'English' : 'German'} · {item.provenance.length} source{item.provenance.length === 1 ? '' : 's'} · {item.active ? 'Active' : 'Archived'} · {reviewLabel(item)} · Saved {new Date(item.created_at).toLocaleDateString()}</p>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => void setItemActive(item, !item.active)} className="h-9 border border-[#176b5b] px-3">{item.active ? 'Archive' : 'Restore'}</button>

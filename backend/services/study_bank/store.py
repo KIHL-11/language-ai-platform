@@ -12,7 +12,14 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from services.retrieval.chunk_quality import prepare_chunk_text
-from services.schemas.study_bank import StudyItem, StudyItemInput, StudyItemPatch
+from services.review.scheduler import schedule_review
+from services.schemas.study_bank import (
+    ReviewRating,
+    ReviewState,
+    StudyItem,
+    StudyItemInput,
+    StudyItemPatch,
+)
 
 
 DEFAULT_STUDY_BANK_PATH = (
@@ -26,6 +33,10 @@ CURATION_NOISE_LABEL = re.compile(
 
 class StudyBankStoreError(RuntimeError):
     """Raised when the local Study Bank cannot be read or written safely."""
+
+
+class StudyBankConflictError(RuntimeError):
+    """Raised when a review transition is stale or targets an inactive item."""
 
 
 def utc_now() -> datetime:
@@ -121,7 +132,7 @@ class StudyBankStore:
 
     def save_items(self, values: Iterable[StudyItemInput]) -> tuple[list[StudyItem], int]:
         with self._lock:
-            items = self._read_items()
+            items, storage_version = self._read_items_and_version()
             results: list[StudyItem] = []
             created = 0
             changed = False
@@ -130,7 +141,7 @@ class StudyBankStore:
                 results.append(saved)
                 created += int(was_created)
                 changed = changed or was_changed
-            if changed:
+            if changed or storage_version == 1:
                 self._write_items(items)
             return results, created
 
@@ -162,6 +173,32 @@ class StudyBankStore:
                 raise KeyError(item_id)
             self._write_items(remaining)
 
+    def rate_item(
+        self,
+        user_id: str,
+        item_id: str,
+        rating: ReviewRating,
+        expected_review_count: int,
+    ) -> tuple[StudyItem, datetime]:
+        """Apply one review transition while holding the persistence lock."""
+        with self._lock:
+            items = self._read_items()
+            for index, item in enumerate(items):
+                if item.id != item_id or item.user_id != user_id:
+                    continue
+                if not item.active:
+                    raise StudyBankConflictError("Archived Study Bank items cannot be rated")
+                if item.review.review_count != expected_review_count:
+                    raise StudyBankConflictError("Study Bank review state is stale")
+                now = self._now()
+                previous_due_at = item.review.due_at
+                review = schedule_review(item.review, rating, now)
+                updated = item.model_copy(update={"review": review, "updated_at": now})
+                items[index] = updated
+                self._write_items(items)
+                return updated, previous_due_at
+        raise KeyError(item_id)
+
     def active_chunk_keys(self, user_id: str, language: str) -> set[str]:
         return {
             item.normalized_text
@@ -190,6 +227,7 @@ class StudyBankStore:
                 updated_at=now,
                 normalized_text=normalized,
                 text=cleaned_text,
+                review=ReviewState.new(now),
                 **value.model_dump(exclude={"text"}),
             )
             items.append(item)
@@ -227,25 +265,40 @@ class StudyBankStore:
         return value.astimezone(timezone.utc)
 
     def _read_items(self) -> list[StudyItem]:
+        items, _ = self._read_items_and_version()
+        return items
+
+    def _read_items_and_version(self) -> tuple[list[StudyItem], int]:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise StudyBankStoreError(f"Malformed Study Bank JSON: {self.path}") from exc
         except OSError as exc:
             raise StudyBankStoreError(f"Could not read Study Bank: {self.path}") from exc
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
             raise StudyBankStoreError(f"Unsupported Study Bank version: {self.path}")
+        version = payload["version"]
         records = payload.get("items")
         if not isinstance(records, list):
             raise StudyBankStoreError(f"Malformed Study Bank items: {self.path}")
         try:
-            return [StudyItem.model_validate(record) for record in records]
-        except ValidationError as exc:
+            normalized_records = []
+            for record in records:
+                if not isinstance(record, dict):
+                    raise ValueError("Study Bank item must be an object")
+                normalized = dict(record)
+                if version == 1:
+                    normalized["review"] = ReviewState.new(
+                        datetime.fromisoformat(str(normalized.get("created_at")).replace("Z", "+00:00"))
+                    ).model_dump(mode="json")
+                normalized_records.append(normalized)
+            return [StudyItem.model_validate(record) for record in normalized_records], version
+        except (TypeError, ValueError, ValidationError) as exc:
             raise StudyBankStoreError(f"Malformed Study Bank item: {self.path}") from exc
 
     def _write_items(self, items: list[StudyItem]) -> None:
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        payload = {"version": 1, "items": [item.model_dump(mode="json") for item in items]}
+        payload = {"version": 2, "items": [item.model_dump(mode="json") for item in items]}
         try:
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

@@ -4,11 +4,12 @@ import LessonGenerator from './pages/LessonGenerator'
 import LibraryPage from './pages/LibraryPage'
 import ListeningPage from './pages/ListeningPage'
 import StudyBankPage from './pages/StudyBankPage'
+import DailyReviewPage from './pages/DailyReviewPage'
 import { createPersonalSession, savePersonalSession } from './session/personalSession'
 import type { LibraryItem } from './types/library'
 
 function App() {
-  const [view, setView] = useState<'learn' | 'listening' | 'library' | 'study-bank'>('learn')
+  const [view, setView] = useState<'learn' | 'listening' | 'review' | 'library' | 'study-bank'>('learn')
   const [lessonRevision, setLessonRevision] = useState(0)
   const [listeningItem, setListeningItem] = useState<LibraryItem | null>(null)
 
@@ -43,6 +44,7 @@ function App() {
           <nav aria-label="Primary" className="flex flex-wrap justify-end gap-2">
             <button type="button" aria-current={view === 'learn' ? 'page' : undefined} onClick={() => setView('learn')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Learn</button>
             <button type="button" aria-current={view === 'listening' ? 'page' : undefined} onClick={() => { setListeningItem(null); setView('listening') }} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Listening</button>
+            <button type="button" aria-current={view === 'review' ? 'page' : undefined} onClick={() => setView('review')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Daily Review</button>
             <button type="button" aria-current={view === 'library' ? 'page' : undefined} onClick={() => setView('library')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">My Library</button>
             <button type="button" aria-current={view === 'study-bank' ? 'page' : undefined} onClick={() => setView('study-bank')} className="h-10 px-4 aria-[current=page]:bg-[#176b5b] aria-[current=page]:text-white">Words & Chunks</button>
           </nav>
@@ -52,6 +54,8 @@ function App() {
         <LessonGenerator key={lessonRevision} />
       ) : view === 'listening' ? (
         <ListeningPage key={listeningItem?.id ?? 'listening-home'} initialItem={listeningItem} onCloseInitialItem={() => setListeningItem(null)} />
+      ) : view === 'review' ? (
+        <DailyReviewPage />
       ) : view === 'library' ? (
         <LibraryPage onOpen={openLibraryItem} onListen={openListening} />
       ) : (

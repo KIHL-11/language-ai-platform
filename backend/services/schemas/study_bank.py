@@ -8,10 +8,68 @@ from services.schemas.lesson import SourceLanguage
 
 StudyKind = Literal["word", "chunk"]
 StudyQuality = Literal["recommended", "review", "rejected"]
+ReviewRating = Literal["again", "hard", "good", "easy"]
+
+MIN_EASE = 1.3
+DEFAULT_EASE = 2.5
+MAX_EASE = 3.0
 
 
 class StudyModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class ReviewState(StudyModel):
+    due_at: datetime
+    interval_seconds: int = Field(ge=0)
+    ease_factor: float = Field(ge=MIN_EASE, le=MAX_EASE)
+    repetition_count: int = Field(ge=0)
+    lapse_count: int = Field(ge=0)
+    review_count: int = Field(ge=0)
+    again_count: int = Field(ge=0)
+    hard_count: int = Field(ge=0)
+    good_count: int = Field(ge=0)
+    easy_count: int = Field(ge=0)
+    last_reviewed_at: datetime | None = None
+    last_rating: ReviewRating | None = None
+
+    @field_validator("due_at", "last_reviewed_at", mode="after")
+    @classmethod
+    def timestamp_is_utc(cls, value: datetime | None):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Review timestamps must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def validate_history(self):
+        rating_total = (
+            self.again_count + self.hard_count + self.good_count + self.easy_count
+        )
+        if rating_total != self.review_count:
+            raise ValueError("Review rating counters must equal review_count")
+        if self.review_count == 0:
+            if self.last_reviewed_at is not None or self.last_rating is not None:
+                raise ValueError("Unreviewed items cannot have a last review")
+        elif self.last_reviewed_at is None or self.last_rating is None:
+            raise ValueError("Reviewed items require a last review and rating")
+        return self
+
+    @classmethod
+    def new(cls, created_at: datetime) -> "ReviewState":
+        return cls(
+            due_at=created_at,
+            interval_seconds=0,
+            ease_factor=DEFAULT_EASE,
+            repetition_count=0,
+            lapse_count=0,
+            review_count=0,
+            again_count=0,
+            hard_count=0,
+            good_count=0,
+            easy_count=0,
+        )
 
 
 class StudyProvenance(StudyModel):
@@ -65,6 +123,7 @@ class StudyItem(StudyModel):
     example: str | None = Field(default=None, max_length=2_000)
     usage: str | None = Field(default=None, max_length=2_000)
     note: str | None = Field(default=None, max_length=2_000)
+    review: ReviewState
 
     @field_validator("created_at", "updated_at", mode="after")
     @classmethod
