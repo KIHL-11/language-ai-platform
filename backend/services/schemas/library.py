@@ -4,6 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.schemas.lesson import Lesson, TrainingStage
+from services.schemas.shadowing import ShadowingProgress
 
 
 class LibraryModel(BaseModel):
@@ -43,6 +44,7 @@ class LibraryItem(LibraryModel):
     progress: LibraryProgress
     persistent_audio: PersistentAudio = Field(default_factory=PersistentAudio)
     listening_progress: ListeningProgress = Field(default_factory=ListeningProgress)
+    shadowing_progress: ShadowingProgress = Field(default_factory=ShadowingProgress)
 
 
 class LibraryItemSummary(LibraryModel):
@@ -62,6 +64,10 @@ class LibraryItemSummary(LibraryModel):
     audio_available: bool
     last_position_seconds: float
     has_listening_progress: bool
+    shadowing_attempt_count: int
+    shadowing_target_sentence_count: int
+    shadowing_stable_sentence_count: int
+    shadowing_last_practiced_at: datetime | None
 
 
 class LibraryListResponse(LibraryModel):

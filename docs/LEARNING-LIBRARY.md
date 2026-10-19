@@ -13,14 +13,15 @@ Library metadata is stored in the ignored local file:
 backend/storage/learning_library.json
 ```
 
-The JSON document has schema version `2` and an `items` array. Each item stores
+The JSON document has schema version `3` and an `items` array. Each item stores
 an ID, deterministic source key, UTC creation and update timestamps, the full
 validated Lesson snapshot, latest validated progress, and persistent-audio
-metadata, plus independent Listening Workspace progress. Version-1 files remain
-readable and receive safe listening defaults in memory; reads alone never rewrite
-storage. The next successful mutation atomically writes version 2. Invalid
-listening progress resets only that progress, preserving the Lesson, Guided
-progress, and audio. Writes use a temporary file followed by an atomic replace and are
+metadata, plus independent Listening Workspace and Sync Shadowing progress.
+Version-1 and version-2 files remain readable and receive safe missing progress
+defaults in memory; reads alone never rewrite storage. The next successful
+mutation atomically writes version 3. Invalid Listening or Shadowing progress
+resets only that progress, preserving the Lesson, Guided progress, and audio.
+Writes use a temporary file followed by an atomic replace and are
 serialized within the backend process. Malformed data and unsupported future
 versions fail clearly instead of being overwritten.
 
@@ -86,6 +87,10 @@ Its `ListeningProgress` stores the bounded media position, validated current
 sentence ID, one of the supported playback rates, source/translation preferences,
 and `listen`, `blind`, or `dictation` mode. The dedicated PATCH endpoint updates
 only this state. See [LISTENING-WORKSPACE.md](LISTENING-WORKSPACE.md).
+
+Sync Shadowing state is also Library-owned and stores bounded counters, latest
+measured evidence, and best-observed metrics per sentence without recording
+audio or unbounded attempt history. See [SYNC-SHADOWING.md](SYNC-SHADOWING.md).
 
 ## Privacy and intentional limits
 

@@ -84,6 +84,17 @@ describe('App Library navigation', () => {
     expect(document.querySelector('#language-ai-youtube-iframe-api')).toBeNull()
   })
 
+  it('provides top-level Shadowing navigation backed by Library summaries', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Shadowing' }))
+
+    expect(await screen.findByRole('heading', { name: 'Shadowing' })).toBeInTheDocument()
+    expect(screen.getByText(librarySummary.title)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start Shadowing' })).toBeInTheDocument()
+  })
+
   it('provides Daily Review navigation without changing the active Personal Session', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))

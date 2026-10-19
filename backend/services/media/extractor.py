@@ -12,6 +12,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, download_range_func
 
 from services.media.subtitles import get_subtitle_languages, parse_vtt
+from services.transcription.local_whisper import get_local_whisper_model, model_name_for_language
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -23,15 +24,8 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-_whisper_models: dict[str, object] = {}
-
-
 def get_whisper_model(source_language: str) -> str:
-    if source_language == "en":
-        return os.getenv("WHISPER_MODEL_EN", os.getenv("WHISPER_MODEL", "base.en"))
-    if source_language == "de":
-        return os.getenv("WHISPER_MODEL_MULTI", "base")
-    raise ValueError(f"Unsupported source language: {source_language}")
+    return model_name_for_language(source_language)
 
 
 def normalize_sentences(sentences: list[dict]) -> list[dict]:
@@ -88,15 +82,7 @@ def cues_to_sentences(
 
 
 def whisper_transcribe(path: str, source_language: str) -> list[dict]:
-    model_name = get_whisper_model(source_language)
-    model = _whisper_models.get(model_name)
-    if model is None:
-        from faster_whisper import WhisperModel
-
-        model = WhisperModel(
-            model_name, device="cpu", compute_type="int8", cpu_threads=6
-        )
-        _whisper_models[model_name] = model
+    model = get_local_whisper_model(source_language)
 
     segments, _ = model.transcribe(
         path,

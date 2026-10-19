@@ -14,6 +14,7 @@ import type { LibraryItem, LibraryItemSummary } from '../types/library'
 interface LibraryPageProps {
   onOpen: (item: LibraryItem, startTraining: boolean) => void
   onListen?: (item: LibraryItem) => void
+  onShadowing?: (item: LibraryItem, sentenceId?: number | null) => void
 }
 
 type LanguageFilter = 'all' | 'en' | 'de'
@@ -24,7 +25,7 @@ const PROGRESS_LABELS = {
   complete: 'Complete',
 }
 
-export default function LibraryPage({ onOpen, onListen }: LibraryPageProps) {
+export default function LibraryPage({ onOpen, onListen, onShadowing }: LibraryPageProps) {
   const [items, setItems] = useState<LibraryItemSummary[]>([])
   const [selected, setSelected] = useState<LibraryItem | null>(null)
   const [filter, setFilter] = useState<LanguageFilter>('all')
@@ -119,6 +120,7 @@ export default function LibraryPage({ onOpen, onListen }: LibraryPageProps) {
         <div className="mt-7 flex flex-wrap gap-3">
           <button type="button" onClick={() => onOpen(selected, false)} className="h-10 border border-[#176b5b] px-4">Open Lesson</button>
           {onListen && <button type="button" onClick={() => onListen(selected)} className="h-10 bg-[#176b5b] px-4 text-white">Open Listening Workspace</button>}
+          {onShadowing && <button type="button" onClick={() => onShadowing(selected)} className="h-10 bg-[#176b5b] px-4 text-white">Open Sync Shadowing</button>}
           <button type="button" onClick={() => onOpen(selected, true)} className="h-10 bg-[#176b5b] px-4 text-white">Continue Training</button>
           <button type="button" onClick={trainAgain} className="h-10 border border-[#176b5b] px-4">Train Again</button>
           <button type="button" onClick={() => setTranscriptVisible((value) => !value)} className="h-10 border border-[#aebcb6] px-4">View Transcript</button>

@@ -21,6 +21,11 @@ from services.schemas.library import (
     ListeningProgress,
     PersistentAudio,
 )
+from services.schemas.shadowing import (
+    SentenceShadowingProgress,
+    ShadowingMetrics,
+    ShadowingProgress,
+)
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -32,6 +37,10 @@ YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
 class LibraryStoreError(RuntimeError):
     """Raised when local Library data cannot be read or written safely."""
+
+
+class LibraryConflictError(RuntimeError):
+    """Raised when an optimistic Library update is stale."""
 
 
 def utc_now() -> datetime:
@@ -83,6 +92,19 @@ def validated_listening_progress(value: Any, lesson: Lesson) -> ListeningProgres
         and progress.current_sentence_id not in sentence_ids
     ):
         raise ValueError("Listening sentence id is out of range")
+    return progress
+
+
+def validated_shadowing_progress(value: Any, lesson: Lesson) -> ShadowingProgress:
+    try:
+        progress = ShadowingProgress.model_validate(value)
+    except ValidationError as exc:
+        raise ValueError("Invalid Shadowing progress") from exc
+    sentence_ids = {sentence.id for sentence in lesson.sentences}
+    if progress.last_sentence_id is not None and progress.last_sentence_id not in sentence_ids:
+        raise ValueError("Shadowing sentence id is out of range")
+    if any(not key.isdigit() or int(key) not in sentence_ids for key in progress.sentences):
+        raise ValueError("Shadowing sentence progress is out of range")
     return progress
 
 
@@ -181,10 +203,17 @@ class LearningLibraryStore:
             item_id = existing.id if existing else uuid.uuid4().hex
             audio = self._persist_audio(lesson, item_id, existing)
             listening_progress = ListeningProgress()
+            shadowing_progress = ShadowingProgress()
             if existing:
                 try:
                     listening_progress = validated_listening_progress(
                         existing.listening_progress, lesson
+                    )
+                except ValueError:
+                    pass
+                try:
+                    shadowing_progress = validated_shadowing_progress(
+                        existing.shadowing_progress, lesson
                     )
                 except ValueError:
                     pass
@@ -197,6 +226,7 @@ class LearningLibraryStore:
                 progress=progress,
                 persistent_audio=audio,
                 listening_progress=listening_progress,
+                shadowing_progress=shadowing_progress,
             )
             if existing_index is None:
                 items.append(item)
@@ -235,6 +265,75 @@ class LearningLibraryStore:
                         "updated_at": self._now(),
                     }
                 )
+                items[index] = updated
+                self._write_items(items)
+                return updated
+        raise KeyError(item_id)
+
+    def record_shadowing_attempt(
+        self,
+        item_id: str,
+        sentence_id: int,
+        expected_attempt_count: int,
+        metrics: ShadowingMetrics,
+    ) -> LibraryItem:
+        with self._lock:
+            items = self._read_items()
+            for index, item in enumerate(items):
+                if item.id != item_id:
+                    continue
+                if sentence_id not in {sentence.id for sentence in item.lesson.sentences}:
+                    raise ValueError("Invalid shadowing sentence id")
+                key = str(sentence_id)
+                current = item.shadowing_progress.sentences.get(
+                    key, SentenceShadowingProgress()
+                )
+                if current.attempt_count != expected_attempt_count:
+                    raise LibraryConflictError("Shadowing attempt state is stale")
+                now = self._now()
+                hit_count = current.target_hit_count + int(metrics.sync_target_met)
+                consecutive = (
+                    current.consecutive_target_hits + 1
+                    if metrics.sync_target_met else 0
+                )
+                updated_sentence = SentenceShadowingProgress(
+                    attempt_count=current.attempt_count + 1,
+                    target_hit_count=hit_count,
+                    consecutive_target_hits=consecutive,
+                    last_attempt_at=now,
+                    last_metrics=metrics,
+                    best_transcript_match_percent=self._best_max(
+                        current.best_transcript_match_percent,
+                        metrics.transcript_match_percent,
+                    ),
+                    best_duration_delta_ratio=self._best_min(
+                        current.best_duration_delta_ratio,
+                        metrics.duration_delta_ratio,
+                    ),
+                    best_abs_start_delay_ms=self._best_min(
+                        current.best_abs_start_delay_ms,
+                        abs(metrics.start_delay_ms) if metrics.start_delay_ms is not None else None,
+                    ),
+                    best_word_timing_mae_ms=self._best_min(
+                        current.best_word_timing_mae_ms,
+                        metrics.word_timing_mae_ms,
+                    ),
+                    best_pause_mae_ms=self._best_min(
+                        current.best_pause_mae_ms,
+                        metrics.pause_mae_ms,
+                    ),
+                )
+                sentences = dict(item.shadowing_progress.sentences)
+                sentences[key] = updated_sentence
+                progress = ShadowingProgress(
+                    last_sentence_id=sentence_id,
+                    last_practiced_at=now,
+                    sentences=sentences,
+                )
+                updated = item.model_copy(update={
+                    "shadowing_progress": progress,
+                    "updated_at": now,
+                })
                 items[index] = updated
                 self._write_items(items)
                 return updated
@@ -281,7 +380,7 @@ class LearningLibraryStore:
             raise LibraryStoreError(f"Malformed Learning Library JSON: {self.path}") from exc
         except OSError as exc:
             raise LibraryStoreError(f"Could not read Learning Library: {self.path}") from exc
-        if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
+        if not isinstance(payload, dict) or payload.get("version") not in {1, 2, 3}:
             raise LibraryStoreError(f"Unsupported Learning Library version: {self.path}")
         records = payload.get("items")
         if not isinstance(records, list):
@@ -302,6 +401,12 @@ class LearningLibraryStore:
                     )
                 except ValueError:
                     listening_progress = ListeningProgress()
+                try:
+                    shadowing_progress = validated_shadowing_progress(
+                        record.get("shadowing_progress", {}), lesson
+                    )
+                except ValueError:
+                    shadowing_progress = ShadowingProgress()
                 items.append(
                     LibraryItem.model_validate(
                         {
@@ -309,6 +414,7 @@ class LearningLibraryStore:
                             "lesson": lesson,
                             "progress": progress,
                             "listening_progress": listening_progress,
+                            "shadowing_progress": shadowing_progress,
                         }
                     )
                 )
@@ -320,7 +426,7 @@ class LearningLibraryStore:
 
     def _write_items(self, items: list[LibraryItem]) -> None:
         payload = {
-            "version": 2,
+            "version": 3,
             "items": [item.model_dump(mode="json") for item in items],
         }
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
@@ -403,6 +509,18 @@ class LearningLibraryStore:
         return value
 
     @staticmethod
+    def _best_min(previous, current):
+        if current is None:
+            return previous
+        return current if previous is None else min(previous, current)
+
+    @staticmethod
+    def _best_max(previous, current):
+        if current is None:
+            return previous
+        return current if previous is None else max(previous, current)
+
+    @staticmethod
     def _summary(item: LibraryItem) -> LibraryItemSummary:
         progress = item.progress
         complete = len(progress.completed_stages) == len(progress.training_order)
@@ -431,4 +549,14 @@ class LearningLibraryStore:
             audio_available=item.persistent_audio.status == "available",
             last_position_seconds=item.listening_progress.last_position_seconds,
             has_listening_progress=item.listening_progress.last_position_seconds > 0,
+            shadowing_attempt_count=sum(
+                value.attempt_count for value in item.shadowing_progress.sentences.values()
+            ),
+            shadowing_target_sentence_count=sum(
+                value.target_hit_count > 0 for value in item.shadowing_progress.sentences.values()
+            ),
+            shadowing_stable_sentence_count=sum(
+                value.consecutive_target_hits >= 3 for value in item.shadowing_progress.sentences.values()
+            ),
+            shadowing_last_practiced_at=item.shadowing_progress.last_practiced_at,
         )

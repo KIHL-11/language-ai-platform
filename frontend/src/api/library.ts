@@ -6,6 +6,9 @@ import type {
   LibraryItemSummary,
   ListeningProgress,
   LibraryProgress,
+  ShadowingAttemptResponse,
+  ShadowingMetrics,
+  ShadowingProgress,
 } from '../types/library'
 
 
@@ -43,12 +46,52 @@ function isListeningProgress(value: unknown): value is ListeningProgress {
     ['listen', 'blind', 'dictation'].includes(String(value.mode))
 }
 
+function isShadowingMetrics(value: unknown): value is ShadowingMetrics {
+  const nullableNumber = (candidate: unknown) => candidate === null || typeof candidate === 'number'
+  return isRecord(value) && typeof value.recognized_text === 'string' &&
+    typeof value.target_word_count === 'number' && typeof value.recognized_word_count === 'number' &&
+    typeof value.transcript_match_percent === 'number' &&
+    typeof value.matched_count === 'number' && typeof value.missed_count === 'number' &&
+    typeof value.extra_count === 'number' && typeof value.substituted_count === 'number' &&
+    nullableNumber(value.reference_speech_duration_ms) && nullableNumber(value.attempt_speech_duration_ms) &&
+    nullableNumber(value.duration_delta_ms) && nullableNumber(value.duration_delta_ratio) &&
+    nullableNumber(value.start_delay_ms) && nullableNumber(value.word_timing_mae_ms) &&
+    nullableNumber(value.pause_mae_ms) && typeof value.aligned_timed_word_count === 'number' &&
+    typeof value.timing_reference_available === 'boolean' &&
+    (value.timing_unavailable_reason === null || typeof value.timing_unavailable_reason === 'string') &&
+    typeof value.sync_target_met === 'boolean' && Array.isArray(value.aligned_words) &&
+    value.aligned_words.every((word) => isRecord(word) &&
+      ['matched', 'missed', 'extra', 'substituted'].includes(String(word.status)) &&
+      (word.target === null || typeof word.target === 'string') &&
+      (word.recognized === null || typeof word.recognized === 'string'))
+}
+
+function isSentenceShadowingProgress(sentence: unknown): boolean {
+  const nullableNumber = (candidate: unknown) => candidate === null || typeof candidate === 'number'
+  return isRecord(sentence) && Number.isInteger(sentence.attempt_count) &&
+    Number.isInteger(sentence.target_hit_count) && Number.isInteger(sentence.consecutive_target_hits) &&
+    (sentence.last_attempt_at === null || typeof sentence.last_attempt_at === 'string') &&
+    (sentence.last_metrics === null || isShadowingMetrics(sentence.last_metrics)) &&
+    nullableNumber(sentence.best_transcript_match_percent) &&
+    nullableNumber(sentence.best_duration_delta_ratio) &&
+    nullableNumber(sentence.best_abs_start_delay_ms) &&
+    nullableNumber(sentence.best_word_timing_mae_ms) && nullableNumber(sentence.best_pause_mae_ms)
+}
+
+function isShadowingProgress(value: unknown): value is ShadowingProgress {
+  return isRecord(value) &&
+    (value.last_sentence_id === null || Number.isInteger(value.last_sentence_id)) &&
+    (value.last_practiced_at === null || typeof value.last_practiced_at === 'string') &&
+    isRecord(value.sentences) && Object.values(value.sentences).every(isSentenceShadowingProgress)
+}
+
 function isItem(value: unknown): value is LibraryItem {
   if (!isRecord(value) || !isRecord(value.lesson) || !isRecord(value.persistent_audio)) return false
   if (!(typeof value.id === 'string' && typeof value.source_key === 'string' &&
     typeof value.created_at === 'string' && typeof value.updated_at === 'string' &&
     typeof value.lesson.id === 'string' && typeof value.lesson.title === 'string' &&
     isProgress(value.progress) && isListeningProgress(value.listening_progress) &&
+    isShadowingProgress(value.shadowing_progress) &&
     (value.persistent_audio.status === 'available' || value.persistent_audio.status === 'unavailable'))) {
     return false
   }
@@ -85,7 +128,11 @@ function isSummary(value: unknown): value is LibraryItemSummary {
     typeof value.audio_available === 'boolean' &&
     typeof value.last_position_seconds === 'number' &&
     Number.isFinite(value.last_position_seconds) && value.last_position_seconds >= 0 &&
-    typeof value.has_listening_progress === 'boolean'
+    typeof value.has_listening_progress === 'boolean' &&
+    Number.isInteger(value.shadowing_attempt_count) &&
+    Number.isInteger(value.shadowing_target_sentence_count) &&
+    Number.isInteger(value.shadowing_stable_sentence_count) &&
+    (value.shadowing_last_practiced_at === null || typeof value.shadowing_last_practiced_at === 'string')
 }
 
 async function jsonResponse(response: Response, action: string): Promise<unknown> {
@@ -175,4 +222,40 @@ export async function deleteLibraryItem(itemId: string): Promise<void> {
     { method: 'DELETE' },
   )
   if (!response.ok) throw new Error(`Removing Library Lesson failed (${response.status}).`)
+}
+
+
+export class ShadowingApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+export async function submitShadowingAttempt(
+  itemId: string,
+  sentenceId: number,
+  expectedAttemptCount: number,
+  audio: Blob,
+  recordingDuration: number,
+): Promise<ShadowingAttemptResponse> {
+  const form = new FormData()
+  form.set('audio', audio, 'shadowing-attempt.webm')
+  form.set('sentence_id', String(sentenceId))
+  form.set('expected_attempt_count', String(expectedAttemptCount))
+  form.set('client_recording_duration', String(recordingDuration))
+  const response = await fetch(
+    `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/shadowing/attempt`,
+    { method: 'POST', body: form },
+  )
+  if (!response.ok) throw new ShadowingApiError(`Shadowing analysis failed (${response.status}).`, response.status)
+  const value = await jsonResponse(response, 'Shadowing analysis failed')
+  if (!isRecord(value) || !Number.isInteger(value.sentence_id) ||
+    !isSentenceShadowingProgress(value.progress) || !isShadowingMetrics(value.metrics) ||
+    typeof value.sync_target_met !== 'boolean' || typeof value.stable_sync_achieved !== 'boolean') {
+    throw new Error('Shadowing analysis returned an unexpected response.')
+  }
+  return value as unknown as ShadowingAttemptResponse
 }
