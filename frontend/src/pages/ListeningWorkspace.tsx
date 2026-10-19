@@ -35,12 +35,14 @@ interface ListeningWorkspaceProps {
   item: LibraryItem
   onBack: () => void
   controllerFactory?: ListeningControllerFactory
+  onShadowing?: (sentenceId: number) => void
 }
 
 export default function ListeningWorkspace({
   item,
   onBack,
   controllerFactory = createListeningController,
+  onShadowing,
 }: ListeningWorkspaceProps) {
   const restoredIndex = item.listening_progress.current_sentence_id === null
     ? 0
@@ -365,6 +367,7 @@ export default function ListeningWorkspace({
               <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : currentSentence.text}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
               {mode === 'blind' && <button type="button" onClick={() => setBlindRevealed((value) => !value)} className="mt-3 text-sm font-semibold text-[#176b5b]">{blindRevealed ? 'Hide again' : 'Reveal text'}</button>}
+              {onShadowing && <button type="button" onClick={() => onShadowing(currentSentence.id)} className="mt-3 ml-3 text-sm font-semibold text-[#176b5b]">Practice Sync Shadowing</button>}
             </> : <p className="mt-3">This Lesson has no transcript sentences.</p>}
           </div>
 

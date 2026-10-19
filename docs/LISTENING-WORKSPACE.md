@@ -61,7 +61,7 @@ practice, and no parallel vocabulary store is introduced.
 
 ## Persistence and Library migration
 
-Learning Library schema version 2 adds `listening_progress`:
+Learning Library schema version 2 introduced `listening_progress`:
 
 - `last_position_seconds`
 - `current_sentence_id`
@@ -70,9 +70,11 @@ Learning Library schema version 2 adds `listening_progress`:
 - `translation_visible`
 - `mode` (`listen`, `blind`, or `dictation`)
 
-Version-1 stores remain readable without write-on-start. The next successful
-Library mutation writes version 2 atomically. Invalid old listening state resets
-only this field. Summaries expose position/continuation state for Listening Home.
+Version-1 stores remain readable without write-on-start. M4.5 subsequently
+evolves the combined Library document to version 3 for independent Sync
+Shadowing progress; old items keep the same listening defaults and semantics.
+Invalid old listening state resets only this field. Summaries expose
+position/continuation state for Listening Home.
 
 The UI updates locally on every clock sample but persists only after roughly
 five seconds of meaningful movement and on pause, seek, rate, preference, mode,

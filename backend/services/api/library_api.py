@@ -1,7 +1,15 @@
-from fastapi import APIRouter, HTTPException, Response
-from fastapi.responses import FileResponse
+import os
+import subprocess
 
-from services.library.store import LearningLibraryStore, LibraryStoreError
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
+from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
+
+from services.library.store import (
+    LearningLibraryStore,
+    LibraryConflictError,
+    LibraryStoreError,
+)
 from services.schemas.library import (
     LibraryItem,
     LibraryListResponse,
@@ -9,10 +17,15 @@ from services.schemas.library import (
     LibrarySaveRequest,
     ListeningProgressRequest,
 )
+from services.schemas.shadowing import ShadowingAttemptResponse
+from services.shadowing.analyzer import ShadowingAnalyzer
+from services.shadowing.audio import prepared_upload_wav
 
 
 router = APIRouter()
 library_store = LearningLibraryStore()
+MAX_SHADOWING_UPLOAD_BYTES = 10 * 1024 * 1024
+SAFE_AUDIO_SUFFIXES = {".webm", ".ogg", ".wav", ".mp3", ".m4a", ".mp4"}
 
 
 def _store_error(operation):
@@ -75,3 +88,76 @@ def delete_library_item(item_id: str):
 def get_library_audio(item_id: str):
     path, content_type = _store_error(lambda: library_store.audio_path(item_id))
     return FileResponse(path, media_type=content_type)
+
+
+@router.post(
+    "/library/items/{item_id}/shadowing/attempt",
+    response_model=ShadowingAttemptResponse,
+)
+async def analyze_shadowing_attempt(
+    item_id: str,
+    audio: UploadFile = File(...),
+    sentence_id: int = Form(...),
+    expected_attempt_count: int = Form(...),
+    client_recording_duration: float | None = Form(default=None),
+):
+    if expected_attempt_count < 0:
+        raise HTTPException(status_code=422, detail="Invalid expected attempt count")
+    if client_recording_duration is not None and (
+        client_recording_duration < 0 or client_recording_duration > 30
+    ):
+        raise HTTPException(status_code=422, detail="Invalid recording duration")
+    try:
+        item = library_store.get_item(item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Library item not found") from exc
+    sentence = next((value for value in item.lesson.sentences if value.id == sentence_id), None)
+    if sentence is None:
+        raise HTTPException(status_code=422, detail="Invalid shadowing sentence id")
+    current = item.shadowing_progress.sentences.get(str(sentence_id))
+    if (current.attempt_count if current else 0) != expected_attempt_count:
+        raise HTTPException(status_code=409, detail="Shadowing attempt state is stale")
+
+    raw = await audio.read(MAX_SHADOWING_UPLOAD_BYTES + 1)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Shadowing audio is empty")
+    if len(raw) > MAX_SHADOWING_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Shadowing audio is too large")
+    suffix = os.path.splitext(audio.filename or "")[1].lower()
+    if suffix not in SAFE_AUDIO_SUFFIXES:
+        suffix = ".webm"
+
+    try:
+        with prepared_upload_wav(raw, suffix) as wav:
+            metrics = await run_in_threadpool(
+                ShadowingAnalyzer(library_store).analyze,
+                item_id,
+                sentence_id,
+                str(wav),
+            )
+        updated = library_store.record_shadowing_attempt(
+            item_id,
+            sentence_id,
+            expected_attempt_count,
+            metrics,
+        )
+    except LibraryConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Library item or audio not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=400, detail="Shadowing audio could not be decoded") from exc
+    except LibraryStoreError as exc:
+        raise HTTPException(status_code=500, detail="Could not update Learning Library") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Local shadowing analysis failed") from exc
+    progress = updated.shadowing_progress.sentences[str(sentence_id)]
+    return ShadowingAttemptResponse(
+        sentence_id=sentence_id,
+        progress=progress,
+        metrics=metrics,
+        sync_target_met=metrics.sync_target_met,
+        stable_sync_achieved=progress.consecutive_target_hits >= 3,
+    )

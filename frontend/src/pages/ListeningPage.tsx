@@ -7,12 +7,13 @@ import ListeningWorkspace from './ListeningWorkspace'
 interface ListeningPageProps {
   initialItem?: LibraryItem | null
   onCloseInitialItem?: () => void
+  onShadowing?: (item: LibraryItem, sentenceId: number) => void
 }
 
-export default function ListeningPage({ initialItem = null, onCloseInitialItem }: ListeningPageProps) {
+export default function ListeningPage({ initialItem = null, onCloseInitialItem, onShadowing }: ListeningPageProps) {
   const [selected, setSelected] = useState<LibraryItem | null>(initialItem)
   if (selected) {
-    return <ListeningWorkspace item={selected} onBack={() => {
+    return <ListeningWorkspace item={selected} onShadowing={onShadowing ? (sentenceId) => onShadowing(selected, sentenceId) : undefined} onBack={() => {
       setSelected(null)
       onCloseInitialItem?.()
     }} />

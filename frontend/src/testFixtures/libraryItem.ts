@@ -31,6 +31,11 @@ export const libraryItem: LibraryItem = {
     translation_visible: true,
     mode: 'listen',
   },
+  shadowing_progress: {
+    last_sentence_id: null,
+    last_practiced_at: null,
+    sentences: {},
+  },
 }
 
 export const librarySummary: LibraryItemSummary = {
@@ -50,4 +55,8 @@ export const librarySummary: LibraryItemSummary = {
   audio_available: true,
   last_position_seconds: libraryItem.listening_progress.last_position_seconds,
   has_listening_progress: true,
+  shadowing_attempt_count: 0,
+  shadowing_target_sentence_count: 0,
+  shadowing_stable_sentence_count: 0,
+  shadowing_last_practiced_at: null,
 }

@@ -197,6 +197,18 @@ describe('Listening Workspace', () => {
     expect(await screen.findByText('Saved')).toBeInTheDocument()
   })
 
+  it('opens the shared Sync Shadowing workspace at the current sentence', async () => {
+    const user = userEvent.setup()
+    const onShadowing = vi.fn()
+    const fake = new FakeController()
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({
+      controller: fake, kind: 'audio', message: null,
+    })
+    render(<ListeningWorkspace item={libraryItem} onBack={vi.fn()} onShadowing={onShadowing} controllerFactory={factory} />)
+    await user.click(await screen.findByRole('button', { name: 'Practice Sync Shadowing' }))
+    expect(onShadowing).toHaveBeenCalledWith(2)
+  })
+
   it('keeps listening usable when candidates fail', async () => {
     fetchMock.mockImplementation((url: string, options?: RequestInit) => String(url).includes('/study-candidates')
       ? Promise.reject(new Error('offline'))

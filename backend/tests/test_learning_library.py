@@ -89,7 +89,7 @@ def test_create_and_full_lesson_round_trip(tmp_path):
 
     assert created.lesson == original
     assert library.get_item(created.id) == created
-    assert json.loads(library.path.read_text())["version"] == 2
+    assert json.loads(library.path.read_text())["version"] == 3
 
 
 def test_list_is_lightweight_recent_first_summary(tmp_path):
@@ -212,7 +212,7 @@ def test_v1_library_remains_readable_without_rewriting_and_gets_listening_defaul
     assert library.path.read_text(encoding="utf-8") == original
 
 
-def test_next_safe_v1_mutation_migrates_to_v2_and_preserves_guided_progress(tmp_path):
+def test_next_safe_v1_mutation_migrates_to_v3_and_preserves_guided_progress(tmp_path):
     library = store(tmp_path)
     item = library.save_item(lesson(), progress(stage=1, completed=["active_recall"]))
     payload = json.loads(library.path.read_text())
@@ -234,7 +234,7 @@ def test_next_safe_v1_mutation_migrates_to_v2_and_preserves_guided_progress(tmp_
 
     assert updated.progress.stage_index == 1
     assert updated.progress.completed_stages == ["active_recall"]
-    assert json.loads(library.path.read_text())["version"] == 2
+    assert json.loads(library.path.read_text())["version"] == 3
 
 
 def test_v1_to_v2_migration_preserves_persistent_audio(tmp_path):
@@ -425,7 +425,7 @@ def test_process_local_lock_serializes_listening_updates(tmp_path):
         ))
 
     assert 0 <= library.get_item(item.id).listening_progress.last_position_seconds <= 1.9
-    assert json.loads(library.path.read_text())["version"] == 2
+    assert json.loads(library.path.read_text())["version"] == 3
 
 
 def test_safe_media_audio_is_copied_and_survives_source_deletion(tmp_path):

@@ -105,6 +105,16 @@ describe('My Library', () => {
     expect(onListen).toHaveBeenCalledWith(libraryItem)
   })
 
+  it('opens the shared Sync Shadowing workspace from Library detail', async () => {
+    const user = userEvent.setup()
+    const onShadowing = vi.fn()
+    render(<LibraryPage onOpen={vi.fn()} onShadowing={onShadowing} />)
+    await user.click(await screen.findByRole('button', { name: /Daily lesson/ }))
+    await user.click(await screen.findByRole('button', { name: 'Open Sync Shadowing' }))
+
+    expect(onShadowing).toHaveBeenCalledWith(libraryItem)
+  })
+
   it('continues from the saved stage and sentence without regeneration', async () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()
