@@ -2,6 +2,22 @@ import type { SourceLanguage } from './lesson'
 
 export type StudyKind = 'word' | 'chunk'
 export type StudyQuality = 'recommended' | 'review' | 'rejected'
+export type ReviewRating = 'again' | 'hard' | 'good' | 'easy'
+
+export interface ReviewState {
+  due_at: string
+  interval_seconds: number
+  ease_factor: number
+  repetition_count: number
+  lapse_count: number
+  review_count: number
+  again_count: number
+  hard_count: number
+  good_count: number
+  easy_count: number
+  last_reviewed_at: string | null
+  last_rating: ReviewRating | null
+}
 
 export interface StudyProvenance {
   library_item_id: string
@@ -36,6 +52,7 @@ export interface StudyItem extends StudyItemInput {
   active: boolean
   created_at: string
   updated_at: string
+  review: ReviewState
 }
 
 export interface StudyCandidate {

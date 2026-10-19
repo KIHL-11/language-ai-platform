@@ -26,7 +26,17 @@ function isNullableString(value: unknown): boolean {
   return value === null || typeof value === 'string'
 }
 
-function isItem(value: unknown): value is StudyItem {
+function isReviewState(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const counters = ['interval_seconds', 'repetition_count', 'lapse_count', 'review_count', 'again_count', 'hard_count', 'good_count', 'easy_count']
+  return typeof value.due_at === 'string' &&
+    counters.every((key) => Number.isInteger(value[key]) && Number(value[key]) >= 0) &&
+    typeof value.ease_factor === 'number' && Number.isFinite(value.ease_factor) &&
+    (value.last_reviewed_at === null || typeof value.last_reviewed_at === 'string') &&
+    (value.last_rating === null || ['again', 'hard', 'good', 'easy'].includes(String(value.last_rating)))
+}
+
+export function isStudyItem(value: unknown): value is StudyItem {
   return isRecord(value) && typeof value.id === 'string' &&
     typeof value.user_id === 'string' &&
     (value.kind === 'word' || value.kind === 'chunk') &&
@@ -38,7 +48,8 @@ function isItem(value: unknown): value is StudyItem {
     isNullableString(value.lemma) && isNullableString(value.part_of_speech) &&
     isNullableString(value.example) && isNullableString(value.usage) &&
     isNullableString(value.note) &&
-    Array.isArray(value.provenance) && value.provenance.every(isProvenance)
+    Array.isArray(value.provenance) && value.provenance.every(isProvenance) &&
+    isReviewState(value.review)
 }
 
 function isCandidate(value: unknown): value is StudyCandidate {
@@ -85,7 +96,7 @@ export async function saveStudyItems(items: StudyItemInput[]): Promise<StudyItem
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
   }), 'Saving Words & Chunks failed')
-  if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isItem)) {
+  if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isStudyItem)) {
     throw new Error('Saving Words & Chunks returned an unexpected response.')
   }
   return value.items
@@ -111,7 +122,7 @@ export async function listStudyItems(filters: StudyListFilters): Promise<StudyIt
     await fetch(`${API_BASE_URL}/api/study-bank/items?${params}`),
     'Loading Words & Chunks failed',
   )
-  if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isItem)) {
+  if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isStudyItem)) {
     throw new Error('Words & Chunks returned an unexpected response.')
   }
   return value.items
@@ -131,7 +142,7 @@ export async function updateStudyItem(
       body: JSON.stringify(patch),
     },
   ), 'Updating Study Bank item failed')
-  if (!isItem(value)) throw new Error('Study Bank update returned an unexpected response.')
+  if (!isStudyItem(value)) throw new Error('Study Bank update returned an unexpected response.')
   return value
 }
 
