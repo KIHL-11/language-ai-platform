@@ -17,6 +17,9 @@ The FastAPI backend provides:
 - a persistent local Learning Library with durable Lesson snapshots and audio
 - an explicit Words & Chunks Study Bank with source provenance
 - a persistent Listening Workspace over saved Library media
+- deterministic Daily Review and Sync Shadowing over curated/saved material
+- an explicit, provider-backed Intelligent Speaking Agent with bounded local
+  transcript/session persistence
 - a server-side endpoint for temporary OpenAI Realtime credentials
 
 ### Frontend
@@ -60,12 +63,20 @@ remote YouTube display when available, persistent audio fallback, deterministic
 dictation comparison, and Study Bank candidates. See
 [docs/LISTENING-WORKSPACE.md](docs/LISTENING-WORKSPACE.md).
 
+The standalone Intelligent Speaking Agent uses Gemini Live by default and an
+explicitly selected OpenAI Realtime adapter optionally. No provider connection
+or microphone request occurs before **Start Speaking**, and raw voice audio is
+never stored locally. See [docs/SPEAKING-AGENT.md](docs/SPEAKING-AGENT.md) for
+credentials, context limits, transcript evidence, privacy, and provider
+boundaries.
+
 ## Development safety
 
 - `AI_MODE=mock` is the normal local-development baseline.
 - Local Text Practice is the default Live Dialogue mode.
 - Realtime Voice Practice never starts automatically.
 - `OPENAI_API_KEY` is backend-only.
+- `GEMINI_API_KEY` is backend-only.
 - Never place server keys in `VITE_*` variables or frontend files.
 
 ## macOS setup

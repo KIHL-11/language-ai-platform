@@ -24,6 +24,8 @@ function routeFetch(url: string, options?: RequestInit) {
   if (String(url).endsWith('/api/library/items')) {
     return Promise.resolve(response({ items: [librarySummary] }))
   }
+  if (String(url).endsWith('/api/speaking/providers')) return Promise.resolve(response({ providers: [] }))
+  if (String(url).includes('/api/speaking/sessions?')) return Promise.resolve(response({ sessions: [] }))
   return Promise.resolve(response(libraryItem))
 }
 
@@ -111,6 +113,14 @@ describe('App Library navigation', () => {
 
     expect(await screen.findByRole('heading', { name: 'Daily Review' })).toBeInTheDocument()
     expect(loadPersonalSession()?.lesson.id).toBe(personalLesson.id)
+  })
+
+  it('provides top-level Speaking navigation without starting a provider', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: 'Speaking' }))
+    expect(await screen.findByRole('heading', { name: 'Speaking' })).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('client-token'))).toBe(false)
   })
 
   it('does not delete the active Personal Session when its Library item is deleted', async () => {
