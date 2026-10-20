@@ -6,6 +6,15 @@ async function json<T>(response: Response, action: string): Promise<T> {
   return response.json() as Promise<T>
 }
 
+export class SpeakingApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
 export async function getSpeakingProviders(): Promise<SpeakingProviderInfo[]> {
   const value = await json<{ providers: SpeakingProviderInfo[] }>(await fetch(`${API_BASE_URL}/api/speaking/providers`), 'Loading speaking providers failed')
   return value.providers
@@ -33,7 +42,9 @@ export async function finishSpeakingSession(sessionId: string, userId: string, e
 }
 
 export async function createGeminiToken(): Promise<{ value: string; model: string; expires_at: string }> {
-  return json(await fetch(`${API_BASE_URL}/api/speaking/gemini/client-token`, { method: 'POST' }), 'Gemini Live credential failed')
+  const response = await fetch(`${API_BASE_URL}/api/speaking/gemini/client-token`, { method: 'POST' })
+  if (!response.ok) throw new SpeakingApiError('Gemini credential request failed.', response.status)
+  return response.json() as Promise<{ value: string; model: string; expires_at: string }>
 }
 
 export async function executeSpeakingTool(sessionId: string, userId: string, expected_event_count: number, name: string, args: Record<string, unknown>): Promise<{ result: unknown; session: SpeakingSession | null }> {

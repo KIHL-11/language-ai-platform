@@ -18,12 +18,16 @@ and microphone. A Gemini error never starts OpenAI automatically.
 The non-secret provider-status endpoint reports configuration, model name, and
 normalized capabilities. Gemini credentials are minted through
 `POST /api/speaking/gemini/client-token`: the backend uses `GEMINI_API_KEY` to
-request a one-use AuthTokenService credential with a two-minute new-session
+request a one-use credential from the v1beta `auth_tokens` endpoint with a two-minute new-session
 window and a twelve-minute absolute expiry, constrained to the configured Live
-model. The long-lived key is never returned or logged. Network calls have a
+model. The browser uses the matching v1beta constrained Live WebSocket endpoint.
+The long-lived key is never returned or logged. Network calls have a
 ten-second timeout, upstream messages are bounded, and any occurrence of the
 key is redacted. Missing configuration returns 503; upstream failure returns
-502. Ephemeral tokens are neither stored nor sent to the session store.
+502, while a detectable provider quota/rate limit returns 429. The UI reports
+credential, WebSocket, microphone-permission, microphone-availability, and
+quota failures separately without exposing upstream details. Ephemeral tokens
+are neither stored nor sent to the session store.
 
 Set these only in the backend environment:
 

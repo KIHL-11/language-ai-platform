@@ -1,4 +1,4 @@
-import { createGeminiToken } from '../api/speaking'
+import { createGeminiToken, SpeakingApiError } from '../api/speaking'
 import type { SpeakingEndReason } from '../types/speaking'
 import { ProviderEvents, type SpeakingAgentProvider, type SpeakingConnectionStatus, type SpeakingProviderContext, type SpeakingToolCall, type SpeakingTranscriptEvent } from './provider'
 
@@ -26,6 +26,17 @@ export interface GeminiDependencies {
   createTransport: (stream: MediaStream | null) => GeminiTransport
 }
 
+export type GeminiFailureCode = 'credential' | 'quota' | 'microphone_permission' | 'microphone_unavailable' | 'websocket'
+
+export class GeminiProviderError extends Error {
+  readonly code: GeminiFailureCode
+
+  constructor(code: GeminiFailureCode, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   for (const value of bytes) binary += String.fromCharCode(value)
@@ -40,6 +51,10 @@ function floatToPcm16(input: Float32Array, sourceRate: number): Uint8Array {
     result[index] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)))
   }
   return new Uint8Array(result.buffer)
+}
+
+export function geminiLiveWebSocketUrl(token: string): string {
+  return `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`
 }
 
 export class BrowserGeminiTransport implements GeminiTransport {
@@ -58,7 +73,7 @@ export class BrowserGeminiTransport implements GeminiTransport {
   constructor(stream: MediaStream | null) { this.stream = stream }
 
   async connect(token: string, model: string, context: SpeakingProviderContext, callbacks: GeminiTransportCallbacks) {
-    const socket = new WebSocket(`wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`)
+    const socket = new WebSocket(geminiLiveWebSocketUrl(token))
     this.socket = socket
     await new Promise<void>((resolve, reject) => {
       socket.onopen = () => {
@@ -77,11 +92,15 @@ export class BrowserGeminiTransport implements GeminiTransport {
         } }))
         resolve()
       }
-      socket.onerror = () => reject(new Error('Gemini Live WebSocket connection failed.'))
+      socket.onerror = () => reject(new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.'))
     })
     socket.onmessage = (message) => this.handleMessage(String(message.data), callbacks)
-    socket.onerror = () => callbacks.error(new Error('Gemini Live WebSocket failed.'))
-    socket.onclose = () => callbacks.ended()
+    socket.onerror = () => callbacks.error(new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.'))
+    socket.onclose = (event) => {
+      if (/quota|rate.?limit|resource.?exhausted|429/i.test(event.reason)) {
+        callbacks.error(new GeminiProviderError('quota', 'Gemini provider quota or rate limit was reached.'))
+      } else callbacks.ended()
+    }
     this.context = new AudioContext()
     void this.context.resume()
     if (this.stream) this.startInput(socket)
@@ -191,14 +210,38 @@ export class GeminiLiveProvider implements SpeakingAgentProvider {
   async connect(context: SpeakingProviderContext) {
     this.events.emit('status', 'connecting')
     try {
-      const credential = await this.dependencies.fetchToken()
-      this.stream = context.textOnly ? null : await this.dependencies.getUserMedia()
+      let credential
+      try {
+        credential = await this.dependencies.fetchToken()
+      } catch (error) {
+        if (error instanceof SpeakingApiError && error.status === 429) {
+          throw new GeminiProviderError('quota', 'Gemini provider quota or rate limit was reached.')
+        }
+        throw new GeminiProviderError('credential', 'Gemini credential request failed.')
+      }
+      if (!context.textOnly) {
+        try {
+          this.stream = await this.dependencies.getUserMedia()
+        } catch (error) {
+          const name = error instanceof DOMException ? error.name : (error as { name?: string })?.name
+          if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+            throw new GeminiProviderError('microphone_unavailable', 'No microphone is available.')
+          }
+          throw new GeminiProviderError('microphone_permission', 'Microphone permission was denied.')
+        }
+      }
       this.transport = this.dependencies.createTransport(this.stream)
-      await this.transport.connect(credential.value, credential.model, context, {
+      try {
+        await this.transport.connect(credential.value, credential.model, context, {
         status: (status) => this.events.emit('status', status), transcript: (event) => this.events.emit('transcript', event),
         tool: (event) => this.events.emit('tool', event), interrupted: () => { this.events.emit('status', 'interrupted'); this.events.emit('interrupted') },
-        error: (error) => this.events.emit('error', error), ended: () => { if (this.connected) this.events.emit('ended', 'provider') },
-      })
+        error: (error) => this.events.emit('error', error instanceof GeminiProviderError ? error : new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.')),
+        ended: () => { if (this.connected) this.events.emit('ended', 'provider') },
+        })
+      } catch (error) {
+        if (error instanceof GeminiProviderError) throw error
+        throw new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.')
+      }
       this.connected = true
     } catch (error) { this.release(); this.events.emit('status', 'idle'); throw error }
   }

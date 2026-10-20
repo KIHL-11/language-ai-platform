@@ -98,16 +98,25 @@ def test_gemini_token_missing_config_and_mocked_success(monkeypatch):
     monkeypatch.setattr(speaking_api.requests, "post", post)
     response = client.post("/api/speaking/gemini/client-token")
     assert response.status_code == 200 and response.json()["value"] == "ephemeral-token"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/auth_tokens"
+    assert "v1alpha" not in captured["url"]
     assert captured["headers"]["x-goog-api-key"] == "private-key"
     assert captured["json"]["uses"] == 1
-    assert captured["json"]["liveConnectConstraints"]["model"] == "models/gemini-3.8-live"
+    assert captured["json"]["bidiGenerateContentSetup"]["model"] == "models/gemini-3.8-live"
+    assert "liveConnectConstraints" not in captured["json"]
+    assert captured["json"]["newSessionExpireTime"].endswith("Z")
+    assert captured["json"]["expireTime"].endswith("Z")
 
 
 def test_gemini_token_errors_are_controlled_and_redacted(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "do-not-leak")
-    monkeypatch.setattr(speaking_api.requests, "post", lambda *a, **k: SimpleNamespace(ok=False, status_code=429, text="quota do-not-leak", reason="rate"))
+    monkeypatch.setattr(speaking_api.requests, "post", lambda *a, **k: SimpleNamespace(ok=False, status_code=401, text="invalid do-not-leak", reason="auth"))
     response = client.post("/api/speaking/gemini/client-token")
     assert response.status_code == 502 and "do-not-leak" not in response.text and "[redacted]" in response.text
+    monkeypatch.setattr(speaking_api.requests, "post", lambda *a, **k: SimpleNamespace(ok=False, status_code=429, text="quota do-not-leak", reason="rate"))
+    response = client.post("/api/speaking/gemini/client-token")
+    assert response.status_code == 429 and "quota or rate limit" in response.text
+    assert "do-not-leak" not in response.text
     monkeypatch.setattr(speaking_api.requests, "post", lambda *a, **k: (_ for _ in ()).throw(speaking_api.requests.Timeout()))
     assert client.post("/api/speaking/gemini/client-token").status_code == 502
 

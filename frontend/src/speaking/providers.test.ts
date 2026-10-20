@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { VoiceDialogueContext, VoiceEndReason, VoiceLiveDialogueProvider, VoiceDialogueStatus, VoiceTranscriptEvent, Unsubscribe } from '../training/voiceLiveDialogueProvider'
 import { speakingContext } from '../testFixtures/speaking'
-import { GeminiLiveProvider, type GeminiTransport } from './geminiLiveProvider'
+import { SpeakingApiError } from '../api/speaking'
+import { GeminiLiveProvider, geminiLiveWebSocketUrl, type GeminiTransport } from './geminiLiveProvider'
 import { OpenAISpeakingProvider } from './openAISpeakingProvider'
 
 class FakeGeminiTransport implements GeminiTransport {
@@ -25,17 +26,25 @@ class FakeVoiceProvider implements VoiceLiveDialogueProvider {
 describe('Speaking provider contract', () => {
   afterEach(() => vi.restoreAllMocks())
 
+  it('uses the official v1beta constrained Live endpoint for ephemeral tokens', () => {
+    const url = geminiLiveWebSocketUrl('auth_tokens/token value')
+    expect(url).toBe('wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=auth_tokens%2Ftoken%20value')
+    expect(url).not.toContain('v1alpha')
+  })
+
   it('Gemini normalizes lifecycle, transcripts, interruption, tools, mute, text, and cleanup', async () => {
     const transport = new FakeGeminiTransport()
     const stop = vi.fn()
+    const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop }] } as unknown as MediaStream))
     const provider = new GeminiLiveProvider({
       fetchToken: vi.fn(async () => ({ value: 'ephemeral', model: 'gemini-3.8-live', expires_at: 'soon' })),
-      getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop }] } as unknown as MediaStream)),
+      getUserMedia,
       createTransport: () => transport,
     })
     const transcripts = vi.fn(), tools = vi.fn(), interrupted = vi.fn()
     provider.onTranscript(transcripts); provider.onToolCall(tools); provider.onInterrupted(interrupted)
     await provider.connect({ context: speakingContext, durationSeconds: 300 })
+    expect(getUserMedia).toHaveBeenCalledOnce()
     transport.callbacks?.transcript({ role: 'learner', text: 'partial', final: false })
     transport.callbacks?.transcript({ role: 'learner', text: 'final', final: true })
     transport.callbacks?.tool({ id: 'tool-1', name: 'get_due_chunks', arguments: {} })
@@ -54,8 +63,32 @@ describe('Speaking provider contract', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop }] } as unknown as MediaStream)),
       createTransport: () => ({ ...new FakeGeminiTransport(), connect: vi.fn(async () => { throw new Error('quota') }) }),
     })
-    await expect(provider.connect({ context: speakingContext, durationSeconds: 300 })).rejects.toThrow('quota')
+    await expect(provider.connect({ context: speakingContext, durationSeconds: 300 })).rejects.toMatchObject({ code: 'websocket' })
     expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    [new SpeakingApiError('failed', 502), 'credential'],
+    [new SpeakingApiError('limited', 429), 'quota'],
+  ])('classifies Gemini credential failures without requesting a microphone', async (failure, code) => {
+    const getUserMedia = vi.fn()
+    const provider = new GeminiLiveProvider({ fetchToken: vi.fn(async () => { throw failure }), getUserMedia })
+    await expect(provider.connect({ context: speakingContext, durationSeconds: 300 })).rejects.toMatchObject({ code })
+    expect(getUserMedia).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['NotAllowedError', 'microphone_permission'],
+    ['NotFoundError', 'microphone_unavailable'],
+  ])('classifies microphone failure %s before opening the socket', async (name, code) => {
+    const createTransport = vi.fn()
+    const provider = new GeminiLiveProvider({
+      fetchToken: vi.fn(async () => ({ value: 'ephemeral', model: 'gemini-3.8-live', expires_at: 'soon' })),
+      getUserMedia: vi.fn(async () => { throw Object.assign(new Error('device'), { name }) }),
+      createTransport,
+    })
+    await expect(provider.connect({ context: speakingContext, durationSeconds: 300 })).rejects.toMatchObject({ code })
+    expect(createTransport).not.toHaveBeenCalled()
   })
 
   it('Gemini text fallback connects without requesting a microphone', async () => {

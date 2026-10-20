@@ -8,6 +8,7 @@ import {
 } from '../api/speaking'
 import { getOrCreateLearnerId } from '../session/learnerSession'
 import { createSpeakingProvider, type SpeakingProviderFactory } from '../speaking/providerFactory'
+import { GeminiProviderError } from '../speaking/geminiLiveProvider'
 import type { SpeakingAgentProvider, SpeakingConnectionStatus, SpeakingTranscriptEvent } from '../speaking/provider'
 import type { LibraryItemSummary } from '../types/library'
 import type { SpeakingContext, SpeakingMode, SpeakingProviderId, SpeakingProviderInfo, SpeakingSession, SpeakingSetup } from '../types/speaking'
@@ -20,6 +21,17 @@ const MODE_LABELS: Record<SpeakingMode, string> = {
 }
 
 function durationLabel(seconds: number) { return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` }
+
+function providerFailureMessage(providerId: SpeakingProviderId, error: unknown): string {
+  if (providerId === 'gemini-live' && error instanceof GeminiProviderError) {
+    if (error.code === 'credential') return 'Gemini credential request failed. Check the backend configuration and try again.'
+    if (error.code === 'quota') return 'Gemini provider quota or rate limit was reached. Try again later.'
+    if (error.code === 'microphone_permission') return 'Microphone permission denied. Allow microphone access or start with Text Input.'
+    if (error.code === 'microphone_unavailable') return 'No microphone is available. Start with Text Input instead.'
+    return 'Gemini Live WebSocket connection failed. Check network access and try again.'
+  }
+  return `${providerId === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'} unavailable. Retry or explicitly choose another provider.`
+}
 
 export default function SpeakingPage({ providerFactory = createSpeakingProvider }: Props) {
   const [learnerId] = useState(getOrCreateLearnerId)
@@ -114,16 +126,16 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider 
           } catch { provider.respondToTool?.(call.id, { error: 'Tool request was rejected.' }) }
         })
       })
-      provider.onError(() => { setError(`${providerId === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'} unavailable. No other provider was started.`); void end('failed', 'error') })
+      provider.onError((providerError) => { setError(`${providerFailureMessage(providerId, providerError)} No other provider was started.`); void end('failed', 'error') })
       provider.onEnded((reason) => { if (!endingRef.current) void end(reason === 'time_limit' ? 'completed' : 'interrupted', reason) })
       await provider.connect({ context: value.context, durationSeconds: duration, textOnly: startTextOnly })
       setPhase('live')
-    } catch {
+    } catch (caught) {
       await providerRef.current?.disconnect('error'); providerRef.current = null
       if (created) {
         try { await finishSpeakingSession(created.id, learnerId, created.event_count, 'failed', 'error') } catch { /* best effort */ }
       }
-      setPhase('setup'); setError(`${providerId === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'} unavailable. Retry or explicitly choose another provider.`)
+      setPhase('setup'); setError(providerFailureMessage(providerId, caught))
     }
   }
 
