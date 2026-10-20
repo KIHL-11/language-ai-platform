@@ -17,7 +17,11 @@ edge-tts==7.2.8
 yt-dlp==2026.6.9
 
 # 无字幕时本地转写。
-# ⚠ ctranslate2 必须锁 4.4.0：新版在部分 CPU（如 AMD Ryzen 6000 系）上加载模型会直接段错误（exit 139），见 README「兼容性踩坑」
+# ⚠ 历史问题：在部分 x86 CPU（观察到的是 AMD Ryzen 6000 系，早先那台 Windows 机器）上，
+#   4.4.0 之后的版本加载模型会直接段错误（exit 139），见 README「兼容性踩坑」。
+#   当前开发机是 Apple Silicon，不受影响，所以这里放开到 >=4.6.0。
+#   要部署到那类 x86 机器前，先在目标机上验证，必要时回退到 ctranslate2==4.4.0。
+#   （原注释写「必须锁 4.4.0」，与下面的约束自相矛盾，已按实际情况改写——2026-10-20）
 faster-whisper==1.2.1
 ctranslate2>=4.6.0
 numpy==1.26.4          # 锁 <2，否则 ctranslate2/faster-whisper 报 "Failed to initialize NumPy"

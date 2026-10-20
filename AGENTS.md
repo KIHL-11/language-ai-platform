@@ -20,21 +20,20 @@ authorized in a past session, not this one.
 
 ## Project Baseline
 
-Verified cloud baseline:
+Last verified locally on macOS, 2026-10-20 (Python 3.11 venv, vitest):
 
-- Backend: 47 pytest tests passed
-- Frontend: 94 tests passed
-- Frontend lint passed
-- Frontend production build passed
+- Backend: 392 pytest tests passed
+- Frontend: 279 tests passed across 43 files
 
-Current cloud environment:
+Not re-run in that session: frontend lint, frontend production build.
 
-- Python 3.12
-- Node 24
+The cloud baseline (Python 3.12 / Node 24) has not been re-verified since the
+M4 series landed. The figures this section used to carry (47 backend, 94
+frontend) came from an early milestone and were several times out of date by
+2026-10-20.
 
-Local macOS development historically uses Python 3.11.
-
-Both environments are currently verified.
+Never quote a baseline you did not produce yourself. Run the suite and report
+exact counts, and say which environment produced them.
 
 ## Architecture
 
