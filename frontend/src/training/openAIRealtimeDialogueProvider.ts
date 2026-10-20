@@ -216,9 +216,16 @@ export class OpenAIRealtimeDialogueProvider implements VoiceLiveDialogueProvider
   private turnLimitPending = false
   private connected = false
   private disconnecting = false
+  private readonly maxSessionMs: number
+  private readonly maxLearnerTurns: number
 
-  constructor(dependencies: Partial<OpenAIRealtimeDependencies> = {}) {
+  constructor(
+    dependencies: Partial<OpenAIRealtimeDependencies> = {},
+    limits: { maxSessionMs?: number; maxLearnerTurns?: number } = {},
+  ) {
     this.dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencies }
+    this.maxSessionMs = limits.maxSessionMs ?? MAX_REALTIME_SESSION_MS
+    this.maxLearnerTurns = limits.maxLearnerTurns ?? MAX_REALTIME_LEARNER_TURNS
   }
 
   async connect(context: VoiceDialogueContext): Promise<void> {
@@ -276,7 +283,7 @@ export class OpenAIRealtimeDialogueProvider implements VoiceLiveDialogueProvider
       })
       this.sessionTimer = this.dependencies.setTimeout(() => {
         void this.disconnect('time_limit')
-      }, MAX_REALTIME_SESSION_MS)
+      }, this.maxSessionMs)
       this.session.requestInitialResponse()
     } catch (error) {
       this.releaseResources()
@@ -353,7 +360,7 @@ export class OpenAIRealtimeDialogueProvider implements VoiceLiveDialogueProvider
       if (transcript.role === 'learner' && !this.countedLearnerIds.has(transcript.id)) {
         this.countedLearnerIds.add(transcript.id)
         this.learnerTurns += 1
-        if (this.learnerTurns >= MAX_REALTIME_LEARNER_TURNS) {
+        if (this.learnerTurns >= this.maxLearnerTurns) {
           this.turnLimitPending = true
           this.emit('notice', 'The five-turn practice limit was reached. Finishing after the partner response.')
         }
