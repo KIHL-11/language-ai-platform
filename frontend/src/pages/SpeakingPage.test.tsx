@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { librarySummary } from '../testFixtures/libraryItem'
 import { speakingContext, speakingProviders, speakingSession } from '../testFixtures/speaking'
 import type { SpeakingAgentProvider, SpeakingConnectionStatus, SpeakingToolCall, SpeakingTranscriptEvent } from '../speaking/provider'
+import { GeminiProviderError, type GeminiFailureCode } from '../speaking/geminiLiveProvider'
 import type { SpeakingEndReason } from '../types/speaking'
 import SpeakingPage from './SpeakingPage'
 
@@ -109,12 +110,27 @@ describe('Speaking Page', () => {
   })
 
   it('does not silently instantiate OpenAI when Gemini fails', async () => {
-    const gemini = new FakeProvider(); gemini.connect.mockRejectedValue(new Error('quota'))
+    const gemini = new FakeProvider(); gemini.connect.mockRejectedValue(new GeminiProviderError('quota', 'limited'))
     const factory = vi.fn(() => gemini)
     const user = userEvent.setup(); render(<SpeakingPage providerFactory={factory} />)
     await screen.findByText('as far as I know'); await user.click(screen.getByRole('button', { name: 'Start Speaking' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Gemini Live unavailable')
+    expect(await screen.findByRole('alert')).toHaveTextContent('quota or rate limit')
     expect(factory).toHaveBeenCalledTimes(1); expect(factory).toHaveBeenCalledWith('gemini-live')
+  })
+
+  it.each([
+    ['credential', 'Gemini credential request failed'],
+    ['websocket', 'Gemini Live WebSocket connection failed'],
+    ['microphone_permission', 'Microphone permission denied'],
+  ] satisfies Array<[GeminiFailureCode, string]>)('shows actionable %s diagnostics without credentials', async (code, message) => {
+    const provider = new FakeProvider()
+    provider.connect.mockRejectedValue(new GeminiProviderError(code, 'internal detail'))
+    const user = userEvent.setup(); render(<SpeakingPage providerFactory={() => provider} />)
+    await screen.findByText('as far as I know'); await user.click(screen.getByRole('button', { name: 'Start Speaking' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(message)
+    expect(alert).not.toHaveTextContent('internal detail')
+    expect(alert).not.toHaveTextContent('auth_tokens/')
   })
 
   it('starts Gemini text fallback without voice mode and exposes the text input immediately', async () => {

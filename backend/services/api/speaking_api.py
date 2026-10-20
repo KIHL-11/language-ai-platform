@@ -19,7 +19,7 @@ from services.speaking.tools import ToolDispatcher, ToolError
 from services.study_bank.store import StudyBankStore, StudyBankStoreError
 
 
-GEMINI_TOKEN_URL = "https://generativelanguage.googleapis.com/v1alpha/authTokens"
+GEMINI_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/auth_tokens"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-live"
 router = APIRouter()
 study_bank = StudyBankStore()
@@ -163,7 +163,7 @@ def gemini_client_token():
         "uses": 1,
         "expireTime": (now + timedelta(minutes=12)).isoformat().replace("+00:00", "Z"),
         "newSessionExpireTime": (now + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
-        "liveConnectConstraints": {"model": f"models/{model}"},
+        "bidiGenerateContentSetup": {"model": f"models/{model}"},
     }
     try:
         response = requests.post(
@@ -176,6 +176,8 @@ def gemini_client_token():
         raise HTTPException(status_code=502, detail="Unable to reach the Gemini credential service.") from exc
     if not response.ok:
         detail = (response.text or response.reason or "Gemini credential request failed").replace(api_key, "[redacted]")[:500]
+        if response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Gemini provider quota or rate limit was reached.")
         raise HTTPException(status_code=502, detail=f"Gemini credential request failed ({response.status_code}): {detail}")
     try:
         value = response.json()
