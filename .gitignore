@@ -19,3 +19,11 @@ backend/storage/
 frontend/.env.local
 frontend/node_modules/
 frontend/dist/
+
+# .env 的各种衍生文件（.env.save/.env.bak/.env.local 等）
+# AGENTS.md 规定「Never commit .env files」，但原规则只盖了精确的 .env，
+# backend/.env.save 因此一直处于 untracked 状态，一次 git add -A 就会被提交。
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
