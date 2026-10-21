@@ -163,6 +163,7 @@ def gemini_client_token():
         "uses": 1,
         "expireTime": (now + timedelta(minutes=12)).isoformat().replace("+00:00", "Z"),
         "newSessionExpireTime": (now + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+        "fieldMask": "model",
         "bidiGenerateContentSetup": {"model": f"models/{model}"},
     }
     try:

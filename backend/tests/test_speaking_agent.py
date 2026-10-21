@@ -89,6 +89,7 @@ def test_gemini_token_missing_config_and_mocked_success(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     assert client.post("/api/speaking/gemini/client-token").status_code == 503
     monkeypatch.setenv("GEMINI_API_KEY", "private-key")
+    monkeypatch.setenv("GEMINI_LIVE_MODEL", "gemini-3.8-live")
     captured = {}
 
     def post(url, **kwargs):
@@ -101,8 +102,18 @@ def test_gemini_token_missing_config_and_mocked_success(monkeypatch):
     assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/auth_tokens"
     assert "v1alpha" not in captured["url"]
     assert captured["headers"]["x-goog-api-key"] == "private-key"
+    assert set(captured["json"]) == {
+        "uses", "expireTime", "newSessionExpireTime", "fieldMask", "bidiGenerateContentSetup",
+    }
     assert captured["json"]["uses"] == 1
+    assert captured["json"]["fieldMask"] == "model"
     assert captured["json"]["bidiGenerateContentSetup"]["model"] == "models/gemini-3.8-live"
+    assert set(captured["json"]["bidiGenerateContentSetup"]) == {"model"}
+    assert "generationConfig" not in captured["json"]["bidiGenerateContentSetup"]
+    assert "systemInstruction" not in captured["json"]["bidiGenerateContentSetup"]
+    assert "inputAudioTranscription" not in captured["json"]["bidiGenerateContentSetup"]
+    assert "outputAudioTranscription" not in captured["json"]["bidiGenerateContentSetup"]
+    assert "tools" not in captured["json"]["bidiGenerateContentSetup"]
     assert "liveConnectConstraints" not in captured["json"]
     assert captured["json"]["newSessionExpireTime"].endswith("Z")
     assert captured["json"]["expireTime"].endswith("Z")
