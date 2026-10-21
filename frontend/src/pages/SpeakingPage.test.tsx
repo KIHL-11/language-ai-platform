@@ -121,6 +121,8 @@ describe('Speaking Page', () => {
   it.each([
     ['credential', 'Gemini credential request failed'],
     ['websocket', 'Gemini Live WebSocket connection failed'],
+    ['setup', 'Gemini Live setup did not complete'],
+    ['message', 'Gemini Live returned an unreadable server message'],
     ['microphone_permission', 'Microphone permission denied'],
   ] satisfies Array<[GeminiFailureCode, string]>)('shows actionable %s diagnostics without credentials', async (code, message) => {
     const provider = new FakeProvider()

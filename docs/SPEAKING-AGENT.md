@@ -79,6 +79,19 @@ adapters expose only capabilities they actually implement.
 
 The Gemini browser adapter connects with the short-lived token, requests
 provider input/output transcription, and declares only the allow-listed tools.
+WebSocket open/HTTP 101 is only the transport handshake: the adapter becomes
+ready and reports Listening only after Gemini returns `setupComplete`. A
+ten-second timeout closes connections that never complete setup, and user text
+or microphone audio is not sent before readiness.
+
+Gemini server frames may arrive as browser strings, `Blob` objects, or
+`ArrayBuffer` objects. The adapter decodes each form to text before JSON
+parsing and processes asynchronous binary decoding through one serialized
+receive queue so arrival order is preserved. Raw frames are neither logged nor
+persisted. Malformed or unsupported messages produce a controlled provider
+error; safe close diagnostics distinguish setup failure from a normal
+post-setup provider end without exposing credentials.
+
 After explicit voice start it captures mono microphone samples through Web
 Audio, downsamples to 16 kHz PCM, and streams them to Live. It requests echo
 cancellation, noise suppression, and automatic gain control where supported.
