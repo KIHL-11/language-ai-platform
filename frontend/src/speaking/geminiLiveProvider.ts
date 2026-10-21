@@ -26,15 +26,30 @@ export interface GeminiDependencies {
   createTransport: (stream: MediaStream | null) => GeminiTransport
 }
 
-export type GeminiFailureCode = 'credential' | 'quota' | 'microphone_permission' | 'microphone_unavailable' | 'websocket'
+export type GeminiFailureCode = 'credential' | 'quota' | 'microphone_permission' | 'microphone_unavailable' | 'websocket' | 'setup' | 'message'
 
 export class GeminiProviderError extends Error {
   readonly code: GeminiFailureCode
+  readonly closeCode?: number
+  readonly closeReason?: string
 
-  constructor(code: GeminiFailureCode, message: string) {
+  constructor(code: GeminiFailureCode, message: string, close?: { code: number; reason: string }) {
     super(message)
     this.code = code
+    this.closeCode = close?.code
+    this.closeReason = close?.reason
   }
+}
+
+export type GeminiServerMessage = string | Blob | ArrayBuffer
+
+export async function decodeGeminiServerMessage(data: unknown): Promise<string> {
+  if (typeof data === 'string') return data
+  if (data instanceof Blob) return data.text()
+  if (data instanceof ArrayBuffer || Object.prototype.toString.call(data) === '[object ArrayBuffer]') {
+    return new TextDecoder().decode(new Uint8Array(data as ArrayBuffer))
+  }
+  throw new GeminiProviderError('message', 'Gemini Live returned an unsupported server message.')
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -57,8 +72,32 @@ export function geminiLiveWebSocketUrl(token: string): string {
   return `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`
 }
 
+const SETUP_TIMEOUT_MS = 10_000
+
+export interface BrowserGeminiDependencies {
+  createWebSocket: (url: string) => WebSocket
+  createAudioContext: () => AudioContext
+  setTimeout: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>
+  clearTimeout: (timer: ReturnType<typeof setTimeout>) => void
+}
+
+const BROWSER_DEFAULTS: BrowserGeminiDependencies = {
+  createWebSocket: (url) => new WebSocket(url),
+  createAudioContext: () => new AudioContext(),
+  setTimeout: (callback, delay) => setTimeout(callback, delay),
+  clearTimeout: (timer) => clearTimeout(timer),
+}
+
+function safeCloseReason(reason: string): string {
+  return reason
+    .replace(/access_token=[^&\s]+/gi, 'access_token=[redacted]')
+    .replace(/auth_tokens\/[\w./-]+/gi, 'auth_tokens/[redacted]')
+    .slice(0, 160)
+}
+
 export class BrowserGeminiTransport implements GeminiTransport {
   private readonly stream: MediaStream | null
+  private readonly dependencies: BrowserGeminiDependencies
   private socket: WebSocket | null = null
   private context: AudioContext | null = null
   private processor: ScriptProcessorNode | null = null
@@ -69,13 +108,49 @@ export class BrowserGeminiTransport implements GeminiTransport {
   private agentTranscript = ''
   private transcriptSequence = 0
   private muted = false
+  private setupComplete = false
+  private disposed = false
+  private endedNotified = false
+  private receiveQueue: Promise<void> = Promise.resolve()
+  private setupTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(stream: MediaStream | null) { this.stream = stream }
+  constructor(stream: MediaStream | null, dependencies: Partial<BrowserGeminiDependencies> = {}) {
+    this.stream = stream
+    this.dependencies = { ...BROWSER_DEFAULTS, ...dependencies }
+  }
 
   async connect(token: string, model: string, context: SpeakingProviderContext, callbacks: GeminiTransportCallbacks) {
-    const socket = new WebSocket(geminiLiveWebSocketUrl(token))
+    this.disposed = false
+    this.setupComplete = false
+    this.endedNotified = false
+    this.receiveQueue = Promise.resolve()
+    const socket = this.dependencies.createWebSocket(geminiLiveWebSocketUrl(token))
     this.socket = socket
     await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const rejectSetup = (error: GeminiProviderError) => {
+        if (settled) return
+        settled = true
+        this.clearSetupTimer()
+        reject(error)
+      }
+      const resolveSetup = () => {
+        if (settled || this.disposed) return
+        this.context = this.dependencies.createAudioContext()
+        void this.context.resume()
+        if (this.stream) this.startInput(socket)
+        this.setupComplete = true
+        settled = true
+        this.clearSetupTimer()
+        callbacks.status('listening')
+        resolve()
+      }
+
+      this.setupTimer = this.dependencies.setTimeout(() => {
+        rejectSetup(new GeminiProviderError('setup', 'Gemini Live setup did not complete within 10 seconds.'))
+        this.close()
+      }, SETUP_TIMEOUT_MS)
+
       socket.onopen = () => {
         socket.send(JSON.stringify({ setup: {
           model: `models/${model}`,
@@ -90,21 +165,47 @@ export class BrowserGeminiTransport implements GeminiTransport {
             { name: 'suggest_expression', parameters: { type: 'OBJECT' } },
           ] }],
         } }))
-        resolve()
       }
-      socket.onerror = () => reject(new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.'))
+      socket.onmessage = (message) => {
+        this.receiveQueue = this.receiveQueue.then(async () => {
+          if (this.disposed) return
+          const raw = await decodeGeminiServerMessage(message.data)
+          let value: unknown
+          try { value = JSON.parse(raw) } catch { throw new GeminiProviderError('message', 'Gemini Live returned malformed JSON.') }
+          if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            throw new GeminiProviderError('message', 'Gemini Live returned an invalid server message.')
+          }
+          const record = value as Record<string, unknown>
+          if ('setupComplete' in record && !this.setupComplete) resolveSetup()
+          this.handleMessage(record, callbacks)
+        }).catch((error: unknown) => {
+          const failure = error instanceof GeminiProviderError
+            ? error
+            : new GeminiProviderError('message', 'Gemini Live server message decoding failed.')
+          if (!this.setupComplete) {
+            rejectSetup(failure)
+            this.close()
+          } else callbacks.error(failure)
+        })
+      }
+      socket.onerror = () => {
+        const error = new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.')
+        if (!this.setupComplete) rejectSetup(error)
+        else callbacks.error(error)
+      }
+      socket.onclose = (event) => {
+        if (this.disposed) return
+        const close = { code: event.code, reason: safeCloseReason(event.reason) }
+        if (!this.setupComplete) {
+          rejectSetup(new GeminiProviderError('setup', 'Gemini Live closed before setup completed.', close))
+          return
+        }
+        if (/quota|rate.?limit|resource.?exhausted|429/i.test(event.reason)) {
+          callbacks.error(new GeminiProviderError('quota', 'Gemini provider quota or rate limit was reached.', close))
+        } else if (event.code === 1000 || event.code === 1001) this.notifyEnded(callbacks)
+        else callbacks.error(new GeminiProviderError('websocket', 'Gemini Live WebSocket closed unexpectedly.', close))
+      }
     })
-    socket.onmessage = (message) => this.handleMessage(String(message.data), callbacks)
-    socket.onerror = () => callbacks.error(new GeminiProviderError('websocket', 'Gemini Live WebSocket connection failed.'))
-    socket.onclose = (event) => {
-      if (/quota|rate.?limit|resource.?exhausted|429/i.test(event.reason)) {
-        callbacks.error(new GeminiProviderError('quota', 'Gemini provider quota or rate limit was reached.'))
-      } else callbacks.ended()
-    }
-    this.context = new AudioContext()
-    void this.context.resume()
-    if (this.stream) this.startInput(socket)
-    callbacks.status('listening')
   }
 
   private startInput(socket: WebSocket) {
@@ -124,28 +225,36 @@ export class BrowserGeminiTransport implements GeminiTransport {
     this.source = source; this.processor = processor
   }
 
-  private handleMessage(raw: string, callbacks: GeminiTransportCallbacks) {
-    try {
-      const value = JSON.parse(raw)
-      const content = value.serverContent
-      if (content?.interrupted) {
-        this.stopOutput(); this.agentTranscript = ''; callbacks.interrupted(); callbacks.status('learner_speaking')
-      }
-      if (content?.inputTranscription?.text) {
-        this.learnerTranscript += content.inputTranscription.text
-        callbacks.transcript({ role: 'learner', text: this.learnerTranscript, final: false })
-      }
-      if (content?.outputTranscription?.text) {
-        this.agentTranscript += content.outputTranscription.text
-        callbacks.transcript({ role: 'agent', text: this.agentTranscript, final: false })
-      }
-      for (const call of value.toolCall?.functionCalls ?? []) callbacks.tool({ id: call.id, name: call.name, arguments: call.args ?? {} })
-      for (const part of content?.modelTurn?.parts ?? []) if (part.inlineData?.data) this.playPcm(part.inlineData.data, callbacks)
-      if (content?.turnComplete) {
-        this.emitFinalTranscripts(callbacks)
-        callbacks.status('listening')
-      }
-    } catch { callbacks.error(new Error('Gemini Live returned an invalid event.')) }
+  private handleMessage(value: Record<string, unknown>, callbacks: GeminiTransportCallbacks) {
+    const content = value.serverContent as Record<string, unknown> | undefined
+    if (content?.interrupted) {
+      this.stopOutput(); this.agentTranscript = ''; callbacks.interrupted(); callbacks.status('learner_speaking')
+    }
+    const inputTranscription = content?.inputTranscription as { text?: string } | undefined
+    if (inputTranscription?.text) {
+      this.learnerTranscript += inputTranscription.text
+      callbacks.transcript({ role: 'learner', text: this.learnerTranscript, final: false })
+    }
+    const outputTranscription = content?.outputTranscription as { text?: string } | undefined
+    if (outputTranscription?.text) {
+      this.agentTranscript += outputTranscription.text
+      callbacks.transcript({ role: 'agent', text: this.agentTranscript, final: false })
+    }
+    const toolCall = value.toolCall as { functionCalls?: Array<{ id: string; name: string; args?: Record<string, unknown> }> } | undefined
+    for (const call of toolCall?.functionCalls ?? []) callbacks.tool({ id: call.id, name: call.name, arguments: call.args ?? {} })
+    const modelTurn = content?.modelTurn as { parts?: Array<{ inlineData?: { data?: string } }> } | undefined
+    for (const part of modelTurn?.parts ?? []) if (part.inlineData?.data) this.playPcm(part.inlineData.data, callbacks)
+    if (content?.turnComplete) {
+      this.emitFinalTranscripts(callbacks)
+      callbacks.status('listening')
+    }
+    if (value.goAway && this.setupComplete) this.notifyEnded(callbacks)
+  }
+
+  private notifyEnded(callbacks: GeminiTransportCallbacks) {
+    if (this.endedNotified) return
+    this.endedNotified = true
+    callbacks.ended()
   }
 
   private playPcm(encoded: string, callbacks: GeminiTransportCallbacks) {
@@ -174,14 +283,22 @@ export class BrowserGeminiTransport implements GeminiTransport {
   }
 
   mute(muted: boolean) { this.muted = muted }
-  sendText(text: string) { this.socket?.send(JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } })) }
-  interrupt() { this.socket?.send(JSON.stringify({ clientContent: { turnComplete: true } })); this.stopOutput() }
-  respondToTool(id: string, result: unknown) { this.socket?.send(JSON.stringify({ toolResponse: { functionResponses: [{ id, response: { result } }] } })) }
+  sendText(text: string) { this.requireReady(); this.socket?.send(JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } })) }
+  interrupt() { this.requireReady(); this.socket?.send(JSON.stringify({ clientContent: { turnComplete: true } })); this.stopOutput() }
+  respondToTool(id: string, result: unknown) { this.requireReady(); this.socket?.send(JSON.stringify({ toolResponse: { functionResponses: [{ id, response: { result } }] } })) }
+  private requireReady() {
+    if (!this.setupComplete) throw new GeminiProviderError('setup', 'Gemini Live setup is not complete.')
+  }
+  private clearSetupTimer() {
+    if (this.setupTimer !== null) this.dependencies.clearTimeout(this.setupTimer)
+    this.setupTimer = null
+  }
   private stopOutput() {
     for (const node of this.outputNodes) { try { node.stop() } catch { /* already stopped */ } }
     this.outputNodes.clear(); this.nextOutputTime = this.context?.currentTime ?? 0
   }
   close() {
+    this.disposed = true; this.setupComplete = false; this.clearSetupTimer()
     this.stopOutput(); this.processor?.disconnect(); this.source?.disconnect(); void this.context?.close()
     this.processor = null; this.source = null; this.context = null
     this.learnerTranscript = ''; this.agentTranscript = ''; this.nextOutputTime = 0

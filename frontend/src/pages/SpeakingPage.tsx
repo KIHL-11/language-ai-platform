@@ -28,6 +28,8 @@ function providerFailureMessage(providerId: SpeakingProviderId, error: unknown):
     if (error.code === 'quota') return 'Gemini provider quota or rate limit was reached. Try again later.'
     if (error.code === 'microphone_permission') return 'Microphone permission denied. Allow microphone access or start with Text Input.'
     if (error.code === 'microphone_unavailable') return 'No microphone is available. Start with Text Input instead.'
+    if (error.code === 'setup') return 'Gemini Live setup did not complete. Retry the connection.'
+    if (error.code === 'message') return 'Gemini Live returned an unreadable server message. Retry the connection.'
     return 'Gemini Live WebSocket connection failed. Check network access and try again.'
   }
   return `${providerId === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'} unavailable. Retry or explicitly choose another provider.`
