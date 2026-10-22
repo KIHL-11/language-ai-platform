@@ -5,6 +5,7 @@ import re
 import shutil
 import threading
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -336,6 +337,74 @@ class LearningLibraryStore:
                 })
                 items[index] = updated
                 self._write_items(items)
+                return updated
+        raise KeyError(item_id)
+
+    def replace_transcript(
+        self,
+        item_id: str,
+        lesson: Lesson,
+        old_to_new: dict[int, int | None],
+        *,
+        expected_updated_at: datetime,
+    ) -> LibraryItem:
+        """Atomically install an explicitly confirmed transcript repair."""
+        with self._lock:
+            items = self._read_items()
+            for index, item in enumerate(items):
+                if item.id != item_id:
+                    continue
+                if item.updated_at != expected_updated_at:
+                    raise LibraryConflictError("Library item changed after repair preview")
+                new_index_by_id = {
+                    sentence.id: position for position, sentence in enumerate(lesson.sentences)
+                }
+                old_sentence = (
+                    item.lesson.sentences[item.progress.sentence_index]
+                    if item.lesson.sentences else None
+                )
+                guided_id = old_to_new.get(old_sentence.id) if old_sentence else None
+                progress = item.progress.model_copy(update={
+                    "sentence_index": new_index_by_id.get(guided_id, 0),
+                })
+                listening_id = (
+                    old_to_new.get(item.listening_progress.current_sentence_id)
+                    if item.listening_progress.current_sentence_id is not None else None
+                )
+                duration = max((sentence.end for sentence in lesson.sentences), default=0.0)
+                listening = item.listening_progress.model_copy(update={
+                    "current_sentence_id": listening_id,
+                    "last_position_seconds": min(item.listening_progress.last_position_seconds, duration),
+                })
+                targets = Counter(value for value in old_to_new.values() if value is not None)
+                shadow_sentences = {}
+                for old_id, value in item.shadowing_progress.sentences.items():
+                    new_id = old_to_new.get(int(old_id))
+                    if new_id is not None and targets[new_id] == 1:
+                        shadow_sentences[str(new_id)] = value
+                last_id = old_to_new.get(item.shadowing_progress.last_sentence_id) if item.shadowing_progress.last_sentence_id else None
+                if last_id is None or str(last_id) not in shadow_sentences:
+                    last_id = max(
+                        (int(key) for key in shadow_sentences),
+                        key=lambda value: shadow_sentences[str(value)].last_attempt_at,
+                        default=None,
+                    )
+                shadowing = item.shadowing_progress.model_copy(update={
+                    "last_sentence_id": last_id,
+                    "last_practiced_at": shadow_sentences[str(last_id)].last_attempt_at if last_id else None,
+                    "sentences": shadow_sentences,
+                })
+                updated = item.model_copy(update={
+                    "lesson": lesson,
+                    "progress": progress,
+                    "listening_progress": listening,
+                    "shadowing_progress": shadowing,
+                    "updated_at": self._now(),
+                })
+                items[index] = updated
+                self._write_items(items)
+                cache = self._owned_media_directory(item_id) / "shadowing_reference_v1.json"
+                cache.unlink(missing_ok=True)
                 return updated
         raise KeyError(item_id)
 

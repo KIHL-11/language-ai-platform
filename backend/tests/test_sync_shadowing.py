@@ -288,6 +288,61 @@ def test_language_models_are_lazily_initialized_once_and_failures_can_retry(monk
     assert FlakyModel.calls == 2
 
 
+@pytest.mark.parametrize("language,model_name", [("en", "small.en"), ("de", "small")])
+def test_shadowing_asr_uses_accuracy_config_without_target_text_bias(
+    language, model_name, monkeypatch
+):
+    calls = []
+
+    class FakeModel:
+        def __init__(self, name, **settings):
+            assert name == model_name
+            assert settings["device"] == "cpu" and settings["compute_type"] == "int8"
+
+        def transcribe(self, path, **settings):
+            calls.append((path, settings))
+            return iter([SimpleNamespace(
+                text=" Ja.",
+                words=[SimpleNamespace(word=" Ja.", start=.1, end=.4)],
+            )]), None
+
+    monkeypatch.delenv("WHISPER_SHADOWING_MODEL_EN", raising=False)
+    monkeypatch.delenv("WHISPER_SHADOWING_MODEL_MULTI", raising=False)
+    monkeypatch.setattr("faster_whisper.WhisperModel", FakeModel)
+    monkeypatch.setattr(local_whisper, "_models", {})
+    result = local_whisper.transcribe_shadowing_words("attempt.wav", language)
+    settings = calls[0][1]
+    assert settings == {
+        "language": language,
+        "beam_size": 5,
+        "temperature": 0,
+        "condition_on_previous_text": False,
+        "word_timestamps": True,
+    }
+    assert "initial_prompt" not in settings and "hotwords" not in settings
+    assert result.words[0].start == .1
+    assert model_name in result.model_config
+
+
+def test_attempt_audio_preprocessing_is_mono_16khz_and_timing_preserving(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"wav")
+
+    monkeypatch.setattr("services.shadowing.audio.subprocess.run", fake_run)
+    from services.shadowing.audio import prepared_upload_wav
+
+    with prepared_upload_wav(b"recording", ".webm") as wav:
+        assert wav.read_bytes() == b"wav"
+    command = commands[0]
+    assert command[command.index("-af") + 1] == "highpass=f=80,dynaudnorm=f=150:g=7"
+    assert command[command.index("-ar") + 1] == "16000"
+    assert command[command.index("-ac") + 1] == "1"
+    assert "atempo" not in " ".join(command)
+
+
 def test_reference_cache_reads_writes_regenerates_and_supports_languages(tmp_path, monkeypatch):
     value = store(tmp_path)
     value.source_media_root.mkdir(parents=True)
@@ -315,6 +370,29 @@ def test_reference_cache_reads_writes_regenerates_and_supports_languages(tmp_pat
     cache.write_text("{broken", encoding="utf-8")
     service.get_words(item.id, 1)
     assert len(calls) == 2 and calls[0][1] == "de"
+
+
+def test_reference_cache_signature_tracks_shadowing_model(tmp_path, monkeypatch):
+    value = store(tmp_path)
+    value.source_media_root.mkdir(parents=True)
+    (value.source_media_root / "audio.mp3").write_bytes(b"audio")
+    item = value.save_item(lesson("de").model_copy(update={"audio_url": "/media/audio.mp3"}))
+    calls = []
+
+    @contextmanager
+    def fake_segment(*_):
+        yield tmp_path / "reference.wav"
+
+    def transcriber(*_):
+        calls.append(True)
+        return LocalTranscription("Ich fahre heute nach Berlin", REFERENCE)
+
+    monkeypatch.setattr("services.shadowing.reference.prepared_reference_segment", fake_segment)
+    service = ReferenceTimingService(value, transcriber=transcriber)
+    service.get_words(item.id, 1)
+    monkeypatch.setenv("WHISPER_SHADOWING_MODEL_MULTI", "custom-small")
+    service.get_words(item.id, 1)
+    assert len(calls) == 2
 
 
 def test_reference_cache_generation_is_serialized(tmp_path, monkeypatch):

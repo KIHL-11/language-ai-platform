@@ -13,6 +13,7 @@ from services.schemas.speaking import (
     SpeakingEventRequest,
     SpeakingSuggestion,
 )
+from services.schemas.lesson import Lesson
 from services.schemas.study_bank import StudyItemInput, StudyProvenance
 from services.speaking.store import SpeakingSessionStore
 from services.study_bank.store import StudyBankStore
@@ -265,3 +266,47 @@ def test_evidence_enforces_ownership_and_target_languages_are_explicit(tmp_path,
     )
     assert response.status_code == 200
     assert response.json() == {"target_languages": ["zh-CN"]}
+
+
+def test_repaired_sentence_id_cannot_misdirect_historical_today_link(tmp_path, monkeypatch):
+    study_store, library_store, _, _ = configure_stores(tmp_path, monkeypatch)
+    saved = library_store.save_item(Lesson.model_validate({
+        "id": "repair", "title": "Repair", "source_url": "https://youtu.be/repair1",
+        "source_language": "en", "target_language": "zh-CN", "level": "B2",
+        "audio_url": None, "source": "subtitles",
+        "sentences": [
+            {"id": 1, "text": "An unfinished", "start": 0, "end": 1},
+            {"id": 2, "text": "sentence.", "start": 1.1, "end": 2},
+            {"id": 3, "text": "Another sentence.", "start": 4, "end": 5},
+        ],
+        "ai": {"provider": "mock", "status": "complete"},
+    }))
+    provenance = media_provenance().model_copy(update={
+        "library_item_id": saved.id,
+        "lesson_id": saved.lesson.id,
+        "sentence_id": 2,
+        "sentence_text": "sentence.",
+        "start": 1.1,
+        "end": 2,
+    })
+    study_item = study_store.save_items([
+        study().model_copy(update={"provenance": [provenance]})
+    ])[0][0]
+    before = study_store.path.read_bytes()
+    preview = client.post(f"/api/library/items/{saved.id}/repair-transcript", json={}).json()
+    response = client.post(
+        f"/api/library/items/{saved.id}/repair-transcript",
+        json={
+            "commit": True,
+            "confirm_sentence_progress_reset": True,
+            "expected_updated_at": preview["expected_updated_at"],
+        },
+    )
+    assert response.status_code == 200
+    assert study_store.path.read_bytes() == before
+    evidence = client.get(
+        f"/api/integration/study-items/{study_item.id}",
+        params={"user_id": "learner"},
+    ).json()
+    assert evidence["preferred_shadowing_source"] is None
+    assert evidence["source_sentence_count"] == 0

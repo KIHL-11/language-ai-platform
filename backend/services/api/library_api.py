@@ -16,11 +16,13 @@ from services.schemas.library import (
     LibraryProgressRequest,
     LibrarySaveRequest,
     ListeningProgressRequest,
+    TranscriptRepairRequest,
 )
 from services.schemas.shadowing import ShadowingAttemptResponse
 from services.shadowing.analyzer import ShadowingAnalyzer
 from services.shadowing.audio import prepared_upload_wav
 from services.transcript.hygiene import clean_transcript_text
+from services.transcript.repair import build_repair_plan
 
 
 router = APIRouter()
@@ -36,6 +38,8 @@ def _store_error(operation):
         raise HTTPException(status_code=404, detail="Library item not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LibraryConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LibraryStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -77,6 +81,43 @@ def update_library_listening_progress(
         )
     )
     return library_store.item_for_response(item)
+
+
+@router.post("/library/items/{item_id}/repair-transcript")
+def repair_library_transcript(item_id: str, request: TranscriptRepairRequest):
+    item = _store_error(lambda: library_store.get_item(item_id))
+    plan = build_repair_plan(item)
+    preview = {
+        "committed": False,
+        "expected_updated_at": item.updated_at,
+        "old_sentence_count": len(item.lesson.sentences),
+        "new_sentence_count": len(plan.lesson.sentences),
+        "sentences": [value.model_dump(mode="json") for value in plan.lesson.sentences],
+        "old_to_new_sentence_ids": plan.old_to_new,
+        "shadowing_sentence_ids_to_reset": plan.reset_shadowing_sentence_ids,
+        "warnings": [
+            "Study Bank media provenance remains an immutable historical snapshot.",
+            "Today only offers a Shadowing deep link when historical timing still matches a live sentence.",
+            "Colliding or unmatched sentence-level Shadowing progress will be reset.",
+        ],
+    }
+    if not request.commit:
+        return preview
+    if not request.confirm_sentence_progress_reset:
+        raise HTTPException(status_code=409, detail="Transcript repair requires explicit sentence-progress confirmation")
+    if request.expected_updated_at is None:
+        raise HTTPException(status_code=409, detail="Transcript repair commit requires the preview timestamp")
+    updated = _store_error(lambda: library_store.replace_transcript(
+        item_id,
+        plan.lesson,
+        plan.old_to_new,
+        expected_updated_at=request.expected_updated_at,
+    ))
+    return {
+        **preview,
+        "committed": True,
+        "item": library_store.item_for_response(updated).model_dump(mode="json"),
+    }
 
 
 @router.delete("/library/items/{item_id}", status_code=204)

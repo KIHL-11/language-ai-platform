@@ -12,7 +12,11 @@ def prepared_upload_wav(raw: bytes, suffix: str):
         output_path = root / "attempt.wav"
         input_path.write_bytes(raw)
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", "-f", "wav", str(output_path)],
+            [
+                "ffmpeg", "-y", "-i", str(input_path),
+                "-af", "highpass=f=80,dynaudnorm=f=150:g=7",
+                "-ar", "16000", "-ac", "1", "-f", "wav", str(output_path),
+            ],
             check=True,
             capture_output=True,
         )

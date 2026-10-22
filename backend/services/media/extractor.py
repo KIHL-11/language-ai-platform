@@ -1,6 +1,5 @@
 import glob
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -11,8 +10,10 @@ from pathlib import Path
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, download_range_func
 
-from services.media.subtitles import get_subtitle_languages, parse_vtt
+from services.media.subtitles import get_subtitle_languages, parse_vtt_windows
 from services.transcription.local_whisper import get_local_whisper_model, model_name_for_language
+from services.transcript.rolling_captions import caption_windows_to_utterances, cues_to_utterances
+from services.transcript.utterances import whisper_words_to_utterances
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -45,40 +46,7 @@ def normalize_sentences(sentences: list[dict]) -> list[dict]:
 def cues_to_sentences(
     cues: list[tuple[float, float, str]], offset: float = 0.0
 ) -> list[dict]:
-    deduplicated = []
-    previous = None
-    for start, end, text in cues:
-        text = text.strip()
-        if not text or text == previous:
-            continue
-        previous = text
-        deduplicated.append((start, end, text))
-
-    sentences, current = [], None
-    for start, end, text in deduplicated:
-        if current is None:
-            current = [start, end, text]
-        else:
-            current[1] = end
-            current[2] = (current[2] + " " + text).strip()
-        if re.search(r'[.!?]["\')]?\s*$', current[2]) or len(current[2]) > 160:
-            sentences.append(
-                {
-                    "text": current[2],
-                    "start": round(max(0, current[0] - offset), 2),
-                    "end": round(max(0, current[1] - offset), 2),
-                }
-            )
-            current = None
-    if current:
-        sentences.append(
-            {
-                "text": current[2],
-                "start": round(max(0, current[0] - offset), 2),
-                "end": round(max(0, current[1] - offset), 2),
-            }
-        )
-    return sentences
+    return cues_to_utterances(cues, offset=offset)
 
 
 def whisper_transcribe(path: str, source_language: str) -> list[dict]:
@@ -91,48 +59,7 @@ def whisper_transcribe(path: str, source_language: str) -> list[dict]:
         condition_on_previous_text=False,
         word_timestamps=True,
     )
-    sentences, words, current_start, last_end = [], [], None, 0.0
-    for segment in segments:
-        for word in segment.words or []:
-            if current_start is None:
-                current_start = word.start
-            words.append(word.word)
-            last_end = word.end
-            text = "".join(words).strip()
-            if re.search(r'[.!?]["\')]?$', word.word.strip()) or len(text) > 160:
-                if text:
-                    sentences.append(
-                        {
-                            "text": text,
-                            "start": round(current_start, 2),
-                            "end": round(word.end, 2),
-                        }
-                    )
-                words, current_start = [], None
-    if words:
-        text = "".join(words).strip()
-        if text:
-            sentences.append(
-                {
-                    "text": text,
-                    "start": round(current_start or 0.0, 2),
-                    "end": round(last_end, 2),
-                }
-            )
-    if sentences:
-        return sentences
-
-    segments, _ = model.transcribe(
-        path,
-        language=source_language,
-        beam_size=1,
-        condition_on_previous_text=False,
-    )
-    return [
-        {"text": item.text.strip(), "start": round(item.start, 2), "end": round(item.end, 2)}
-        for item in segments
-        if item.text.strip()
-    ]
+    return whisper_words_to_utterances(list(segments))
 
 
 def separate_vocals(audio_path: str) -> str:
@@ -289,10 +216,10 @@ def extract_media(
         source = None
         vtt_paths = glob.glob(str(MEDIA / f"{video_id}*.vtt"))
         if vtt_paths:
-            cues = parse_vtt(_select_vtt(vtt_paths, source_language))
+            windows = parse_vtt_windows(_select_vtt(vtt_paths, source_language))
             if start is not None and end is not None:
-                cues = [cue for cue in cues if cue[1] > start and cue[0] < end]
-            sentences = cues_to_sentences(cues, offset)
+                windows = [window for window in windows if window.end > start and window.start < end]
+            sentences = caption_windows_to_utterances(windows, offset=offset)
             if sentences:
                 source = "subtitles"
 

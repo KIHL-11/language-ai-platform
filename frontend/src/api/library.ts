@@ -49,6 +49,8 @@ function isListeningProgress(value: unknown): value is ListeningProgress {
 function isShadowingMetrics(value: unknown): value is ShadowingMetrics {
   const nullableNumber = (candidate: unknown) => candidate === null || typeof candidate === 'number'
   return isRecord(value) && typeof value.recognized_text === 'string' &&
+    (value.asr_model === undefined || value.asr_model === null || typeof value.asr_model === 'string') &&
+    (value.speech_detected === undefined || typeof value.speech_detected === 'boolean') &&
     typeof value.target_word_count === 'number' && typeof value.recognized_word_count === 'number' &&
     typeof value.transcript_match_percent === 'number' &&
     typeof value.matched_count === 'number' && typeof value.missed_count === 'number' &&

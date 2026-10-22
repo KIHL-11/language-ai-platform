@@ -90,3 +90,9 @@ class LibraryProgressRequest(LibraryModel):
 
 class ListeningProgressRequest(ListeningProgress):
     pass
+
+
+class TranscriptRepairRequest(LibraryModel):
+    commit: bool = False
+    confirm_sentence_progress_reset: bool = False
+    expected_updated_at: datetime | None = None

@@ -71,7 +71,18 @@ class EvidenceBuilder:
                 continue
             key = (provenance.library_item_id, provenance.sentence_id)
             library_item = library.get(provenance.library_item_id)
-            if key in seen or library_item is None or provenance.sentence_id not in {sentence.id for sentence in library_item.lesson.sentences}:
+            sentence = next(
+                (
+                    value for value in library_item.lesson.sentences
+                    if value.id == provenance.sentence_id
+                ),
+                None,
+            ) if library_item else None
+            timing_matches = bool(
+                sentence
+                and min(sentence.end, provenance.end) > max(sentence.start, provenance.start)
+            )
+            if key in seen or library_item is None or not timing_matches:
                 continue
             seen.add(key)
             progress = library_item.shadowing_progress.sentences.get(str(provenance.sentence_id))

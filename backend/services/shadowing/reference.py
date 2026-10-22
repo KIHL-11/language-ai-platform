@@ -10,7 +10,11 @@ from pydantic import TypeAdapter, ValidationError
 from services.library.store import LearningLibraryStore
 from services.schemas.shadowing import TimedWord
 from services.shadowing.audio import prepared_reference_segment
-from services.transcription.local_whisper import LocalTranscription, transcribe_local_words
+from services.transcription.local_whisper import (
+    LocalTranscription,
+    shadowing_model_name_for_language,
+    transcribe_shadowing_words,
+)
 from services.transcript.hygiene import clean_transcript_text
 
 
@@ -23,7 +27,7 @@ class ReferenceTimingService:
         self,
         store: LearningLibraryStore,
         *,
-        transcriber: Callable[[str, str], LocalTranscription] = transcribe_local_words,
+        transcriber: Callable[[str, str], LocalTranscription] = transcribe_shadowing_words,
     ):
         self.store = store
         self.transcriber = transcriber
@@ -40,7 +44,13 @@ class ReferenceTimingService:
             audio_path, _ = self.store.audio_path(item_id)
         except KeyError:
             return None, "reference_audio_unavailable"
-        signature = self._signature(sentence.id, item.lesson.source_language, target_text, audio_path)
+        signature = self._signature(
+            sentence.id,
+            item.lesson.source_language,
+            target_text,
+            audio_path,
+            shadowing_model_name_for_language(item.lesson.source_language),
+        )
         cache_path = self.store._owned_media_directory(item_id) / "shadowing_reference_v1.json"
         with _reference_generation_lock:
             cached = self._read_cache(cache_path)
@@ -60,9 +70,18 @@ class ReferenceTimingService:
             return transcription.words, None
 
     @staticmethod
-    def _signature(sentence_id: int, language: str, text: str, audio_path: Path) -> str:
+    def _signature(
+        sentence_id: int,
+        language: str,
+        text: str,
+        audio_path: Path,
+        model_name: str,
+    ) -> str:
         stat = audio_path.stat()
-        value = f"{sentence_id}\0{language}\0{text}\0{audio_path.name}\0{stat.st_size}\0{stat.st_mtime_ns}"
+        value = (
+            f"{sentence_id}\0{language}\0{text}\0{model_name}\0"
+            f"{audio_path.name}\0{stat.st_size}\0{stat.st_mtime_ns}"
+        )
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     @staticmethod
