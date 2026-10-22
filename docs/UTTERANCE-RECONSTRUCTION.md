@@ -7,12 +7,25 @@ created; raw subtitle cues and raw Whisper segments are not learning units.
 ## Caption reconstruction
 
 The VTT parser retains inline timestamps and explicit `<v Speaker>` labels.
-For cues without word timing, token times are conservatively distributed over
-the cue. Temporally overlapping or adjacent rolling-caption windows use exact,
-normalized suffix/prefix token overlap. Only the novel suffix is emitted.
-Exact active-window revisions and contained revisions are ignored. This logic
-is time-gated: repeated speech after a gap remains repeated speech, and an
-adjacent one-word repetition is not discarded merely because its text matches.
+It treats each physical caption line as a display snapshot before combining a
+cue; it never blindly concatenates every timestamped line. Same-timestamp
+snapshots may replace an active display tail, including cumulative expansion,
+middle-token correction, and punctuation-only correction. Sliding rows use
+exact lexical suffix/prefix overlap, ignoring punctuation for matching while
+retaining the newest punctuation in rendered text.
+
+Each internal token records its caption window and line provenance. An inline
+marker anchors the first lexical token after that marker. Additional tokens
+whose positions are merely distributed to the next marker/cue boundary remain
+explicitly `estimated`; they are not represented as source-provided word
+timing. This distinction stays internal and is not added to persisted Lesson
+schemas.
+
+Revision removal is time-gated. Identical inline timestamps are strong display
+revision evidence. A later source timestamp after the earlier token end is
+evidence of new speech, so intentional repetitions and hesitations remain.
+Estimated middle rewrites that cannot be classified safely are preserved and
+flagged `ambiguous_revision`, rather than silently deleting possible speech.
 
 The canonical token stream is split at strong punctuation (`.`, `!`, `?`, or
 `…`), an explicitly supplied voice change, or at least 900 ms of lexical
@@ -28,6 +41,20 @@ utterances such as “Ja.” remain valid.
 Media Whisper fallback requests word timestamps and feeds those words through
 the same utterance boundary implementation. A provider segment is never
 treated as an authoritative sentence boundary.
+
+Before subtitle utterances become a new Lesson, a deterministic quality gate
+checks invalid timing, unresolved revision ambiguity, overlapping adjacent-card
+carry-over, and utterances longer than 30 seconds. Estimated timing alone is a
+diagnostic, not a rejection. A critical subtitle result uses the existing local
+Whisper path once; it does not add a remote provider or repeat media download.
+Long text is never split only to satisfy the duration guide.
+
+The regression fixture
+`backend/tests/fixtures/easy_german_screenshot_pattern.vtt` is deliberately
+labelled as a sanitized reconstruction of the reported screenshot structure.
+It is not the original Easy German VTT, and its non-anchor times are not claimed
+as audio-verified ground truth. The real source URL/VTT/audio was unavailable in
+the cloud workspace, so final source/audio validation remains a Real-Mac task.
 
 ## Existing Library repair
 
@@ -85,7 +112,8 @@ interpreted as a pronunciation score.
 - Repair uses the saved Lesson transcript/timing because raw downloaded VTT is
   not retained. It cannot recover words absent from that snapshot.
 - Auto-caption timestamps can be approximate, and the overlap algorithm is
-  exact-token rather than semantic or fuzzy.
+  exact-token rather than semantic or fuzzy. Unresolved edits are flagged and
+  sent to local audio transcription instead of being guessed.
 - No speaker identity or diarization is invented when VTT lacks an explicit
   voice label.
 - Larger Shadowing models trade better short-utterance recognition for higher

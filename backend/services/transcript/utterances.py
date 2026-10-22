@@ -1,15 +1,18 @@
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Literal
 
 from services.transcript.hygiene import clean_transcript_text
 
 
 STRONG_PAUSE_SECONDS = 0.9
 CLAUSE_PAUSE_SECONDS = 0.5
+PUNCTUATION_PAUSE_SECONDS = 0.1
 _TOKEN = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*|\d+(?:[.,]\d+)*|[.!?…]+|[,;:]+|[^\w\s]", re.UNICODE)
 _STRONG_END = re.compile(r"[.!?…]+$")
 _CLAUSE_END = re.compile(r"[,;:]+$")
+TimingSource = Literal["source_inline", "acoustic", "estimated"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,10 @@ class TranscriptToken:
     start: float
     end: float
     speaker: str | None = None
+    timing_source: TimingSource = "estimated"
+    source_window: int | None = None
+    source_line: int | None = None
+    ambiguous: bool = False
 
     def __post_init__(self):
         if not self.text or self.start < 0 or self.end < self.start:
@@ -34,25 +41,39 @@ def timed_text_tokens(
     end: float,
     *,
     speaker: str | None = None,
+    timing_source: TimingSource = "estimated",
+    source_window: int | None = None,
+    source_line: int | None = None,
 ) -> list[TranscriptToken]:
     cleaned = clean_transcript_text(text)
     values = _TOKEN.findall(cleaned)
     if not values:
         return []
-    duration = max(0.0, end - start)
-    width = duration / len(values)
-    return [
-        TranscriptToken(
+    lexical_count = sum(any(character.isalnum() for character in value) for value in values)
+    width = max(0.0, end - start) / max(lexical_count, 1)
+    output: list[TranscriptToken] = []
+    lexical_index = 0
+    for value in values:
+        if any(character.isalnum() for character in value):
+            token_start = start + lexical_index * width
+            lexical_index += 1
+            token_end = end if lexical_index == lexical_count else start + lexical_index * width
+        else:
+            token_start = output[-1].end if output else start
+            token_end = token_start
+        output.append(TranscriptToken(
             text=value,
-            start=start + index * width,
-            end=end if index == len(values) - 1 else start + (index + 1) * width,
+            start=token_start,
+            end=token_end,
             speaker=speaker,
-        )
-        for index, value in enumerate(values)
-    ]
+            timing_source=timing_source,
+            source_window=source_window,
+            source_line=source_line,
+        ))
+    return output
 
 
-def _render(tokens: list[TranscriptToken]) -> str:
+def render_tokens(tokens: list[TranscriptToken]) -> str:
     output = ""
     for token in tokens:
         if not output:
@@ -78,8 +99,8 @@ def tokens_to_utterances(
     def flush() -> None:
         if not current:
             return
-        text = clean_transcript_text(_render(current))
-        if text:
+        text = clean_transcript_text(render_tokens(current))
+        if text and any(character.isalnum() for character in text):
             utterances.append({
                 "text": text,
                 "start": round(max(0.0, current[0].start - offset), 2),
@@ -87,7 +108,7 @@ def tokens_to_utterances(
             })
         current.clear()
 
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if current:
             gap = max(0.0, token.start - current[-1].end)
             speaker_changed = bool(
@@ -101,7 +122,28 @@ def tokens_to_utterances(
                 flush()
         current.append(token)
         if _STRONG_END.search(token.text):
-            flush()
+            following = next(
+                (value for value in tokens[index + 1:] if any(character.isalnum() for character in value.text)),
+                None,
+            )
+            if following is None:
+                flush()
+            else:
+                punctuation_gap = max(0.0, following.start - token.end)
+                explicit_speaker_change = bool(
+                    token.speaker
+                    and following.speaker
+                    and token.speaker != following.speaker
+                )
+                completed_phrase_evidence = bool(
+                    following.text[:1] and following.text[:1].isupper()
+                )
+                if (
+                    punctuation_gap >= PUNCTUATION_PAUSE_SECONDS
+                    or explicit_speaker_change
+                    or completed_phrase_evidence
+                ):
+                    flush()
     flush()
     return utterances
 
@@ -118,11 +160,13 @@ def whisper_words_to_utterances(segments, *, offset: float = 0.0) -> list[dict]:
                         part,
                         max(0.0, float(word.start)),
                         max(float(word.start), float(word.end)),
+                        timing_source="acoustic",
                     ))
         else:
             tokens.extend(timed_text_tokens(
                 str(segment.text),
                 max(0.0, float(segment.start)),
                 max(float(segment.start), float(segment.end)),
+                timing_source="estimated",
             ))
     return tokens_to_utterances(tokens, offset=offset)

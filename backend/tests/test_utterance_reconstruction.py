@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
 from services.media.subtitles import parse_vtt_windows
-from services.transcript.rolling_captions import cues_to_utterances
+from services.transcript.rolling_captions import (
+    caption_windows_to_utterances,
+    cues_to_utterances,
+)
 from services.transcript.utterances import whisper_words_to_utterances
 
 
@@ -37,6 +40,19 @@ def test_punctuation_pause_and_tail_boundaries():
     ]
 
 
+def test_auto_caption_period_without_pause_or_completed_phrase_evidence_does_not_split():
+    tokens = [
+        word(" Das", 0, .4),
+        word(" ist.", .4, .8),
+        word(" nur", .8, 1.1),
+        word(" ein", 1.1, 1.3),
+        word(" Test.", 1.3, 1.8),
+    ]
+    assert whisper_words_to_utterances([segment("", 0, 1.8, tokens)]) == [
+        {"text": "Das ist. nur ein Test.", "start": 0.0, "end": 1.8}
+    ]
+
+
 def test_long_pause_splits_but_tiny_pause_does_not():
     assert texts([(0, 1, "first part"), (2, 3, "second part")]) == ["first part", "second part"]
     assert texts([(0, 1, "first part"), (1.2, 2, "second part")]) == ["first part second part"]
@@ -50,6 +66,7 @@ def test_long_text_is_not_split_at_160_characters_without_natural_boundary():
 
 def test_music_is_removed_without_deleting_lexical_short_utterances():
     assert texts([(0, 1, "[musik]"), (1, 2, "[singen][music]"), (2, 3, "Ja.")]) == ["Ja."]
+    assert texts([(0, 1, "[music]."), (1, 2, "[applause]!")]) == []
     assert texts([(0, 1, "Hallo [music] Welt.")]) == ["Hallo Welt."]
 
 
@@ -94,8 +111,8 @@ def test_vtt_inline_timestamps_are_preserved_as_word_boundaries(tmp_path):
     windows = parse_vtt_windows(path)
     assert [(token.text, token.start, token.end) for token in windows[0].tokens] == [
         ("Hello", 1.2, 2.1),
-        ("there", 2.1, 2.55),
-        (".", 2.55, 3.0),
+        ("there", 2.1, 3.0),
+        (".", 3.0, 3.0),
     ]
 
 
@@ -107,9 +124,31 @@ def test_explicit_vtt_voice_change_is_an_utterance_boundary(tmp_path):
         "00:00:01.100 --> 00:00:02.000\r\n<v Bob>Hi Alice\r\n",
         encoding="utf-8",
     )
-    from services.transcript.rolling_captions import caption_windows_to_utterances
-
     assert [value["text"] for value in caption_windows_to_utterances(parse_vtt_windows(path))] == [
         "Hello there",
         "Hi Alice",
+    ]
+
+
+def test_explicit_speaker_change_preserves_repeated_words(tmp_path):
+    path = tmp_path / "speaker-repetition.vtt"
+    path.write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n<v Alice>Danke sehr\n\n"
+        "00:00:01.100 --> 00:00:02.000\n<v Bob>Danke sehr\n",
+        encoding="utf-8",
+    )
+    assert [value["text"] for value in caption_windows_to_utterances(parse_vtt_windows(path))] == [
+        "Danke sehr",
+        "Danke sehr",
+    ]
+
+
+def test_non_numeric_vtt_cue_identifier_is_not_transcript_text(tmp_path):
+    path = tmp_path / "identified.vtt"
+    path.write_text(
+        "WEBVTT\n\ncaption-intro\n00:00:00.000 --> 00:00:01.000\nHallo.\n",
+        encoding="utf-8",
+    )
+    assert [value["text"] for value in caption_windows_to_utterances(parse_vtt_windows(path))] == [
+        "Hallo."
     ]
