@@ -5,6 +5,7 @@ from services.schemas.shadowing import ShadowingMetrics
 from services.shadowing.metrics import calculate_metrics
 from services.shadowing.reference import ReferenceTimingService
 from services.transcription.local_whisper import LocalTranscription, transcribe_local_words
+from services.transcript.hygiene import clean_transcript_text
 
 
 class ShadowingAnalyzer:
@@ -24,10 +25,13 @@ class ShadowingAnalyzer:
         sentence = next((value for value in item.lesson.sentences if value.id == sentence_id), None)
         if sentence is None:
             raise ValueError("Invalid shadowing sentence id")
+        target_text = clean_transcript_text(sentence.text)
+        if not target_text:
+            raise ValueError("Sentence has no practiceable transcript text")
         attempt = self.transcriber(attempt_wav, item.lesson.source_language)
         reference, reason = self.references.get_words(item_id, sentence_id)
         return calculate_metrics(
-            sentence.text,
+            target_text,
             attempt.text,
             attempt.words,
             reference,

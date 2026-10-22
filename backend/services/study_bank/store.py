@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from services.retrieval.chunk_quality import prepare_chunk_text
 from services.review.scheduler import schedule_review
+from services.transcript.hygiene import clean_transcript_text
 from services.schemas.study_bank import (
     MediaStudyProvenance,
     ReviewRating,
@@ -49,6 +50,7 @@ def _clean_word_text(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if (
         not cleaned
+        or not clean_transcript_text(cleaned)
         or CURATION_NOISE_LABEL.fullmatch(cleaned)
         or not any(character.isalnum() for character in cleaned)
     ):
@@ -61,7 +63,7 @@ def normalized_identity(value: StudyItemInput) -> tuple[str, str]:
         cleaned = re.sub(
             r"\s+", " ", unicodedata.normalize("NFKC", html.unescape(value.text))
         ).strip()
-        if CURATION_NOISE_LABEL.fullmatch(cleaned):
+        if not clean_transcript_text(cleaned) or CURATION_NOISE_LABEL.fullmatch(cleaned):
             raise ValueError("chunk text must contain reusable spoken language")
         prepared = prepare_chunk_text(value.text, value.source_language)
         return prepared.text, prepared.normalized_text

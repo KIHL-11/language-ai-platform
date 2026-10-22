@@ -14,6 +14,7 @@ import type { MediaController } from '../listening/mediaController'
 import { activeSentenceIndex, validCustomLoop, type ListeningLoop } from '../listening/timeline'
 import { getOrCreateLearnerId } from '../session/learnerSession'
 import { compareDictation, type DictationResult } from '../training/dictation'
+import { practiceableSentences, restoredPracticeIndex } from '../transcript/hygiene'
 import type { LibraryItem, ListeningMode, ListeningPlaybackRate, ListeningProgress } from '../types/library'
 import type { StudyCandidate } from '../types/studyBank'
 
@@ -44,11 +45,14 @@ export default function ListeningWorkspace({
   controllerFactory = createListeningController,
   onShadowing,
 }: ListeningWorkspaceProps) {
+  const sentences = useMemo(() => practiceableSentences(item.lesson.sentences), [item.lesson.sentences])
   const restoredIndex = item.listening_progress.current_sentence_id === null
     ? 0
-    : Math.max(0, item.lesson.sentences.findIndex(
-      (sentence) => sentence.id === item.listening_progress.current_sentence_id,
-    ))
+    : restoredPracticeIndex(
+      item.lesson.sentences,
+      sentences,
+      item.listening_progress.current_sentence_id,
+    )
   const [controller, setController] = useState<MediaController | null>(null)
   const [mediaKind, setMediaKind] = useState<ListeningMediaKind>('transcript')
   const [mediaMessage, setMediaMessage] = useState<string | null>(null)
@@ -80,8 +84,8 @@ export default function ListeningWorkspace({
   const mountedRef = useRef(true)
   const lastQueuedPosition = useRef(item.listening_progress.last_position_seconds)
   const writeTail = useRef<Promise<void>>(Promise.resolve())
-  const currentSentence = item.lesson.sentences[currentIndex] ?? null
-  const lessonDuration = Math.max(0, ...item.lesson.sentences.map((sentence) => sentence.end))
+  const currentSentence = sentences[currentIndex] ?? null
+  const lessonDuration = Math.max(0, ...sentences.map((sentence) => sentence.end))
 
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
   useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
@@ -162,7 +166,7 @@ export default function ListeningWorkspace({
       const activeLoop = loopRef.current
       let range: { start: number; end: number } | null = null
       if (activeLoop.type === 'sentence') {
-        const sentence = item.lesson.sentences[currentIndexRef.current]
+        const sentence = sentences[currentIndexRef.current]
         if (sentence && sentence.end - sentence.start >= 0.5) range = sentence
       } else if (activeLoop.type === 'custom_ab') {
         range = activeLoop
@@ -173,12 +177,12 @@ export default function ListeningWorkspace({
         time = range.start
       }
       setCurrentTime(time)
-      const next = activeSentenceIndex(item.lesson.sentences, time, currentIndexRef.current)
+      const next = activeSentenceIndex(sentences, time, currentIndexRef.current)
       if (next >= 0 && next !== currentIndexRef.current) setCurrentIndex(next)
       if (Math.abs(time - lastQueuedPosition.current) >= PERSIST_INTERVAL_SECONDS) persist()
     }, CLOCK_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [controller, item.lesson.sentences, persist])
+  }, [controller, persist, sentences])
 
   useEffect(() => {
     let active = true
@@ -199,7 +203,7 @@ export default function ListeningWorkspace({
   }, [autoFollow, currentSentence])
 
   const selectSentence = useCallback((index: number) => {
-    const sentence = item.lesson.sentences[index]
+    const sentence = sentences[index]
     if (!sentence) return
     setCurrentIndex(index)
     setCurrentTime(sentence.start)
@@ -211,7 +215,7 @@ export default function ListeningWorkspace({
       last_position_seconds: sentence.start,
       current_sentence_id: sentence.id,
     })
-  }, [controller, item.lesson.sentences, persist])
+  }, [controller, persist, sentences])
 
   const seekRelative = useCallback((delta: number) => {
     if (!controller) return
@@ -362,7 +366,7 @@ export default function ListeningWorkspace({
           </div>
 
           <div className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
-            <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(item.lesson.sentences.length).padStart(2, '0')}</p>
+            <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(sentences.length).padStart(2, '0')}</p>
             {currentSentence ? <>
               <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : currentSentence.text}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
@@ -401,7 +405,7 @@ export default function ListeningWorkspace({
             <button type="button" aria-pressed={autoFollow} onClick={() => setAutoFollow((value) => !value)} className="h-9 border border-[#aebcb6] px-3">Auto-follow {autoFollow ? 'ON' : 'OFF'}</button>
           </div>
           <ol className="mt-4 max-h-[75vh] space-y-2 overflow-y-auto pr-2">
-            {item.lesson.sentences.map((sentence, index) => {
+            {sentences.map((sentence, index) => {
               const active = index === currentIndex
               return <li key={sentence.id}><button ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} type="button" aria-current={active ? 'true' : undefined} onClick={() => selectSentence(index)} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
                 <span className="block text-xs tabular-nums text-[#66726e]">{formatTime(sentence.start)}</span>

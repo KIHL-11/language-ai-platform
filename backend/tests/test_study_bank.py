@@ -207,7 +207,7 @@ def test_word_validation_rejects_malformed_or_caption_noise(tmp_path, text):
     assert error.value is not None
 
 
-@pytest.mark.parametrize("text", ["[musik]", "[singen]"])
+@pytest.mark.parametrize("text", ["[musik]", "[singen]", "[musik][singen][musik]"])
 def test_chunk_validation_rejects_curation_specific_caption_noise(tmp_path, text):
     value = bank(tmp_path)
     with pytest.raises(ValueError, match="reusable spoken language"):

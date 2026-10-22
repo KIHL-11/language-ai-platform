@@ -29,6 +29,21 @@ export function maximumRecordingSeconds(targetDuration: number): number {
   return Math.min(30, Math.max(10, targetDuration * 2))
 }
 
+const RECORDING_MIME_TYPES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/mp4',
+  'audio/ogg;codecs=opus',
+  'audio/ogg',
+]
+
+export function supportedRecordingMimeType(): string | null {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return null
+  }
+  return RECORDING_MIME_TYPES.find((value) => MediaRecorder.isTypeSupported(value)) ?? null
+}
+
 export function useSyncRecorder(targetDuration: number) {
   const [state, setState] = useState<SyncRecorderState>(INITIAL)
   const mounted = useRef(true)
@@ -101,6 +116,7 @@ export function useSyncRecorder(targetDuration: number) {
     const id = requestId.current + 1
     requestId.current = id
     setState({ ...INITIAL, status: 'requesting' })
+    let microphoneReady = false
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -110,6 +126,7 @@ export function useSyncRecorder(targetDuration: number) {
         return
       }
       stream.current = mediaStream
+      microphoneReady = true
       for (const value of ['3', '2', '1'] as const) {
         setState({ ...INITIAL, status: 'countdown', countdown: value })
         await delay(1_000)
@@ -118,7 +135,10 @@ export function useSyncRecorder(targetDuration: number) {
       setState({ ...INITIAL, status: 'countdown', countdown: 'Go' })
       await delay(250)
       if (!mounted.current || requestId.current !== id) return
-      const mediaRecorder = new MediaRecorder(mediaStream)
+      const preferredMimeType = supportedRecordingMimeType()
+      const mediaRecorder = preferredMimeType
+        ? new MediaRecorder(mediaStream, { mimeType: preferredMimeType })
+        : new MediaRecorder(mediaStream)
       recorder.current = mediaRecorder
       chunks.current = []
       mediaRecorder.ondataavailable = (event) => {
@@ -136,9 +156,14 @@ export function useSyncRecorder(targetDuration: number) {
         stopTracks()
         recorder.current = null
         if (!mounted.current || requestId.current !== id) return
-        const blob = new Blob(chunks.current, { type: mediaRecorder.mimeType || 'audio/webm' })
+        const type = mediaRecorder.mimeType || chunks.current.find((chunk) => chunk.type)?.type || preferredMimeType || 'audio/webm'
+        const blob = new Blob(chunks.current, { type })
         chunks.current = []
         releaseUrl()
+        if (blob.size === 0) {
+          setState({ ...INITIAL, status: 'error', error: 'No audio was captured. Check your microphone and try again.' })
+          return
+        }
         const url = URL.createObjectURL(blob)
         playbackUrl.current = url
         setState({
@@ -172,7 +197,13 @@ export function useSyncRecorder(targetDuration: number) {
       stopTracks()
       recorder.current = null
       if (mounted.current && requestId.current === id) {
-        setState({ ...INITIAL, status: 'error', error: microphoneError(error) })
+        setState({
+          ...INITIAL,
+          status: 'error',
+          error: microphoneReady
+            ? 'Recording or reference playback could not start. Try again.'
+            : microphoneError(error),
+        })
       }
     }
   }, [clearTimer, releaseUrl, reset, state.status, stopTracks, targetDuration])

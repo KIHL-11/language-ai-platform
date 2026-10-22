@@ -209,6 +209,29 @@ describe('Listening Workspace', () => {
     expect(onShadowing).toHaveBeenCalledWith(2)
   })
 
+  it('uses cleaned practiceable sentences for display, navigation, and shadowing entry', async () => {
+    const user = userEvent.setup()
+    const onShadowing = vi.fn()
+    const item = {
+      ...libraryItem,
+      lesson: {
+        ...libraryItem.lesson,
+        sentences: libraryItem.lesson.sentences.map((sentence) => sentence.id === 2
+          ? { ...sentence, text: '[music] [APPLAUSE]' }
+          : sentence.id === 3 ? { ...sentence, text: 'Keep [SINGING] going.' } : sentence),
+      },
+    }
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({
+      controller: new FakeController(), kind: 'audio', message: null,
+    })
+    render(<ListeningWorkspace item={item} onBack={vi.fn()} onShadowing={onShadowing} controllerFactory={factory} />)
+    expect(screen.getByText(/CURRENT SENTENCE 02 \/ 02/)).toBeInTheDocument()
+    expect(screen.getAllByText('Keep going.').length).toBeGreaterThan(0)
+    expect(screen.queryByText('[music] [APPLAUSE]')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Practice Sync Shadowing' }))
+    expect(onShadowing).toHaveBeenCalledWith(3)
+  })
+
   it('keeps listening usable when candidates fail', async () => {
     fetchMock.mockImplementation((url: string, options?: RequestInit) => String(url).includes('/study-candidates')
       ? Promise.reject(new Error('offline'))
