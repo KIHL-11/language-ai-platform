@@ -11,6 +11,7 @@ from services.library.store import LearningLibraryStore
 from services.schemas.shadowing import TimedWord
 from services.shadowing.audio import prepared_reference_segment
 from services.transcription.local_whisper import LocalTranscription, transcribe_local_words
+from services.transcript.hygiene import clean_transcript_text
 
 
 _reference_generation_lock = threading.Lock()
@@ -32,11 +33,14 @@ class ReferenceTimingService:
         sentence = next((value for value in item.lesson.sentences if value.id == sentence_id), None)
         if sentence is None:
             raise ValueError("Invalid shadowing sentence id")
+        target_text = clean_transcript_text(sentence.text)
+        if not target_text:
+            raise ValueError("Sentence has no practiceable transcript text")
         try:
             audio_path, _ = self.store.audio_path(item_id)
         except KeyError:
             return None, "reference_audio_unavailable"
-        signature = self._signature(sentence.id, item.lesson.source_language, sentence.text, audio_path)
+        signature = self._signature(sentence.id, item.lesson.source_language, target_text, audio_path)
         cache_path = self.store._owned_media_directory(item_id) / "shadowing_reference_v1.json"
         with _reference_generation_lock:
             cached = self._read_cache(cache_path)

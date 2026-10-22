@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ShadowingApiError, submitShadowingAttempt } from '../api/library'
 import { API_BASE_URL } from '../api/apiBase'
 import { createAudioMediaController, type MediaController } from '../listening/mediaController'
 import { useSyncRecorder } from '../shadowing/useSyncRecorder'
+import { practiceableSentences, restoredPracticeIndex } from '../transcript/hygiene'
 import type { LibraryItem, ShadowingAttemptResponse, ShadowingMetrics, ShadowingProgress } from '../types/library'
 
 
@@ -23,18 +24,21 @@ export default function ShadowingWorkspace({
   onBack,
   controllerFactory = createAudioMediaController,
 }: Props) {
+  const sentences = useMemo(() => practiceableSentences(item.lesson.sentences), [item.lesson.sentences])
   const restoredId = initialSentenceId ?? item.shadowing_progress.last_sentence_id
-  const restoredIndex = Math.max(0, item.lesson.sentences.findIndex((sentence) => sentence.id === restoredId))
+  const restoredIndex = restoredPracticeIndex(item.lesson.sentences, sentences, restoredId)
   const [index, setIndex] = useState(restoredIndex)
   const [progress, setProgress] = useState<ShadowingProgress>(item.shadowing_progress)
   const [referenceRate, setReferenceRate] = useState(1)
   const [result, setResult] = useState<ShadowingAttemptResponse | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [canRetryAnalysis, setCanRetryAnalysis] = useState(false)
   const controllerRef = useRef<MediaController | null>(null)
   const referenceTimer = useRef<number | null>(null)
-  const uploadedBlob = useRef<Blob | null>(null)
-  const sentence = item.lesson.sentences[index] ?? null
+  const submitted = useRef<{ blob: Blob; revision: number } | null>(null)
+  const [analysisRevision, setAnalysisRevision] = useState(0)
+  const sentence = sentences[index] ?? null
   const duration = sentence ? Math.max(0, sentence.end - sentence.start) : 0
   const recorder = useSyncRecorder(duration)
   const active = ['requesting', 'countdown', 'recording'].includes(recorder.status)
@@ -53,11 +57,12 @@ export default function ShadowingWorkspace({
 
   useEffect(() => {
     const blob = recorder.blob
-    if (!blob || !sentence || uploadedBlob.current === blob) return
-    uploadedBlob.current = blob
+    if (!blob || !sentence || (submitted.current?.blob === blob && submitted.current.revision === analysisRevision)) return
+    submitted.current = { blob, revision: analysisRevision }
     let current = true
     setAnalyzing(true)
     setError(null)
+    setCanRetryAnalysis(false)
     void submitShadowingAttempt(item.id, sentence.id, sentenceProgress?.attempt_count ?? 0, blob, recorder.recordedDuration)
       .then((value) => {
         if (!current) return
@@ -70,13 +75,23 @@ export default function ShadowingWorkspace({
       })
       .catch((caught) => {
         if (!current) return
-        setError(caught instanceof ShadowingApiError && caught.status === 409
-          ? 'This sentence was updated elsewhere. Reopen Shadowing to refresh its attempt count.'
-          : 'Local shadowing analysis failed. Your recording remains available to play or retry.')
+        if (caught instanceof ShadowingApiError && caught.status === 409) {
+          setError('This sentence was updated elsewhere. Reopen Shadowing to refresh its attempt count.')
+        } else if (caught instanceof ShadowingApiError && caught.status === 0) {
+          setError('Recording upload failed. Your recording remains available; retry analysis when the backend is available.')
+          setCanRetryAnalysis(true)
+        } else if (caught instanceof ShadowingApiError && caught.detail === 'Shadowing audio is empty') {
+          setError('No audio reached the analyzer. Check your microphone and record a new attempt.')
+        } else if (caught instanceof ShadowingApiError && caught.detail === 'Shadowing audio could not be decoded') {
+          setError('The browser recording format could not be decoded. Your recording remains available to play before trying again.')
+        } else {
+          setError('Local shadowing analysis failed. Your recording remains available to play or retry analysis.')
+          setCanRetryAnalysis(true)
+        }
       })
       .finally(() => { if (current) setAnalyzing(false) })
     return () => { current = false }
-  }, [item.id, recorder.blob, recorder.recordedDuration, sentence, sentenceProgress?.attempt_count])
+  }, [analysisRevision, item.id, recorder.blob, recorder.recordedDuration, sentence, sentenceProgress?.attempt_count])
 
   function stopReferenceTimer() {
     if (referenceTimer.current !== null) window.clearTimeout(referenceTimer.current)
@@ -95,30 +110,40 @@ export default function ShadowingWorkspace({
   }
 
   function select(next: number) {
-    if (active || next < 0 || next >= item.lesson.sentences.length) return
+    if (active || next < 0 || next >= sentences.length) return
     stopReferenceTimer()
     controllerRef.current?.pause()
     recorder.reset()
-    uploadedBlob.current = null
+    submitted.current = null
+    setAnalysisRevision(0)
     setResult(null)
     setError(null)
+    setCanRetryAnalysis(false)
     setIndex(next)
   }
 
   function tryAgain() {
     recorder.reset()
-    uploadedBlob.current = null
+    submitted.current = null
+    setAnalysisRevision(0)
     setResult(null)
     setError(null)
+    setCanRetryAnalysis(false)
+  }
+
+  function retryAnalysis() {
+    setResult(null)
+    setError(null)
+    setAnalysisRevision((value) => value + 1)
   }
 
   const shownMetrics: ShadowingMetrics | null = result?.metrics ?? sentenceProgress?.last_metrics ?? null
-  if (!sentence) return <main className="mx-auto max-w-5xl px-5 py-10"><button type="button" onClick={onBack}>Back to Shadowing</button><h1 className="mt-5 text-3xl font-semibold">{item.lesson.title}</h1><p className="mt-6">This Lesson has no sentences to shadow.</p></main>
+  if (!sentence) return <main className="mx-auto max-w-5xl px-5 py-10"><button type="button" onClick={onBack}>Back to Shadowing</button><h1 className="mt-5 text-3xl font-semibold">{item.lesson.title}</h1><p className="mt-6">This Lesson has no practiceable transcript sentences.</p></main>
 
   return <main className="mx-auto max-w-6xl px-5 py-8 sm:px-8">
     <button type="button" onClick={onBack} disabled={active} className="text-sm font-semibold text-[#176b5b]">Back to Shadowing</button>
     <h1 className="mt-4 text-3xl font-semibold">Sync Shadowing</h1>
-    <p className="mt-1 text-[#66726e]">{item.lesson.title} · Sentence {index + 1} of {item.lesson.sentences.length}</p>
+    <p className="mt-1 text-[#66726e]">{item.lesson.title} · Sentence {index + 1} of {sentences.length}</p>
     <p className="mt-4 border-l-4 border-[#b7791f] bg-[#fff8e8] p-3 text-sm"><strong>Headphones recommended for accurate sync analysis.</strong> Echo cancellation helps but cannot fully remove speaker playback.</p>
     {item.persistent_audio.status !== 'available' && <p role="status" className="mt-3 border-l-4 border-[#b7791f] bg-white p-3">Precise sync timing requires saved reference audio. Transcript Match remains available.</p>}
     {error && <p role="alert" className="mt-3 text-[#8f1d14]">{error}</p>}
@@ -172,14 +197,15 @@ export default function ShadowingWorkspace({
             })}
           </div>
         </>}
-        {(result || recorder.status === 'recorded') && !analyzing && <button type="button" onClick={tryAgain} className="mt-6 h-10 border border-[#176b5b] px-4">Try Again</button>}
+        {canRetryAnalysis && recorder.status === 'recorded' && !analyzing && <button type="button" onClick={retryAnalysis} className="mt-6 h-10 border border-[#176b5b] px-4">Retry analysis</button>}
+        {(result || recorder.status === 'recorded') && !analyzing && <button type="button" onClick={tryAgain} className="mt-6 ml-2 h-10 border border-[#176b5b] px-4">Try Again</button>}
       </section>
     </div>
 
     <div className="mt-6 flex flex-wrap justify-between gap-3">
       <button type="button" disabled={active || index === 0} onClick={() => select(index - 1)} className="h-10 border border-[#aebcb6] px-4 disabled:opacity-50">Previous sentence</button>
-      <button type="button" disabled={active || index === item.lesson.sentences.length - 1} onClick={() => select(index + 1)} className="h-10 border border-[#aebcb6] px-4 disabled:opacity-50">Next sentence</button>
+      <button type="button" disabled={active || index === sentences.length - 1} onClick={() => select(index + 1)} className="h-10 border border-[#aebcb6] px-4 disabled:opacity-50">Next sentence</button>
     </div>
-    <ol className="mt-6 grid gap-2 sm:grid-cols-2">{item.lesson.sentences.map((value, sentenceIndex) => <li key={value.id}><button type="button" disabled={active} aria-current={sentenceIndex === index ? 'true' : undefined} onClick={() => select(sentenceIndex)} className="w-full border-l-4 border-transparent bg-white p-3 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">{sentenceIndex + 1}. {value.text}</button></li>)}</ol>
+    <ol className="mt-6 grid gap-2 sm:grid-cols-2">{sentences.map((value, sentenceIndex) => <li key={value.id}><button type="button" disabled={active} aria-current={sentenceIndex === index ? 'true' : undefined} onClick={() => select(sentenceIndex)} className="w-full border-l-4 border-transparent bg-white p-3 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">{sentenceIndex + 1}. {value.text}</button></li>)}</ol>
   </main>
 }

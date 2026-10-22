@@ -13,6 +13,7 @@ from services.schemas.study_bank import (
 )
 from services.study_bank.store import normalized_identity
 from services.schemas.study_bank import StudyItemInput
+from services.transcript.hygiene import clean_transcript_text
 
 
 NOISE_LABEL = re.compile(
@@ -43,7 +44,12 @@ def _provenance(item: LibraryItem, sentence) -> StudyProvenance:
 
 def _word_quality(text: str) -> tuple[str, list[str]]:
     cleaned = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", html.unescape(text))).strip()
-    if not cleaned or NOISE_LABEL.fullmatch(cleaned) or not any(ch.isalnum() for ch in cleaned):
+    if (
+        not cleaned
+        or not clean_transcript_text(cleaned)
+        or NOISE_LABEL.fullmatch(cleaned)
+        or not any(ch.isalnum() for ch in cleaned)
+    ):
         return "rejected", ["caption noise or no lexical content"]
     if not WORDS.findall(cleaned):
         return "rejected", ["no lexical word content"]
@@ -54,7 +60,7 @@ def _chunk_quality(text: str, language: str) -> tuple[str, list[str], str, str]:
     cleaned_input = re.sub(
         r"\s+", " ", unicodedata.normalize("NFKC", html.unescape(text))
     ).strip()
-    if NOISE_LABEL.fullmatch(cleaned_input):
+    if not clean_transcript_text(cleaned_input) or NOISE_LABEL.fullmatch(cleaned_input):
         return "rejected", ["caption noise or no reusable spoken language"], cleaned_input, "rejected"
     try:
         prepared = prepare_chunk_text(text, language)

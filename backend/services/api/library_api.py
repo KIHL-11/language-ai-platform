@@ -20,6 +20,7 @@ from services.schemas.library import (
 from services.schemas.shadowing import ShadowingAttemptResponse
 from services.shadowing.analyzer import ShadowingAnalyzer
 from services.shadowing.audio import prepared_upload_wav
+from services.transcript.hygiene import clean_transcript_text
 
 
 router = APIRouter()
@@ -114,6 +115,8 @@ async def analyze_shadowing_attempt(
     sentence = next((value for value in item.lesson.sentences if value.id == sentence_id), None)
     if sentence is None:
         raise HTTPException(status_code=422, detail="Invalid shadowing sentence id")
+    if not clean_transcript_text(sentence.text):
+        raise HTTPException(status_code=422, detail="Sentence has no practiceable transcript text")
     current = item.shadowing_progress.sentences.get(str(sentence_id))
     if (current.attempt_count if current else 0) != expected_attempt_count:
         raise HTTPException(status_code=409, detail="Shadowing attempt state is stale")

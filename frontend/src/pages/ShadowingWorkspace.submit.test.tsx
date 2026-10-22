@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { MediaController, MediaControllerStatus } from '../listening/mediaController'
@@ -75,6 +76,14 @@ describe('Shadowing Workspace submission', () => {
     expect((form.get('audio') as Blob).size).toBe(recordingBlob.size)
   })
 
+  it('keeps local playback available while backend analysis is pending', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)))
+    render(<ShadowingWorkspace item={libraryItem} onBack={vi.fn()} controllerFactory={() => new FakeController()} />)
+    expect(await screen.findByText('Analyzing locally…')).toBeInTheDocument()
+    expect(screen.getByText('Play My Recording')).toBeInTheDocument()
+    expect(document.querySelector('audio')).toHaveAttribute('src', 'blob:recording')
+  })
+
   it('handles a stale 409 without advancing or retrying the recording', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({}, 409))
     vi.stubGlobal('fetch', fetchMock)
@@ -83,5 +92,38 @@ describe('Shadowing Workspace submission', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('updated elsewhere')
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     expect(screen.queryByText('Sync target met')).not.toBeInTheDocument()
+  })
+
+  it('keeps playback available and retries upload analysis without recapturing', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(response({
+        sentence_id: 1,
+        progress: {
+          attempt_count: 1, target_hit_count: 1, consecutive_target_hits: 1,
+          last_attempt_at: '2026-10-19T10:00:00Z', last_metrics: metrics,
+          best_transcript_match_percent: 100, best_duration_delta_ratio: .02,
+          best_abs_start_delay_ms: 30, best_word_timing_mae_ms: null, best_pause_mae_ms: null,
+        },
+        metrics, sync_target_met: true, stable_sync_achieved: false,
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ShadowingWorkspace item={libraryItem} onBack={vi.fn()} controllerFactory={() => new FakeController()} />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Recording upload failed')
+    expect(screen.getByText('Play My Recording')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry analysis' }))
+    expect(await screen.findByText('100.0%')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('retains playback after a backend analysis failure', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ detail: 'Local shadowing analysis failed' }, 500)))
+    render(<ShadowingWorkspace item={libraryItem} onBack={vi.fn()} controllerFactory={() => new FakeController()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Local shadowing analysis failed')
+    expect(screen.getByText('Play My Recording')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeEnabled()
   })
 })

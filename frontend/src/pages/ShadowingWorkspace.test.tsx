@@ -95,4 +95,23 @@ describe('Shadowing Workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Start Sync Attempt' }))
     expect(screen.getByRole('alert')).toHaveTextContent('microphone is not available')
   })
+
+  it('hides noise-only sentences, cleans mixed speech, and skips hidden deep links', () => {
+    const item = {
+      ...libraryItem,
+      lesson: {
+        ...libraryItem.lesson,
+        sentences: libraryItem.lesson.sentences.map((sentence) => sentence.id === 2
+          ? { ...sentence, text: '[music] [APPLAUSE]' }
+          : sentence.id === 3 ? { ...sentence, text: 'Keep [SINGING] going.' } : sentence),
+      },
+      shadowing_progress: { ...libraryItem.shadowing_progress, last_sentence_id: 2 },
+    }
+    render(<ShadowingWorkspace item={item} initialSentenceId={2} onBack={vi.fn()} controllerFactory={() => new FakeController()} />)
+    expect(screen.getByText(/Sentence 2 of 2/)).toBeInTheDocument()
+    expect(screen.getAllByText('Keep going.').length).toBeGreaterThan(0)
+    expect(screen.queryByText('[music] [APPLAUSE]')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous sentence' }))
+    expect(screen.getByText(/Sentence 1 of 2/)).toBeInTheDocument()
+  })
 })

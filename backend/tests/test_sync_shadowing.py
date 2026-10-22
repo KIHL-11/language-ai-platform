@@ -15,6 +15,7 @@ from services.library.store import LearningLibraryStore, LibraryStoreError
 from services.schemas.lesson import Lesson
 from services.schemas.shadowing import ShadowingMetrics, ShadowingProgress, TimedWord
 from services.shadowing.alignment import align_tokens, normalize_tokens
+from services.shadowing.analyzer import ShadowingAnalyzer
 from services.shadowing.metrics import calculate_metrics
 from services.shadowing.reference import ReferenceTimingService
 from services.transcription import local_whisper
@@ -340,6 +341,49 @@ def test_reference_cache_generation_is_serialized(tmp_path, monkeypatch):
     assert calls == 1
 
 
+def test_analyzer_uses_cleaned_target_without_rewriting_library(tmp_path, monkeypatch):
+    value = store(tmp_path)
+    noisy = lesson().model_copy(deep=True)
+    noisy.sentences[0].text = "I [music] travel [APPLAUSE] today to Berlin."
+    item = value.save_item(noisy)
+    original = value.path.read_text(encoding="utf-8")
+    captured = {}
+
+    class FakeReferences:
+        def get_words(self, item_id, sentence_id):
+            assert (item_id, sentence_id) == (item.id, 1)
+            return REFERENCE, None
+
+    def fake_metrics(target, recognized, attempt, reference, **kwargs):
+        captured["target"] = target
+        return metrics()
+
+    monkeypatch.setattr("services.shadowing.analyzer.calculate_metrics", fake_metrics)
+    analyzer = ShadowingAnalyzer(
+        value,
+        transcriber=lambda *_: LocalTranscription("I travel today to Berlin", ATTEMPT),
+        references=FakeReferences(),
+    )
+    analyzer.analyze(item.id, 1, str(tmp_path / "attempt.wav"))
+    assert captured["target"] == "I travel today to Berlin."
+    assert value.path.read_text(encoding="utf-8") == original
+
+
+def test_noise_only_sentence_cannot_be_submitted_for_shadowing(tmp_path, monkeypatch):
+    value = store(tmp_path)
+    noisy = lesson().model_copy(deep=True)
+    noisy.sentences[0].text = "[music] [APPLAUSE]"
+    item = value.save_item(noisy)
+    monkeypatch.setattr(library_api, "library_store", value)
+    response = client.post(
+        f"/api/library/items/{item.id}/shadowing/attempt",
+        files={"audio": ("attempt.webm", b"recording", "audio/webm")},
+        data={"sentence_id": "1", "expected_attempt_count": "0"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Sentence has no practiceable transcript text"
+
+
 @pytest.fixture
 def api_store(tmp_path, monkeypatch):
     value = store(tmp_path)
@@ -348,7 +392,7 @@ def api_store(tmp_path, monkeypatch):
 
     @contextmanager
     def fake_wav(raw, suffix):
-        assert raw == b"recording" and suffix == ".webm"
+        assert raw == b"recording" and suffix in {".webm", ".m4a"}
         yield tmp_path / "attempt.wav"
 
     class FakeAnalyzer:
@@ -376,6 +420,16 @@ def test_shadowing_attempt_api_updates_atomically_without_persisting_audio(api_s
     assert response.json()["sync_target_met"] is True
     payload = value.path.read_text(encoding="utf-8")
     assert "recording" not in payload and "audio_b64" not in payload and "history" not in payload
+
+
+def test_shadowing_attempt_api_accepts_browser_mp4_audio_suffix(api_store):
+    _, item = api_store
+    response = client.post(
+        f"/api/library/items/{item.id}/shadowing/attempt",
+        files={"audio": ("attempt.m4a", b"recording", "audio/mp4")},
+        data={"sentence_id": "1", "expected_attempt_count": "0"},
+    )
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize(

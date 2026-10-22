@@ -227,11 +227,22 @@ export async function deleteLibraryItem(itemId: string): Promise<void> {
 
 export class ShadowingApiError extends Error {
   readonly status: number
+  readonly detail: string | null
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, detail: string | null = null) {
     super(message)
     this.status = status
+    this.detail = detail
   }
+}
+
+function shadowingAudioFilename(type: string): string {
+  const normalized = type.toLowerCase().split(';', 1)[0]
+  if (normalized === 'audio/mp4' || normalized === 'audio/x-m4a' || normalized === 'audio/aac') return 'shadowing-attempt.m4a'
+  if (normalized === 'audio/ogg') return 'shadowing-attempt.ogg'
+  if (normalized === 'audio/wav' || normalized === 'audio/x-wav') return 'shadowing-attempt.wav'
+  if (normalized === 'audio/mpeg') return 'shadowing-attempt.mp3'
+  return 'shadowing-attempt.webm'
 }
 
 export async function submitShadowingAttempt(
@@ -242,15 +253,29 @@ export async function submitShadowingAttempt(
   recordingDuration: number,
 ): Promise<ShadowingAttemptResponse> {
   const form = new FormData()
-  form.set('audio', audio, 'shadowing-attempt.webm')
+  form.set('audio', audio, shadowingAudioFilename(audio.type))
   form.set('sentence_id', String(sentenceId))
   form.set('expected_attempt_count', String(expectedAttemptCount))
   form.set('client_recording_duration', String(recordingDuration))
-  const response = await fetch(
-    `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/shadowing/attempt`,
-    { method: 'POST', body: form },
-  )
-  if (!response.ok) throw new ShadowingApiError(`Shadowing analysis failed (${response.status}).`, response.status)
+  let response: Response
+  try {
+    response = await fetch(
+      `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/shadowing/attempt`,
+      { method: 'POST', body: form },
+    )
+  } catch {
+    throw new ShadowingApiError('Recording upload failed.', 0)
+  }
+  if (!response.ok) {
+    let detail: string | null = null
+    try {
+      const body: unknown = await response.json()
+      if (isRecord(body) && typeof body.detail === 'string') detail = body.detail
+    } catch {
+      // Preserve the status-based diagnostic when the server did not return JSON.
+    }
+    throw new ShadowingApiError(`Shadowing analysis failed (${response.status}).`, response.status, detail)
+  }
   const value = await jsonResponse(response, 'Shadowing analysis failed')
   if (!isRecord(value) || !Number.isInteger(value.sentence_id) ||
     !isSentenceShadowingProgress(value.progress) || !isShadowingMetrics(value.metrics) ||
