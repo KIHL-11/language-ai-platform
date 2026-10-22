@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { listLibraryItems } from '../api/library'
+import { getTargetLanguages, saveSpeakingSuggestion } from '../api/integration'
 import {
   appendSpeakingEvent, createSpeakingSession, executeSpeakingTool,
   finishSpeakingSession, getSpeakingProviders, listSpeakingSessions,
@@ -14,7 +15,15 @@ import type { LibraryItemSummary } from '../types/library'
 import type { SpeakingContext, SpeakingMode, SpeakingProviderId, SpeakingProviderInfo, SpeakingSession, SpeakingSetup } from '../types/speaking'
 
 
-interface Props { providerFactory?: SpeakingProviderFactory }
+export interface SpeakingLaunch {
+  language: 'en' | 'de'
+  targetIds: string[]
+}
+
+interface Props {
+  providerFactory?: SpeakingProviderFactory
+  initialLaunch?: SpeakingLaunch | null
+}
 
 const MODE_LABELS: Record<SpeakingMode, string> = {
   review_weak: 'Review weak expressions', media: 'Discuss saved media', custom: 'Custom scenario',
@@ -35,20 +44,20 @@ function providerFailureMessage(providerId: SpeakingProviderId, error: unknown):
   return `${providerId === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'} unavailable. Retry or explicitly choose another provider.`
 }
 
-export default function SpeakingPage({ providerFactory = createSpeakingProvider }: Props) {
+export default function SpeakingPage({ providerFactory = createSpeakingProvider, initialLaunch = null }: Props) {
   const [learnerId] = useState(getOrCreateLearnerId)
   const [providers, setProviders] = useState<SpeakingProviderInfo[]>([])
   const [library, setLibrary] = useState<LibraryItemSummary[]>([])
   const [recent, setRecent] = useState<SpeakingSession[]>([])
   const [providerId, setProviderId] = useState<SpeakingProviderId>('gemini-live')
-  const [language, setLanguage] = useState<'en' | 'de'>('en')
+  const [language, setLanguage] = useState<'en' | 'de'>(initialLaunch?.language ?? 'en')
   const [level, setLevel] = useState<'B1' | 'B2' | 'C1'>('B2')
   const [mode, setMode] = useState<SpeakingMode>('review_weak')
   const [duration, setDuration] = useState<180 | 300 | 600>(300)
   const [libraryId, setLibraryId] = useState<string>('')
   const [goal, setGoal] = useState('')
   const [context, setContext] = useState<SpeakingContext | null>(null)
-  const [selectedTargets, setSelectedTargets] = useState<string[] | null>(null)
+  const [selectedTargets, setSelectedTargets] = useState<string[] | null>(initialLaunch?.targetIds ?? null)
   const [session, setSession] = useState<SpeakingSession | null>(null)
   const [phase, setPhase] = useState<'setup' | 'connecting' | 'live' | 'review' | 'detail'>('setup')
   const [connection, setConnection] = useState<SpeakingConnectionStatus>('idle')
@@ -75,10 +84,11 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider 
   useEffect(() => {
     if (mode === 'media' && !libraryId) return
     let active = true
-    const request = { user_id: learnerId, language, level, mode, library_item_id: mode === 'media' ? libraryId : null, goal: goal || null, target_limit: 5 }
-    void previewSpeakingContext(request).then((value) => { if (active) { setContext(value); setSelectedTargets(value.target_chunks.map((target) => target.study_item_id)) } }).catch(() => { if (active) setContext(null) })
+    const launchTargets = initialLaunch?.language === language ? initialLaunch.targetIds : null
+    const request = { user_id: learnerId, language, level, mode, library_item_id: mode === 'media' ? libraryId : null, goal: goal || null, target_limit: launchTargets?.length ?? 5, target_ids: launchTargets }
+    void previewSpeakingContext(request).then((value) => { if (active) { setContext(value); setSelectedTargets(value.target_chunks.map((target) => target.study_item_id)) } }).catch(() => { if (active) { setContext(null); if (initialLaunch) setError('The selected Speaking target is no longer available.') } })
     return () => { active = false }
-  }, [goal, language, learnerId, level, libraryId, mode])
+  }, [goal, initialLaunch, language, learnerId, level, libraryId, mode])
 
   const persistTurn = useCallback((event: SpeakingTranscriptEvent) => {
     if (!event.final || !event.text.trim()) return
@@ -181,7 +191,7 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider 
     void providerRef.current.sendText(value); setText('')
   }
 
-  if ((phase === 'review' || phase === 'detail') && session) return <SessionReview session={session} onBack={() => { sessionRef.current = null; setSession(null); setPhase('setup'); setConnection('idle'); endingRef.current = false }} />
+  if ((phase === 'review' || phase === 'detail') && session) return <SessionReview learnerId={learnerId} session={session} onBack={() => { sessionRef.current = null; setSession(null); setPhase('setup'); setConnection('idle'); endingRef.current = false }} />
 
   if (phase === 'live' || phase === 'connecting') return <main className="mx-auto max-w-5xl px-5 py-8">
     <h1 className="text-3xl font-semibold">Speaking</h1>
@@ -222,7 +232,39 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider 
   </main>
 }
 
-function SessionReview({ session, onBack }: { session: SpeakingSession; onBack: () => void }) {
+function SuggestionSave({ learnerId, session, index }: { learnerId: string; session: SpeakingSession; index: number }) {
+  const suggestion = session.suggestions[index]
+  const [languages, setLanguages] = useState<string[]>([])
+  const [targetLanguage, setTargetLanguage] = useState('')
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void getTargetLanguages(learnerId, session.language).then((values) => {
+      if (!active) return
+      setLanguages(values)
+      if (values.length === 1) setTargetLanguage(values[0])
+    }).catch(() => { if (active) setError('Target-language choices are unavailable.') })
+    return () => { active = false }
+  }, [learnerId, session.language])
+
+  return <li className="mt-3 border-l-2 border-[#ccd6d1] pl-3">
+    <p>{suggestion.text} — {suggestion.meaning}</p>
+    {!saved && <label className="mt-2 block text-sm">Target language
+      {languages.length ? <select aria-label={`Target language for ${suggestion.text}`} value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value)}><option value="">Choose target language</option>{languages.map((language) => <option key={language}>{language}</option>)}</select> : <input aria-label={`Target language for ${suggestion.text}`} value={targetLanguage} onChange={(event) => setTargetLanguage(event.target.value)} placeholder="Enter target language" />}
+    </label>}
+    {saved ? <p role="status" className="mt-2 text-sm text-[#176b5b]">Saved to Words & Chunks</p> : <button type="button" disabled={saving || !targetLanguage.trim()} onClick={() => {
+      setSaving(true); setError(null)
+      void saveSpeakingSuggestion(session.id, index, { user_id: learnerId, target_language: targetLanguage.trim() })
+        .then(() => setSaved(true)).catch(() => setError('Suggestion was not saved. You can retry.')).finally(() => setSaving(false))
+    }} className="mt-2 h-9 border border-[#176b5b] px-3 disabled:opacity-50">{saving ? 'Saving…' : 'Save to Words & Chunks'}</button>}
+    {error && <p role="alert" className="mt-1 text-sm text-[#8f1d14]">{error}</p>}
+  </li>
+}
+
+function SessionReview({ learnerId, session, onBack }: { learnerId: string; session: SpeakingSession; onBack: () => void }) {
   const used = session.target_usage.filter((target) => target.use_count > 0)
   const unused = session.target_usage.filter((target) => target.use_count === 0)
   return <main className="mx-auto max-w-4xl px-5 py-10"><h1 className="text-3xl font-semibold">Session complete</h1>
@@ -230,7 +272,7 @@ function SessionReview({ session, onBack }: { session: SpeakingSession; onBack: 
     <h2 className="mt-6 text-xl font-semibold">Target expressions</h2><h3 className="mt-3 font-semibold">Used</h3><ul>{used.map((target) => <li key={target.study_item_id}>✓ {target.text}{target.evidence[0] && <> — “{target.evidence[0]}”</>}</li>)}</ul>
     <h3 className="mt-3 font-semibold">Practice next time</h3><ul>{unused.map((target) => <li key={target.study_item_id}>○ {target.text}</li>)}</ul>
     <h2 className="mt-6 text-xl font-semibold">Important corrections</h2><p>{session.corrections.length}</p>{session.corrections.map((item, index) => <p key={index}>{item.learner_text} → {item.corrected_text}: {item.short_explanation}</p>)}
-    <h2 className="mt-6 text-xl font-semibold">Suggested expressions</h2>{session.suggestions.length ? session.suggestions.map((item, index) => <p key={index}>{item.text} — {item.meaning}</p>) : <p>None</p>}
+    <h2 className="mt-6 text-xl font-semibold">Suggested expressions</h2>{session.suggestions.length ? <ul>{session.suggestions.map((_, index) => <SuggestionSave key={index} learnerId={learnerId} session={session} index={index} />)}</ul> : <p>None</p>}
     <details className="mt-6"><summary>Transcript</summary>{session.turns.map((turn) => <p key={turn.sequence}><strong>{turn.role === 'learner' ? 'You' : 'Agent'}:</strong> {turn.text}</p>)}</details>
     <button type="button" className="mt-6" onClick={onBack}>Back to Speaking</button>
   </main>

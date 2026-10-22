@@ -65,7 +65,7 @@ class SpeakingSessionStore:
     def list_recent(self, user_id: str, limit: int = 10) -> list[SpeakingSession]:
         with self._lock:
             values = [item for item in self._read() if item.user_id == user_id]
-        return sorted(values, key=lambda item: item.started_at, reverse=True)[:min(10, max(1, limit))]
+        return sorted(values, key=lambda item: item.started_at, reverse=True)[:min(100, max(1, limit))]
 
     def append_event(self, user_id: str, session_id: str, event: SpeakingEventRequest) -> SpeakingSession:
         with self._lock:

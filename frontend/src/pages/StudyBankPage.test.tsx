@@ -37,6 +37,25 @@ describe('Words & Chunks page', () => {
     expect(screen.getByText('We can figure it out.')).toBeInTheDocument()
   })
 
+  it('renders Speaking provenance without assuming media fields exist', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/api/integration/')) return Promise.resolve(response({}))
+      return Promise.resolve(response({ items: [{
+        ...studyItem,
+        provenance: [{
+          source_type: 'speaking', speaking_session_id: 'session-one', suggestion_index: 0,
+          originating_turn: 3, provider: 'gemini-live', mode: 'review_weak',
+          media_title_snapshot: null, evidence_text: 'That makes sense to me.',
+        }],
+      }] }))
+    })
+    const user = userEvent.setup(); render(<StudyBankPage />)
+    await screen.findByText('figuring'); await user.click(screen.getByText('Sources'))
+    expect(screen.getByText(/From Speaking practice · Gemini Live/)).toBeInTheDocument()
+    expect(screen.getByText(/Suggested in turn 3/)).toBeInTheDocument()
+    expect(screen.getByText(/That makes sense to me/)).toBeInTheDocument()
+  })
+
   it('sends kind, language, active, and search filters', async () => {
     const user = userEvent.setup()
     render(<StudyBankPage />)
@@ -47,7 +66,7 @@ describe('Words & Chunks page', () => {
     await user.type(screen.getByLabelText('Search Words & Chunks'), 'reise')
 
     await waitFor(() => {
-      const url = String(fetchMock.mock.calls.at(-1)?.[0])
+      const url = String(fetchMock.mock.calls.filter(([candidate]) => String(candidate).includes('/api/study-bank/items?')).at(-1)?.[0])
       expect(url).toContain('kind=chunk')
       expect(url).toContain('language=de')
       expect(url).toContain('active=false')

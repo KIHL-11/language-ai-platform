@@ -17,11 +17,12 @@ const EMPTY_COUNTS: Record<ReviewRating, number> = { again: 0, hard: 0, good: 0,
 
 function promptFor(item: StudyItem): string {
   if (item.meaning.trim()) return item.meaning
-  const translation = item.provenance.find((source) => source.sentence_translation.trim())?.sentence_translation
-  return translation || `Recall this saved ${item.kind}.`
+  const translation = item.provenance.find((source) => source.source_type === 'media' && source.sentence_translation.trim())
+  if (translation?.source_type === 'media') return translation.sentence_translation
+  return `Recall this saved ${item.kind}.`
 }
 
-export default function DailyReviewPage() {
+export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: SourceLanguage, targetIds: string[]) => void }) {
   const [learnerId] = useState(getOrCreateLearnerId)
   const [language, setLanguage] = useState<SourceLanguage | 'all'>('all')
   const [kind, setKind] = useState<StudyKind | 'all'>('all')
@@ -33,6 +34,7 @@ export default function DailyReviewPage() {
   const [counts, setCounts] = useState({ ...EMPTY_COUNTS })
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [difficultChunks, setDifficultChunks] = useState<Array<{ id: string; language: SourceLanguage }>>([])
   const submittingRef = useRef(false)
 
   const filters = {
@@ -76,6 +78,7 @@ export default function DailyReviewPage() {
       setIndex(0)
       setRevealed(false)
       setCounts({ ...EMPTY_COUNTS })
+      setDifficultChunks([])
     } catch {
       setError('The Daily Review queue could not be loaded.')
     }
@@ -96,6 +99,9 @@ export default function DailyReviewPage() {
       )
       setNotice(`Next review: ${formatNextReview(result.next_due_at).toLowerCase()}`)
       setCounts((current) => ({ ...current, [rating]: current[rating] + 1 }))
+      if (card.kind === 'chunk' && (rating === 'again' || rating === 'hard')) {
+        setDifficultChunks((current) => current.some((value) => value.id === card.id) ? current : [...current, { id: card.id, language: card.source_language }])
+      }
       setIndex((current) => current + 1)
       setRevealed(false)
       if (index + 1 >= cards.length) await refreshSummary()
@@ -169,6 +175,10 @@ export default function DailyReviewPage() {
           <p className="mt-3">Reviewed: {reviewed}</p>
           <p className="mt-2">Again: {counts.again} · Hard: {counts.hard} · Good: {counts.good} · Easy: {counts.easy}</p>
           {ready > 0 && <><p className="mt-5 font-medium">More cards are ready</p><button type="button" onClick={() => void startReview()} className="mt-3 h-10 border border-[#176b5b] px-4">Review More</button></>}
+          {onSpeak && difficultChunks.length > 0 && <button type="button" onClick={() => {
+            const language = difficultChunks[0].language
+            onSpeak(language, difficultChunks.filter((value) => value.language === language).map((value) => value.id).slice(0, 8))
+          }} className="mt-3 ml-3 h-10 border border-[#176b5b] px-4">Practice difficult chunks in Speaking</button>}
           <button type="button" onClick={() => setCards(null)} className="mt-3 ml-3 h-10 px-4">Back to summary</button>
         </section>
       ) : cards.length === 0 ? (
@@ -192,7 +202,7 @@ export default function DailyReviewPage() {
               {card.kind === 'word' && <div className="mt-4 text-sm"><p>{card.lemma && <>Lemma: {card.lemma}</>} {card.part_of_speech && <>· {card.part_of_speech}</>}</p>{card.example && <p className="mt-1">Example: {card.example}</p>}</div>}
               {card.kind === 'chunk' && card.usage && <p className="mt-4 text-sm">Usage: {card.usage}</p>}
               {card.note && <p className="mt-3 text-sm">Note: {card.note}</p>}
-              {card.provenance[0] && <div className="mt-5 border-l-2 border-[#ccd6d1] pl-3 text-sm"><p className="font-medium">{card.provenance[0].media_title}</p><p>{card.provenance[0].start.toFixed(1)}s · {card.provenance[0].sentence_text}</p>{card.provenance[0].sentence_translation && <p className="text-[#66726e]">{card.provenance[0].sentence_translation}</p>}</div>}
+              {card.provenance[0]?.source_type === 'media' ? <div className="mt-5 border-l-2 border-[#ccd6d1] pl-3 text-sm"><p className="font-medium">{card.provenance[0].media_title}</p><p>{card.provenance[0].start.toFixed(1)}s · {card.provenance[0].sentence_text}</p>{card.provenance[0].sentence_translation && <p className="text-[#66726e]">{card.provenance[0].sentence_translation}</p>}</div> : card.provenance[0]?.source_type === 'speaking' ? <div className="mt-5 border-l-2 border-[#ccd6d1] pl-3 text-sm"><p className="font-medium">Speaking session</p>{card.provenance[0].evidence_text && <p>“{card.provenance[0].evidence_text}”</p>}</div> : null}
               <div className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {(['again', 'hard', 'good', 'easy'] as const).map((rating) => <button key={rating} type="button" disabled={submitting} onClick={() => void rate(rating)} className="h-11 border border-[#176b5b] px-3 disabled:opacity-50">{rating[0].toUpperCase() + rating.slice(1)}</button>)}
               </div>

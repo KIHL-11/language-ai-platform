@@ -112,7 +112,7 @@ def test_v1_is_read_only_until_next_mutation_and_migrates_without_data_loss(tmp_
 
     value.update_item("learner-one", item.id, StudyItemPatch(meaning="edited"))
     migrated = json.loads(value.path.read_text(encoding="utf-8"))
-    assert migrated["version"] == 2
+    assert migrated["version"] == 3
     assert migrated["items"][0]["id"] == item.id
     assert migrated["items"][0]["review"]["review_count"] == 0
 
@@ -122,7 +122,7 @@ def test_v1_is_read_only_until_next_mutation_and_migrates_without_data_loss(tmp_
     [
         ({"version": 1, "items": [{"broken": True}]}, "Malformed"),
         ({"version": 2, "items": [{"broken": True}]}, "Malformed"),
-        ({"version": 3, "items": []}, "Unsupported"),
+        ({"version": 4, "items": []}, "Unsupported"),
     ],
 )
 def test_invalid_or_future_storage_is_never_overwritten(tmp_path, payload, message):
@@ -134,10 +134,10 @@ def test_invalid_or_future_storage_is_never_overwritten(tmp_path, payload, messa
     assert value.path.read_text(encoding="utf-8") == original
 
 
-def test_new_items_are_v2_and_due_immediately_for_words_and_chunks(tmp_path):
+def test_new_items_are_v3_and_due_immediately_for_words_and_chunks(tmp_path):
     value = store(tmp_path)
     items, _ = value.save_items([study_input(), study_input("chunk")])
-    assert json.loads(value.path.read_text())["version"] == 2
+    assert json.loads(value.path.read_text())["version"] == 3
     assert [(item.kind, item.review.due_at, item.review.review_count) for item in items] == [
         ("word", NOW, 0), ("chunk", NOW, 0),
     ]

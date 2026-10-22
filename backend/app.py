@@ -45,6 +45,7 @@ from services.api.library_api import router as library_router
 from services.api.study_bank_api import router as study_bank_router
 from services.api.review_api import router as review_router
 from services.api.speaking_api import router as speaking_router
+from services.api.integration_api import router as integration_router
 
 app.include_router(
     lesson_router,
@@ -76,6 +77,10 @@ app.include_router(
 )
 app.include_router(
     speaking_router,
+    prefix="/api"
+)
+app.include_router(
+    integration_router,
     prefix="/api"
 )
 # 口音 + 性别 → 默认嗓音（用对话级新嗓音，比老的 Aria/Guy 自然很多）
