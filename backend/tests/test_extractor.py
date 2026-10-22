@@ -11,6 +11,7 @@ from services.media.extractor import (
     normalize_sentences,
     separate_vocals,
 )
+from services.transcript.rolling_captions import CaptionWindow
 
 
 class SubtitleDownloader:
@@ -181,6 +182,39 @@ def test_extract_media_cleans_downloaded_subtitles(monkeypatch, tmp_path):
     assert "skip_download" not in media_options
     assert "writesubtitles" not in media_options
     assert "writeautomaticsub" not in media_options
+
+
+def test_ambiguous_caption_revision_uses_existing_local_whisper_fallback(
+    monkeypatch, tmp_path
+):
+    SubtitleDownloader.calls = []
+    monkeypatch.setattr(extractor_module, "MEDIA", tmp_path)
+    monkeypatch.setattr(extractor_module, "YoutubeDL", SubtitleDownloader)
+    monkeypatch.setattr(extractor_module, "parse_vtt_windows", lambda _: [
+        CaptionWindow(0, 2, "Wir lernen heute Deutsch", window_id=1),
+        CaptionWindow(1, 3, "Wir lernen gemeinsam heute Deutsch", window_id=2),
+    ])
+    calls = []
+    monkeypatch.setattr(
+        extractor_module,
+        "whisper_transcribe",
+        lambda path, language: calls.append((path, language)) or [
+            {"text": "Wir lernen gemeinsam heute Deutsch.", "start": 0, "end": 3}
+        ],
+    )
+
+    result = extractor_module.extract_media(
+        "https://example.invalid/lesson", None, None, source_language="de"
+    )
+
+    assert result["source"] == "whisper"
+    assert result["sentences"][0]["text"] == "Wir lernen gemeinsam heute Deutsch."
+    assert result["transcript_quality_flags"] == [
+        "ambiguous_revision", "estimated_timing", "non_monotonic_timing",
+        "subtitle_fallback_to_whisper",
+    ]
+    assert len(calls) == 1
+    assert len([call for call in SubtitleDownloader.calls if not call[0].get("skip_download")]) == 1
 
 
 def test_extract_media_cleans_downloaded_subtitles_after_parse_failure(

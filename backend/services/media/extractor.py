@@ -12,7 +12,10 @@ from yt_dlp.utils import DownloadError, download_range_func
 
 from services.media.subtitles import get_subtitle_languages, parse_vtt_windows
 from services.transcription.local_whisper import get_local_whisper_model, model_name_for_language
-from services.transcript.rolling_captions import caption_windows_to_utterances, cues_to_utterances
+from services.transcript.rolling_captions import (
+    cues_to_utterances,
+    reconstruct_caption_transcript,
+)
 from services.transcript.utterances import whisper_words_to_utterances
 
 
@@ -214,12 +217,15 @@ def extract_media(
 
         sentences = []
         source = None
+        transcript_quality_flags: list[str] = []
         vtt_paths = glob.glob(str(MEDIA / f"{video_id}*.vtt"))
         if vtt_paths:
             windows = parse_vtt_windows(_select_vtt(vtt_paths, source_language))
             if start is not None and end is not None:
                 windows = [window for window in windows if window.end > start and window.start < end]
-            sentences = caption_windows_to_utterances(windows, offset=offset)
+            transcript = reconstruct_caption_transcript(windows, offset=offset)
+            transcript_quality_flags = list(transcript.quality_flags)
+            sentences = [] if transcript.requires_review else list(transcript.utterances)
             if sentences:
                 source = "subtitles"
 
@@ -227,6 +233,8 @@ def extract_media(
             sentences = whisper_transcribe(str(MEDIA / audio_file), source_language)
             if sentences:
                 source = "whisper"
+                if transcript_quality_flags:
+                    transcript_quality_flags.append("subtitle_fallback_to_whisper")
 
         if source and audio_file:
             keep_audio = str(MEDIA / audio_file)
@@ -237,6 +245,7 @@ def extract_media(
             "sentences": normalize_sentences(sentences),
             "source": source,
             "vocals": vocals_ok,
+            "transcript_quality_flags": sorted(set(transcript_quality_flags)),
         }
     finally:
         _cleanup_job_files(video_id, keep=keep_audio)

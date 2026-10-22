@@ -1,0 +1,30 @@
+WEBVTT
+
+NOTE Sanitized reconstruction of the caption structure visible in the reported
+NOTE Easy German screenshot. This is not the original downloaded VTT. Repeated
+NOTE inline timestamps make display revisions deterministic; cue times outside
+NOTE those anchors are synthetic and are not audio-verified ground truth.
+
+00:00:00.000 --> 00:00:02.500
+<00:00:00.200><c>Wir machen heute ein Experiment bei Easy</c>
+<00:00:00.200><c>Wir machen heute ein Experiment bei Easy</c><00:00:02.200><c> German.</c>
+
+00:00:02.000 --> 00:00:05.000
+<00:00:02.200><c>German.</c>
+<00:00:02.600><c>Wir haben hier Deutschlernende</c>
+<00:00:02.600><c>Wir haben hier Deutschlernende</c><00:00:04.200><c> der Easy German Summer School.</c>
+
+00:00:04.000 --> 00:00:07.300
+<00:00:04.200><c>der Easy German Summer School.</c>
+<00:00:05.100><c>Auf der Straße haben wir deutsche Muttersprachler.</c>
+
+00:00:07.100 --> 00:00:12.700
+<00:00:07.400><c>Wir wollen herausfinden was passiert wenn man in der deutschen Sprache Fehler macht.</c>
+<00:00:07.400><c>Wir wollen herausfinden, was passiert, wenn man Angst hat, in der deutschen Sprache Fehler zu machen.</c>
+
+00:00:12.500 --> 00:00:16.000
+<00:00:12.800><c>Was passiert bei Deutschlernenden und was denken eigentlich Muttersprachler darüber</c>
+<00:00:12.800><c>Was passiert bei Deutschlernenden und was denken eigentlich Muttersprachler darüber?</c>
+
+00:00:16.000 --> 00:00:17.000
+[Musik]
