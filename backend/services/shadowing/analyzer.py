@@ -4,7 +4,7 @@ from services.library.store import LearningLibraryStore
 from services.schemas.shadowing import ShadowingMetrics
 from services.shadowing.metrics import calculate_metrics
 from services.shadowing.reference import ReferenceTimingService
-from services.transcription.local_whisper import LocalTranscription, transcribe_local_words
+from services.transcription.local_whisper import LocalTranscription, transcribe_shadowing_words
 from services.transcript.hygiene import clean_transcript_text
 
 
@@ -13,7 +13,7 @@ class ShadowingAnalyzer:
         self,
         store: LearningLibraryStore,
         *,
-        transcriber: Callable[[str, str], LocalTranscription] = transcribe_local_words,
+        transcriber: Callable[[str, str], LocalTranscription] = transcribe_shadowing_words,
         references: ReferenceTimingService | None = None,
     ):
         self.store = store
@@ -30,10 +30,14 @@ class ShadowingAnalyzer:
             raise ValueError("Sentence has no practiceable transcript text")
         attempt = self.transcriber(attempt_wav, item.lesson.source_language)
         reference, reason = self.references.get_words(item_id, sentence_id)
-        return calculate_metrics(
+        metrics = calculate_metrics(
             target_text,
             attempt.text,
             attempt.words,
             reference,
             timing_unavailable_reason=reason,
         )
+        return metrics.model_copy(update={
+            "asr_model": attempt.model_config,
+            "speech_detected": bool(attempt.text.strip()),
+        })

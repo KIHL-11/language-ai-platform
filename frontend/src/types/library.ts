@@ -31,6 +31,8 @@ export type ShadowingWordStatus = 'matched' | 'missed' | 'extra' | 'substituted'
 
 export interface ShadowingMetrics {
   recognized_text: string
+  asr_model?: string | null
+  speech_detected?: boolean
   target_word_count: number
   recognized_word_count: number
   matched_count: number

@@ -28,6 +28,8 @@ class AlignedWord(ShadowingModel):
 
 class ShadowingMetrics(ShadowingModel):
     recognized_text: str = Field(max_length=20_000)
+    asr_model: str | None = Field(default=None, max_length=200)
+    speech_detected: bool = False
     target_word_count: int = Field(ge=0)
     recognized_word_count: int = Field(ge=0)
     matched_count: int = Field(ge=0)

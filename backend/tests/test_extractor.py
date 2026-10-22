@@ -191,7 +191,7 @@ def test_extract_media_cleans_downloaded_subtitles_after_parse_failure(
     monkeypatch.setattr(extractor_module, "YoutubeDL", SubtitleDownloader)
     monkeypatch.setattr(
         extractor_module,
-        "parse_vtt",
+        "parse_vtt_windows",
         lambda path: (_ for _ in ()).throw(ValueError("invalid subtitles")),
     )
 

@@ -89,6 +89,7 @@ def calculate_metrics(
     )
     return ShadowingMetrics(
         recognized_text=recognized_text.strip(),
+        speech_detected=recognized_speech,
         target_word_count=len(target),
         recognized_word_count=len(recognized),
         matched_count=counts["matched"],

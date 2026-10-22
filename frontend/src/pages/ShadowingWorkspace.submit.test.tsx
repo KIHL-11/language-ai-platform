@@ -31,7 +31,8 @@ class FakeController implements MediaController {
 }
 
 const metrics: ShadowingMetrics = {
-  recognized_text: 'Sentence 1', target_word_count: 2, recognized_word_count: 2,
+  recognized_text: 'Sentence 1', asr_model: 'small.en · beam 5 · local', speech_detected: true,
+  target_word_count: 2, recognized_word_count: 2,
   matched_count: 2, missed_count: 0, extra_count: 0, substituted_count: 0,
   transcript_match_percent: 100, reference_speech_duration_ms: 500,
   attempt_speech_duration_ms: 510, duration_delta_ms: 10, duration_delta_ratio: .02,
@@ -67,6 +68,7 @@ describe('Shadowing Workspace submission', () => {
     render(<ShadowingWorkspace item={libraryItem} onBack={vi.fn()} controllerFactory={() => new FakeController()} />)
 
     expect(await screen.findByText('100.0%')).toBeInTheDocument()
+    expect(screen.getByText(/Speech: Detected · ASR small.en · beam 5 · local/)).toBeInTheDocument()
     expect(screen.getByText('Sync target met')).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     const form = fetchMock.mock.calls[0][1].body as FormData

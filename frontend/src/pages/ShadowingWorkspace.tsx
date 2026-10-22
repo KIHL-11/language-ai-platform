@@ -178,6 +178,7 @@ export default function ShadowingWorkspace({
         {shownMetrics && <>
           <div className="mt-5"><p className="text-sm text-[#66726e]">Transcript Match <span title="Word-sequence match from local speech recognition.">(local ASR)</span></p><p className="text-3xl font-semibold">{shownMetrics.transcript_match_percent.toFixed(1)}%</p></div>
           <p className="mt-4"><strong>Recognized:</strong> {shownMetrics.recognized_text || 'No speech detected'}</p>
+          <p className="mt-1 text-xs text-[#66726e]">Speech: {shownMetrics.speech_detected === false ? 'Insufficient speech' : 'Detected'}{shownMetrics.asr_model ? ` · ASR ${shownMetrics.asr_model}` : ''}</p>
           <div className="mt-4 grid grid-cols-2 gap-2 text-sm"><p>Matched {shownMetrics.matched_count}</p><p>Missed {shownMetrics.missed_count}</p><p>Extra {shownMetrics.extra_count}</p><p>Substituted {shownMetrics.substituted_count}</p></div>
           <div className="mt-4 space-y-1 border-t border-[#dfe7e3] pt-4 text-sm">
             <p title="How early or late your first aligned word began.">Start delay: {shownMetrics.start_delay_ms === null ? 'Unavailable' : signed(shownMetrics.start_delay_ms, ' ms')}</p>
