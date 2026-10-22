@@ -124,12 +124,12 @@ def test_study_bank_starts_empty_and_persists_words_and_chunks(tmp_path):
     assert created == 2
     assert [item.kind for item in saved] == ["word", "chunk"]
     assert StudyBankStore(value.path).list_items("learner-one", active=None) == list(reversed(saved))
-    assert json.loads(value.path.read_text())["version"] == 2
+    assert json.loads(value.path.read_text())["version"] == 3
     assert all(item.review.due_at == item.created_at for item in saved)
 
 
 def test_word_dedup_prefers_lemma_and_preserves_learner_fields(tmp_path):
-    value = bank(tmp_path, times=iter([NOW, LATER]))
+    value = bank(tmp_path, times=iter([NOW, LATER, LATER]))
     first, _ = value.save_items([study_input(note="Keep this", meaning="learner meaning")])
     duplicate, created = value.save_items([study_input(text="FIGURED", meaning="weaker", note=None)])
 
@@ -163,6 +163,28 @@ def test_second_media_merges_provenance_without_duplicates(tmp_path):
     assert len(merged[0].provenance) == 2
     assert len(repeated[0].provenance) == 2
     assert repeated[0].updated_at == LATER
+
+
+def test_v2_typed_provenance_migration_is_read_only_and_preserves_review(tmp_path):
+    value = bank(tmp_path, times=iter([NOW, LATER, LATER]))
+    original_item = value.save_items([study_input("chunk")])[0][0]
+    rated, _ = value.rate_item("learner-one", original_item.id, "hard", 0)
+    record = rated.model_dump(mode="json")
+    for source in record["provenance"]:
+        source.pop("source_type")
+    original = json.dumps({"version": 2, "items": [record]}, ensure_ascii=False, indent=2) + "\n"
+    value.path.write_text(original, encoding="utf-8")
+
+    loaded = value.list_items("learner-one")[0]
+    assert value.path.read_text(encoding="utf-8") == original
+    assert loaded.review == rated.review
+    assert loaded.provenance[0].source_type == "media"
+
+    value.update_item("learner-one", loaded.id, StudyItemPatch(note="migrate safely"))
+    migrated = json.loads(value.path.read_text(encoding="utf-8"))
+    assert migrated["version"] == 3
+    assert migrated["items"][0]["review"] == rated.review.model_dump(mode="json")
+    assert migrated["items"][0]["provenance"][0]["source_type"] == "media"
 
 
 def test_language_and_kind_are_separate_identities(tmp_path):

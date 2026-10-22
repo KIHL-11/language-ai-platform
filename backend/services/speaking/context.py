@@ -5,6 +5,7 @@ from services.schemas.speaking import (
     SpeakingContext, SpeakingContextRequest, SpeakingMediaSentence,
     SpeakingTarget, SpeakingWord,
 )
+from services.schemas.study_bank import MediaStudyProvenance
 from services.speaking.prompt import build_system_prompt
 from services.study_bank.store import StudyBankStore
 
@@ -55,7 +56,10 @@ class SpeakingContextBuilder:
             return (category, -review.lapse_count, review.due_at, review.review_count, item.created_at, item.id)
         ordered = sorted(chunks, key=priority)
         if media_id:
-            media = [item for item in ordered if any(p.library_item_id == media_id for p in item.provenance)]
+            media = [item for item in ordered if any(
+                isinstance(p, MediaStudyProvenance) and p.library_item_id == media_id
+                for p in item.provenance
+            )]
             ordered = media + [item for item in ordered if item not in media]
         if request.target_ids is not None:
             ids = list(dict.fromkeys(request.target_ids))

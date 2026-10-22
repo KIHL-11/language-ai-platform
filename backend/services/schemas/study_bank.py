@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -72,7 +72,8 @@ class ReviewState(StudyModel):
         )
 
 
-class StudyProvenance(StudyModel):
+class MediaStudyProvenance(StudyModel):
+    source_type: Literal["media"] = "media"
     library_item_id: str = Field(min_length=1, max_length=128)
     lesson_id: str = Field(min_length=1, max_length=128)
     source_url: str = Field(min_length=1, max_length=2_048)
@@ -90,6 +91,25 @@ class StudyProvenance(StudyModel):
         return self
 
 
+class SpeakingStudyProvenance(StudyModel):
+    source_type: Literal["speaking"] = "speaking"
+    speaking_session_id: str = Field(min_length=1, max_length=128)
+    suggestion_index: int = Field(ge=0, le=7)
+    originating_turn: int = Field(ge=1)
+    provider: Literal["gemini-live", "openai-realtime"]
+    mode: Literal["review_weak", "media", "custom"]
+    media_title_snapshot: str | None = Field(default=None, max_length=1_000)
+    evidence_text: str | None = Field(default=None, max_length=2_000)
+
+
+# Backward-compatible name used by media curation call sites and fixtures.
+StudyProvenance = MediaStudyProvenance
+StudyProvenanceRecord = Annotated[
+    MediaStudyProvenance | SpeakingStudyProvenance,
+    Field(discriminator="source_type"),
+]
+
+
 class StudyItemInput(StudyModel):
     user_id: str = Field(min_length=1, max_length=128)
     kind: StudyKind
@@ -102,7 +122,7 @@ class StudyItemInput(StudyModel):
     example: str | None = Field(default=None, max_length=2_000)
     usage: str | None = Field(default=None, max_length=2_000)
     note: str | None = Field(default=None, max_length=2_000)
-    provenance: list[StudyProvenance] = Field(min_length=1, max_length=100)
+    provenance: list[StudyProvenanceRecord] = Field(min_length=1, max_length=100)
 
 
 class StudyItem(StudyModel):
@@ -117,7 +137,7 @@ class StudyItem(StudyModel):
     active: bool = True
     created_at: datetime
     updated_at: datetime
-    provenance: list[StudyProvenance] = Field(min_length=1, max_length=1_000)
+    provenance: list[StudyProvenanceRecord] = Field(min_length=1, max_length=1_000)
     lemma: str | None = Field(default=None, max_length=500)
     part_of_speech: str | None = Field(default=None, max_length=128)
     example: str | None = Field(default=None, max_length=2_000)

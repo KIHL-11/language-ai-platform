@@ -2,6 +2,7 @@ import type { StudyCandidate, StudyItem } from '../types/studyBank'
 
 
 const provenance = {
+  source_type: 'media' as const,
   library_item_id: 'library-item',
   lesson_id: 'personal-lesson',
   source_url: 'https://www.youtube.com/watch?v=personal',

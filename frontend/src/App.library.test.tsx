@@ -123,6 +123,23 @@ describe('App Library navigation', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('client-token'))).toBe(false)
   })
 
+  it('adds Today without changing the default Learn startup or starting providers', async () => {
+    const user = userEvent.setup()
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/api/integration/overview')) return Promise.resolve(response({
+        review: { due_words: 0, due_chunks: 0, new_words: 0, new_chunks: 0, active_words: 0, active_chunks: 0 },
+        weak_chunks: [], continue_listening: [], speaking_suggestions: [], next_actions: [],
+        has_study_items: false, has_library_items: false, has_speaking_sessions: false,
+      }))
+      return routeFetch(url, options)
+    })
+    render(<App />)
+    expect(screen.getByRole('button', { name: 'Learn' })).toHaveAttribute('aria-current', 'page')
+    await user.click(screen.getByRole('button', { name: 'Today' }))
+    expect(await screen.findByRole('heading', { name: 'Today' })).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('client-token'))).toBe(false)
+  })
+
   it('does not delete the active Personal Session when its Library item is deleted', async () => {
     const user = userEvent.setup()
     savePersonalSession(createPersonalSession(personalLesson))

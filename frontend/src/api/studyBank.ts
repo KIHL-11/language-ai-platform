@@ -13,13 +13,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isProvenance(value: unknown): boolean {
-  return isRecord(value) && typeof value.library_item_id === 'string' &&
+  if (!isRecord(value)) return false
+  if (value.source_type === 'speaking') {
+    return typeof value.speaking_session_id === 'string' &&
+      Number.isInteger(value.suggestion_index) && Number(value.suggestion_index) >= 0 &&
+      Number.isInteger(value.originating_turn) && Number(value.originating_turn) >= 1 &&
+      (value.provider === 'gemini-live' || value.provider === 'openai-realtime') &&
+      ['review_weak', 'media', 'custom'].includes(String(value.mode)) &&
+      isNullableString(value.media_title_snapshot) && isNullableString(value.evidence_text)
+  }
+  return (value.source_type === 'media' || value.source_type === undefined) &&
+    typeof value.library_item_id === 'string' &&
     typeof value.lesson_id === 'string' && typeof value.source_url === 'string' &&
     typeof value.media_title === 'string' && Number.isInteger(value.sentence_id) &&
     typeof value.sentence_text === 'string' && typeof value.sentence_translation === 'string' &&
     typeof value.start === 'number' && Number.isFinite(value.start) &&
     typeof value.end === 'number' && Number.isFinite(value.end) &&
     value.start >= 0 && value.end >= value.start
+}
+
+function isMediaProvenance(value: unknown): boolean {
+  return isProvenance(value) && isRecord(value) && value.source_type !== 'speaking'
 }
 
 function isNullableString(value: unknown): boolean {
@@ -63,7 +77,7 @@ function isCandidate(value: unknown): value is StudyCandidate {
     isNullableString(value.example) && isNullableString(value.usage) &&
     ['recommended', 'review', 'rejected'].includes(String(value.quality)) &&
     Array.isArray(value.quality_reasons) && value.quality_reasons.every((reason) => typeof reason === 'string') &&
-    isProvenance(value.provenance) &&
+    isMediaProvenance(value.provenance) &&
     typeof value.already_saved === 'boolean' && isNullableString(value.study_item_id)
 }
 

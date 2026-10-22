@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from services.retrieval.chunk_quality import prepare_chunk_text
 from services.review.scheduler import schedule_review
 from services.schemas.study_bank import (
+    MediaStudyProvenance,
     ReviewRating,
     ReviewState,
     StudyItem,
@@ -106,15 +107,20 @@ class StudyBankStore:
                 and (kind is None or item.kind == kind)
                 and (language is None or item.source_language == language)
                 and (active is None or item.active is active)
-                and (
-                    library_item_id is None
-                    or any(p.library_item_id == library_item_id for p in item.provenance)
-                )
+                and (library_item_id is None or any(
+                    isinstance(p, MediaStudyProvenance)
+                    and p.library_item_id == library_item_id
+                    for p in item.provenance
+                ))
                 and (
                     not query
                     or query in item.text.casefold()
                     or query in item.meaning.casefold()
-                    or any(query in p.media_title.casefold() for p in item.provenance)
+                    or any(
+                        query in p.media_title.casefold()
+                        for p in item.provenance
+                        if isinstance(p, MediaStudyProvenance)
+                    )
                 )
             ]
         return sorted(items, key=lambda item: (item.updated_at, item.id), reverse=True)
@@ -141,7 +147,7 @@ class StudyBankStore:
                 results.append(saved)
                 created += int(was_created)
                 changed = changed or was_changed
-            if changed or storage_version == 1:
+            if changed or storage_version in {1, 2}:
                 self._write_items(items)
             return results, created
 
@@ -275,7 +281,7 @@ class StudyBankStore:
             raise StudyBankStoreError(f"Malformed Study Bank JSON: {self.path}") from exc
         except OSError as exc:
             raise StudyBankStoreError(f"Could not read Study Bank: {self.path}") from exc
-        if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
+        if not isinstance(payload, dict) or payload.get("version") not in (1, 2, 3):
             raise StudyBankStoreError(f"Unsupported Study Bank version: {self.path}")
         version = payload["version"]
         records = payload.get("items")
@@ -291,6 +297,15 @@ class StudyBankStore:
                     normalized["review"] = ReviewState.new(
                         datetime.fromisoformat(str(normalized.get("created_at")).replace("Z", "+00:00"))
                     ).model_dump(mode="json")
+                if version in {1, 2}:
+                    provenance = normalized.get("provenance")
+                    if not isinstance(provenance, list):
+                        raise ValueError("Study Bank provenance must be a list")
+                    normalized["provenance"] = [
+                        {"source_type": "media", **value}
+                        if isinstance(value, dict) else value
+                        for value in provenance
+                    ]
                 normalized_records.append(normalized)
             return [StudyItem.model_validate(record) for record in normalized_records], version
         except (TypeError, ValueError, ValidationError) as exc:
@@ -298,7 +313,7 @@ class StudyBankStore:
 
     def _write_items(self, items: list[StudyItem]) -> None:
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        payload = {"version": 2, "items": [item.model_dump(mode="json") for item in items]}
+        payload = {"version": 3, "items": [item.model_dump(mode="json") for item in items]}
         try:
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

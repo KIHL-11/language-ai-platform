@@ -52,6 +52,7 @@ export default function StudyCuration({ item, onBack }: StudyCurationProps) {
       setCandidates((current) => current.map((candidate) => {
         const saved = byIdentity.get(`${candidate.kind}:${candidate.normalized_text}`)
         const provenanceSaved = saved?.provenance.some((source) =>
+          source.source_type === 'media' &&
           source.library_item_id === candidate.provenance.library_item_id &&
           source.lesson_id === candidate.provenance.lesson_id &&
           source.sentence_id === candidate.provenance.sentence_id &&

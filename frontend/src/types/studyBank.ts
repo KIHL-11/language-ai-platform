@@ -19,7 +19,8 @@ export interface ReviewState {
   last_rating: ReviewRating | null
 }
 
-export interface StudyProvenance {
+export interface MediaStudyProvenance {
+  source_type: 'media'
   library_item_id: string
   lesson_id: string
   source_url: string
@@ -30,6 +31,19 @@ export interface StudyProvenance {
   start: number
   end: number
 }
+
+export interface SpeakingStudyProvenance {
+  source_type: 'speaking'
+  speaking_session_id: string
+  suggestion_index: number
+  originating_turn: number
+  provider: 'gemini-live' | 'openai-realtime'
+  mode: 'review_weak' | 'media' | 'custom'
+  media_title_snapshot: string | null
+  evidence_text: string | null
+}
+
+export type StudyProvenance = MediaStudyProvenance | SpeakingStudyProvenance
 
 export interface StudyItemInput {
   user_id: string
@@ -69,7 +83,7 @@ export interface StudyCandidate {
   usage: string | null
   quality: StudyQuality
   quality_reasons: string[]
-  provenance: StudyProvenance
+  provenance: MediaStudyProvenance
   already_saved: boolean
   study_item_id: string | null
 }

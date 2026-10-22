@@ -6,6 +6,7 @@ from services.library.store import LibraryStoreError
 from services.schemas.lesson import SourceLanguage
 from services.retrieval.chunk_store import ChunkStoreError
 from services.schemas.study_bank import (
+    MediaStudyProvenance,
     StudyBulkRequest,
     StudyBulkResult,
     StudyCandidateResponse,
@@ -87,6 +88,8 @@ def save_study_items(request: StudyBulkRequest):
         if item.kind != "chunk":
             continue
         source = item.provenance[0]
+        if not isinstance(source, MediaStudyProvenance):
+            raise HTTPException(status_code=422, detail="Curated media chunk requires media provenance")
         try:
             chunk, _ = chunk_api.chunk_memory_service.save_chunk(
                 user_id=item.user_id,

@@ -5,9 +5,11 @@ import {
   listStudyItems,
   updateStudyItem,
 } from '../api/studyBank'
+import { getStudyPracticeEvidence } from '../api/integration'
 import { getOrCreateLearnerId } from '../session/learnerSession'
 import type { SourceLanguage } from '../types/lesson'
 import type { StudyItem, StudyKind } from '../types/studyBank'
+import type { StudyPracticeEvidence } from '../types/integration'
 
 
 function reviewLabel(item: StudyItem): string {
@@ -27,6 +29,7 @@ export default function StudyBankPage() {
   const [items, setItems] = useState<StudyItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [evidence, setEvidence] = useState<Record<string, StudyPracticeEvidence>>({})
 
   useEffect(() => {
     let current = true
@@ -40,6 +43,9 @@ export default function StudyBankPage() {
       if (current) {
         setItems(values)
         setError(null)
+        void Promise.all(values.map(async (item) => [item.id, await getStudyPracticeEvidence(learnerId, item.id)] as const))
+          .then((entries) => { if (current) setEvidence(Object.fromEntries(entries)) })
+          .catch(() => { if (current) setEvidence({}) })
       }
     }).catch(() => {
       if (current) setError('Words & Chunks is unavailable. Please try again.')
@@ -91,6 +97,7 @@ export default function StudyBankPage() {
                 <h2 className="text-lg font-semibold">{item.text}</h2>
                 <p className="mt-1">{item.meaning || 'Meaning unavailable'}</p>
                 <p className="mt-2 text-sm text-[#66726e]">{item.source_language === 'en' ? 'English' : 'German'} · {item.provenance.length} source{item.provenance.length === 1 ? '' : 's'} · {item.active ? 'Active' : 'Archived'} · {reviewLabel(item)} · Saved {new Date(item.created_at).toLocaleDateString()}</p>
+                {evidence[item.id] && <p className="mt-1 text-sm text-[#66726e]">Speaking: {evidence[item.id].recent_used_session_count ? 'Used recently' : 'Not used recently'} · Shadowing: {evidence[item.id].stable_source_sentence_count ? 'Stable source sync' : evidence[item.id].preferred_shadowing_source ? 'Source practice available' : 'Unavailable'}{item.kind === 'chunk' ? ` · ${evidence[item.id].guided_practice_count} Guided attempts` : ''}</p>}
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => void setItemActive(item, !item.active)} className="h-9 border border-[#176b5b] px-3">{item.active ? 'Archive' : 'Restore'}</button>
@@ -100,11 +107,16 @@ export default function StudyBankPage() {
             <details className="mt-4">
               <summary className="cursor-pointer font-medium">Sources</summary>
               <ul className="mt-3 space-y-3">
-                {item.provenance.map((source) => <li key={`${source.library_item_id}:${source.sentence_id}:${source.start}`} className="border-l-2 border-[#ccd6d1] pl-3">
+                {item.provenance.map((source) => source.source_type === 'media' ? <li key={`media:${source.library_item_id}:${source.sentence_id}:${source.start}`} className="border-l-2 border-[#ccd6d1] pl-3">
                   <p className="font-medium">{source.media_title}</p>
                   <p className="text-xs text-[#66726e]">{source.start.toFixed(1)}–{source.end.toFixed(1)}s</p>
                   <p className="mt-1 text-sm">{source.sentence_text}</p>
                   <p className="mt-1 text-sm text-[#66726e]">{source.sentence_translation}</p>
+                </li> : <li key={`speaking:${source.speaking_session_id}:${source.suggestion_index}`} className="border-l-2 border-[#ccd6d1] pl-3">
+                  <p className="font-medium">From Speaking practice · {source.provider === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'}</p>
+                  {source.media_title_snapshot && <p className="text-xs text-[#66726e]">Discussed: {source.media_title_snapshot}</p>}
+                  <p className="mt-1 text-sm">Suggested in turn {source.originating_turn}</p>
+                  {source.evidence_text && <p className="mt-1 text-sm text-[#66726e]">“{source.evidence_text}”</p>}
                 </li>)}
               </ul>
             </details>

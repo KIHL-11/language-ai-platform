@@ -43,6 +43,8 @@ function routes(url: string, options?: RequestInit) {
   if (value.includes('/events')) return Promise.resolve(response(updatedSession()))
   if (value.includes('/finish')) return Promise.resolve(response({ ...updatedSession(), status: 'completed', ended_at: '2026-10-20T10:05:00Z', event_count: 2, end_reason: 'user' }))
   if (value.includes('/tools')) return Promise.resolve(response({ result: [], session: null }))
+  if (value.includes('/api/integration/target-languages')) return Promise.resolve(response({ target_languages: ['zh-CN'] }))
+  if (value.includes('/api/integration/speaking/') && options?.method === 'POST') return Promise.resolve(response({ item: {}, created: true, chunk_memory_synchronized: true }))
   return Promise.resolve(response({}))
 }
 
@@ -107,6 +109,24 @@ describe('Speaking Page', () => {
     expect(screen.getByText('I goes → I go: Agreement')).toBeInTheDocument()
     expect(screen.getByText('that makes sense — 合理')).toBeInTheDocument()
     expect(document.body.textContent).not.toContain('audio_b64')
+  })
+
+  it('requires an explicit target-language choice and saves a canonical session suggestion', async () => {
+    const completed = { ...updatedSession(), status: 'completed' as const, ended_at: '2026-10-20T10:05:00Z', end_reason: 'user' as const, suggestions: [{ text: 'that makes sense', meaning: '合理', kind: 'chunk' as const, short_usage_note: 'reaction', originating_turn: 1 }] }
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/api/speaking/sessions?')) return Promise.resolve(response({ sessions: [completed] }))
+      if (String(url).includes('/api/integration/target-languages')) return Promise.resolve(response({ target_languages: ['zh-CN', 'fr'] }))
+      return routes(url, options)
+    })
+    const user = userEvent.setup(); render(<SpeakingPage providerFactory={() => new FakeProvider()} />)
+    await user.click(await screen.findByRole('button', { name: /Review weak expressions/ }))
+    const save = await screen.findByRole('button', { name: 'Save to Words & Chunks' })
+    expect(save).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText('Target language for that makes sense'), 'fr')
+    await user.click(save)
+    expect(await screen.findByText('Saved to Words & Chunks')).toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([url], index) => String(url).includes('/api/integration/speaking/') && fetchMock.mock.calls[index][1]?.method === 'POST')
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ user_id: expect.any(String), target_language: 'fr' })
   })
 
   it('does not silently instantiate OpenAI when Gemini fails', async () => {

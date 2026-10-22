@@ -101,6 +101,17 @@ describe('Daily Review', () => {
     expect(screen.getByText('Recall this saved word.')).toBeInTheDocument()
   })
 
+  it('handles Speaking provenance without exposing it before Reveal', async () => {
+    const speakingItem = { ...studyItem, meaning: '', provenance: [{ source_type: 'speaking' as const, speaking_session_id: 'session-one', suggestion_index: 0, originating_turn: 1, provider: 'gemini-live' as const, mode: 'review_weak' as const, media_title_snapshot: null, evidence_text: 'That makes sense.' }] }
+    fetchMock.mockImplementation((url: string) => String(url).includes('/summary') ? Promise.resolve(response(summary)) : Promise.resolve(response({ items: [speakingItem] })))
+    const user = userEvent.setup(); render(<DailyReviewPage />); await openFirstCard(user)
+    expect(screen.getByText('Recall this saved word.')).toBeInTheDocument()
+    expect(screen.queryByText('That makes sense.')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Reveal' }))
+    expect(screen.getByText('Speaking session')).toBeInTheDocument()
+    expect(screen.getByText(/That makes sense/)).toBeInTheDocument()
+  })
+
   it.each(['Again', 'Hard', 'Good', 'Easy'])('sends %s with expected count and advances exactly once', async (label) => {
     const user = userEvent.setup()
     render(<DailyReviewPage />)
@@ -173,6 +184,30 @@ describe('Daily Review', () => {
     expect(screen.getByText(/Again: 1/)).toHaveTextContent('Good: 1')
     expect(screen.getByRole('button', { name: 'Review More' })).toBeInTheDocument()
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/summary')).length).toBeGreaterThan(1)
+  })
+
+  it('offers Speaking only for Again/Hard chunks with a bounded language launch', async () => {
+    const cards = [
+      { ...chunk, id: 'again-chunk' },
+      { ...chunk, id: 'hard-chunk', text: 'hard phrase' },
+      { ...chunk, id: 'good-chunk', text: 'good phrase' },
+      { ...studyItem, id: 'again-word' },
+    ]
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/summary')) return Promise.resolve(response(summary))
+      if (String(url).includes('/queue')) return Promise.resolve(response({ items: cards }))
+      if (options?.method === 'POST') return normalFetch(url, options)
+      return Promise.resolve(response({}))
+    })
+    const onSpeak = vi.fn(); const user = userEvent.setup(); render(<DailyReviewPage onSpeak={onSpeak} />)
+    await openFirstCard(user)
+    for (const rating of ['Again', 'Hard', 'Good', 'Again']) {
+      await user.click(screen.getByRole('button', { name: 'Reveal' }))
+      await user.click(screen.getByRole('button', { name: rating }))
+    }
+    const launch = await screen.findByRole('button', { name: 'Practice difficult chunks in Speaking' })
+    await user.click(launch)
+    expect(onSpeak).toHaveBeenCalledWith('en', ['again-chunk', 'hard-chunk'])
   })
 
   it('distinguishes an empty Study Bank from nothing ready', async () => {
