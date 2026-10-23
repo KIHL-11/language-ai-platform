@@ -188,6 +188,8 @@ describe('Listening Workspace', () => {
     })
     expect(fake?.seek).toHaveBeenCalledTimes(seekCalls ?? 0)
     expect(fake?.time).toBe(libraryItem.listening_progress.last_position_seconds)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/study-bank/items/bulk'))).toBe(false)
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/review/items/'))).toBe(false)
     await user.click(screen.getByRole('button', { name: 'Close dictionary' }))
     expect(screen.queryByLabelText('Contextual dictionary')).not.toBeInTheDocument()
   })

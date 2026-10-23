@@ -1,11 +1,21 @@
-import { useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
+import { createPortal } from 'react-dom'
 
 import { lookupDictionary, synthesizePronunciation } from '../api/dictionary'
+import { calculateDictionaryPopoverPosition, type DictionaryPopoverPosition } from '../dictionary/popoverPosition'
 import type { DictionaryLookup, DictionaryPronunciation, DictionarySelection } from '../types/dictionary'
 
 
 interface DictionaryPanelProps {
   selection: DictionarySelection
+  anchor: HTMLElement
   onClose: () => void
 }
 
@@ -14,8 +24,8 @@ function Explanation({ value }: { value: DictionaryLookup['explanations']['monol
     return <p className="text-sm text-[#66726e]">This source does not provide this explanation.</p>
   }
   return <>
-    <p>{value.value}</p>
-    <p className="mt-2 text-xs text-[#66726e]">{value.kind === 'dictionary_translation' ? 'Dictionary translation' : 'Dictionary definition'} · {value.source}</p>
+    <p className="text-sm leading-5">{value.value}</p>
+    <p className="mt-1 text-[11px] text-[#66726e]">{value.kind === 'dictionary_translation' ? 'Dictionary translation' : 'Dictionary definition'} · {value.source}</p>
   </>
 }
 
@@ -25,12 +35,22 @@ function levelLabels(language: 'en' | 'de') {
     : ['01 English → English', '02 English → Deutsch', '03 English → 中文']
 }
 
-function DictionaryPanelContent({ selection, onClose }: DictionaryPanelProps) {
+function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelProps) {
   const [entry, setEntry] = useState<DictionaryLookup | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState<string | null>(null)
   const [pronunciationError, setPronunciationError] = useState<string | null>(null)
+  const [position, setPosition] = useState<DictionaryPopoverPosition>(() =>
+    calculateDictionaryPopoverPosition(anchor.getBoundingClientRect(), 0, window.innerWidth, window.innerHeight))
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const closeRef = useRef<HTMLButtonElement | null>(null)
+  const headingId = useId()
+
+  const closeAndRestoreFocus = useCallback(() => {
+    onClose()
+    if (anchor.isConnected) anchor.focus({ preventScroll: true })
+  }, [anchor, onClose])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -40,10 +60,68 @@ function DictionaryPanelContent({ selection, onClose }: DictionaryPanelProps) {
     return () => controller.abort()
   }, [selection])
 
-  useEffect(() => () => {
-    audioRef.current?.pause()
-    audioRef.current = null
+  useEffect(() => {
+    closeRef.current?.focus({ preventScroll: true })
+    return () => {
+      audioRef.current?.pause()
+      audioRef.current = null
+    }
   }, [])
+
+  useLayoutEffect(() => {
+    const updatePosition = () => {
+      if (!anchor.isConnected) {
+        onClose()
+        return
+      }
+      setPosition(calculateDictionaryPopoverPosition(
+        anchor.getBoundingClientRect(),
+        panelRef.current?.getBoundingClientRect().height ?? 0,
+        window.innerWidth,
+        window.innerHeight,
+      ))
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    const resizeObserver = typeof ResizeObserver === 'undefined' || !panelRef.current
+      ? null
+      : new ResizeObserver(updatePosition)
+    if (panelRef.current) resizeObserver?.observe(panelRef.current)
+    const mutationObserver = new MutationObserver(updatePosition)
+    mutationObserver.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      resizeObserver?.disconnect()
+      mutationObserver.disconnect()
+    }
+  }, [anchor, onClose])
+
+  useEffect(() => {
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeAndRestoreFocus()
+    }
+    const closeFromOutside = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (panelRef.current?.contains(target) || anchor.contains(target)) return
+      closeAndRestoreFocus()
+    }
+    const closeFromScroll = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && panelRef.current?.contains(target)) return
+      closeAndRestoreFocus()
+    }
+    document.addEventListener('keydown', closeFromKeyboard)
+    document.addEventListener('pointerdown', closeFromOutside)
+    document.addEventListener('scroll', closeFromScroll, true)
+    return () => {
+      document.removeEventListener('keydown', closeFromKeyboard)
+      document.removeEventListener('pointerdown', closeFromOutside)
+      document.removeEventListener('scroll', closeFromScroll, true)
+    }
+  }, [anchor, closeAndRestoreFocus])
 
   async function play(pronunciation: DictionaryPronunciation) {
     if (!entry) return
@@ -73,60 +151,71 @@ function DictionaryPanelContent({ selection, onClose }: DictionaryPanelProps) {
   }
 
   const labels = levelLabels(selection.language)
-  return <aside aria-label="Contextual dictionary" className="mt-5 border-y border-[#8fa69d] bg-white p-5">
-    <div className="flex items-start justify-between gap-4">
-      <div>
-        <p className="text-xs font-semibold tracking-wider text-[#66726e]">CONTEXTUAL DICTIONARY</p>
-        <h2 className="mt-1 text-2xl font-semibold">{entry?.lemma ?? selection.word}</h2>
-        {entry && <p className="mt-1 text-sm text-[#596560]">{entry.language === 'de' ? 'German' : 'English'}{entry.part_of_speech ? ` · ${entry.part_of_speech}` : ''}{entry.lemma && entry.lemma !== entry.surface_form ? ` · selected form: ${entry.surface_form}` : ''}</p>}
+  return <aside
+    ref={panelRef}
+    role="dialog"
+    aria-modal="false"
+    aria-labelledby={headingId}
+    aria-label="Contextual dictionary"
+    data-placement={position.placement}
+    style={position.style}
+    className="z-[100] overflow-y-auto rounded-xl border border-[#8fa69d] bg-white p-4 shadow-[0_16px_48px_rgba(23,33,31,0.22)]"
+  >
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-[10px] font-semibold tracking-wider text-[#66726e]">DICTIONARY · {selection.language === 'de' ? 'GERMAN' : 'ENGLISH'}</p>
+        <h2 id={headingId} className="mt-1 truncate text-xl font-semibold">{entry?.lemma ?? selection.word}</h2>
+        {entry && <p className="mt-0.5 text-xs text-[#596560]">{entry.part_of_speech ?? 'Part of speech unavailable'}{entry.lemma && entry.lemma !== entry.surface_form ? ` · ${entry.surface_form}` : ''}</p>}
       </div>
-      <button type="button" onClick={onClose} aria-label="Close dictionary" className="h-9 border border-[#aebcb6] px-3">Close</button>
+      <button ref={closeRef} type="button" onClick={closeAndRestoreFocus} aria-label="Close dictionary" className="h-8 shrink-0 rounded-md border border-[#aebcb6] px-2 text-xs">Close</button>
     </div>
 
-    {!entry && !error && <p role="status" className="mt-4">Looking up {selection.word}…</p>}
-    {error && <p role="alert" className="mt-4 text-[#8f1d14]">{error}</p>}
-    {entry?.status === 'not_configured' && <p role="status" className="mt-4">Local dictionary data is not installed. Import a Kaikki/Wiktextract index to enable lookup.</p>}
-    {entry?.status === 'not_found' && <p role="status" className="mt-4">No dictionary entry was found for “{selection.word}”.</p>}
+    {!entry && !error && <p role="status" className="mt-3 text-sm">Looking up {selection.word}…</p>}
+    {error && <p role="alert" className="mt-3 text-sm text-[#8f1d14]">{error}</p>}
+    {entry?.status === 'not_configured' && <p role="status" className="mt-3 text-sm">Local dictionary data is not installed.</p>}
+    {entry?.status === 'not_found' && <p role="status" className="mt-3 text-sm">No dictionary entry was found for “{selection.word}”.</p>}
 
     {entry && (entry.status === 'found' || entry.status === 'ambiguous') && <>
-      {entry.status === 'ambiguous' && <p className="mt-4 border-l-4 border-[#b7791f] bg-[#fff8e8] px-3 py-2 text-sm">This lookup is ambiguous. The first source sense is shown; review More meanings.</p>}
-      <div className="mt-4 flex flex-wrap gap-2">
+      {entry.status === 'ambiguous' && <p className="mt-3 rounded-md bg-[#fff8e8] px-3 py-2 text-xs">Ambiguous lookup. The first source sense is shown.</p>}
+      <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Pronunciation">
         {entry.pronunciations.filter((value) => value.audio_available).map((value, index) => <button
           key={`${value.accent}-${index}`}
           type="button"
           disabled={playing !== null}
           onClick={() => void play(value)}
-          className="min-h-9 border border-[#176b5b] px-3 disabled:border-[#9aaba5]"
-        >{playing === value.accent ? 'Playing…' : `🔊 ${value.accent}`} {value.ipa ? value.ipa : ''}<small className="ml-1">({value.tts_fallback ? 'TTS' : 'dictionary recording'})</small></button>)}
+          className="min-h-8 rounded-md border border-[#176b5b] px-2 text-xs disabled:border-[#9aaba5]"
+        >{playing === value.accent ? 'Playing…' : `🔊 ${value.accent}`}{value.ipa ? ` ${value.ipa}` : ''} <span className="sr-only">{value.tts_fallback ? 'TTS' : 'dictionary recording'}</span></button>)}
+        {entry.pronunciations.every((value) => !value.audio_available) && <span className="text-xs text-[#66726e]">Pronunciation unavailable</span>}
       </div>
-      {pronunciationError && <p role="alert" className="mt-2 text-sm text-[#8f1d14]">{pronunciationError}</p>}
+      {pronunciationError && <p role="alert" className="mt-2 text-xs text-[#8f1d14]">{pronunciationError}</p>}
 
-      <div className="mt-5 border-t border-[#dfe7e3] pt-4">
-        <p className="text-xs font-semibold tracking-wider text-[#66726e]">SOURCE CONTEXT</p>
-        <p className="mt-1">{entry.context.source_sentence}</p>
-        {entry.context.selection_method === 'ambiguous' && <p className="mt-1 text-xs text-[#66726e]">The source data does not support a certain contextual sense selection.</p>}
-      </div>
-
-      <div className="mt-4 space-y-2">
-        <details open className="border-t border-[#dfe7e3] py-3"><summary className="cursor-pointer font-semibold">{labels[0]}</summary><div className="mt-2"><Explanation value={entry.explanations.monolingual} /></div></details>
-        <details className="border-t border-[#dfe7e3] py-3"><summary className="cursor-pointer font-semibold">{labels[1]}</summary><div className="mt-2"><Explanation value={entry.explanations.cross_language} /></div></details>
-        <details className="border-y border-[#dfe7e3] py-3"><summary className="cursor-pointer font-semibold">{labels[2]}</summary><div className="mt-2"><Explanation value={entry.explanations.chinese} /></div></details>
+      <div className="mt-3 space-y-1">
+        <details open className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[0]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.monolingual} /></div></details>
+        <details className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[1]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.cross_language} /></div></details>
+        <details className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[2]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.chinese} /></div></details>
       </div>
 
-      {entry.examples.length > 0 && <div className="mt-4"><h3 className="font-semibold">Example</h3><p className="mt-1">{entry.examples[0]}</p></div>}
-      {entry.inflections.length > 0 && <details className="mt-4"><summary className="cursor-pointer font-semibold">Inflections</summary><p className="mt-2 text-sm">{entry.inflections.join(' · ')}</p></details>}
-      {entry.alternate_senses.length > 0 && <details className="mt-4"><summary className="cursor-pointer font-semibold">More meanings</summary><ul className="mt-2 list-disc space-y-1 pl-5">{entry.alternate_senses.map((sense, index) => <li key={`${index}-${sense.definition}`}>{sense.definition}</li>)}</ul></details>}
-      <div className="mt-5 text-xs text-[#66726e]">
-        {entry.source_attribution.map((source) => <p key={source.source_url}>Source: <a href={source.source_url} target="_blank" rel="noreferrer" className="underline">{source.source}</a> · {source.license}</p>)}
-      </div>
+      <details className="border-t border-[#dfe7e3] py-2">
+        <summary className="cursor-pointer text-sm font-semibold">More</summary>
+        <div className="mt-2 space-y-3 text-sm">
+          <div><p className="text-[10px] font-semibold tracking-wider text-[#66726e]">SOURCE CONTEXT</p><p className="mt-1">{entry.context.source_sentence}</p></div>
+          {entry.examples.length > 0 && <div><h3 className="font-semibold">Examples</h3><p className="mt-1">{entry.examples[0]}</p></div>}
+          {entry.inflections.length > 0 && <div><h3 className="font-semibold">Inflections</h3><p className="mt-1">{entry.inflections.join(' · ')}</p></div>}
+          {entry.alternate_senses.length > 0 && <div><h3 className="font-semibold">Alternative meanings</h3><ul className="mt-1 list-disc space-y-1 pl-5">{entry.alternate_senses.map((sense, index) => <li key={`${index}-${sense.definition}`}>{sense.definition}</li>)}</ul></div>}
+          {entry.source_attribution.map((source) => <p key={source.source_url} className="text-xs text-[#66726e]">Source: <a href={source.source_url} target="_blank" rel="noreferrer" className="underline">{source.source}</a> · {source.license}</p>)}
+        </div>
+      </details>
     </>}
   </aside>
 }
 
 export default function DictionaryPanel(props: DictionaryPanelProps) {
-  const selection = props.selection
-  return <DictionaryPanelContent
-    key={`${selection.language}:${selection.word}:${selection.sentence}`}
-    {...props}
-  />
+  const { selection } = props
+  return createPortal(
+    <DictionaryPanelContent
+      key={`${selection.language}:${selection.word}:${selection.sentence}`}
+      {...props}
+    />,
+    document.body,
+  )
 }
