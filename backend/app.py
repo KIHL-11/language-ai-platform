@@ -46,6 +46,7 @@ from services.api.study_bank_api import router as study_bank_router
 from services.api.review_api import router as review_router
 from services.api.speaking_api import router as speaking_router
 from services.api.integration_api import router as integration_router
+from services.api.dictionary_api import router as dictionary_router
 
 app.include_router(
     lesson_router,
@@ -83,12 +84,18 @@ app.include_router(
     integration_router,
     prefix="/api"
 )
+app.include_router(
+    dictionary_router,
+    prefix="/api"
+)
 # 口音 + 性别 → 默认嗓音（用对话级新嗓音，比老的 Aria/Guy 自然很多）
 VOICES = {
     ("en-US", "female"): "en-US-AvaNeural",
     ("en-US", "male"):   "en-US-AndrewNeural",
     ("en-GB", "female"): "en-GB-SoniaNeural",
     ("en-GB", "male"):   "en-GB-RyanNeural",
+    ("de-DE", "female"): "de-DE-KatjaNeural",
+    ("de-DE", "male"):   "de-DE-ConradNeural",
 }
 
 # 给前端选的精选自然嗓音
@@ -104,6 +111,10 @@ VOICE_LIST = {
         {"id": "en-GB-LibbyNeural",   "label": "Libby（女·年轻）"},
         {"id": "en-GB-RyanNeural",    "label": "Ryan（男·自然）"},
         {"id": "en-GB-ThomasNeural",  "label": "Thomas（男·沉稳）"},
+    ],
+    "de-DE": [
+        {"id": "de-DE-KatjaNeural",  "label": "Katja（女·标准德语）"},
+        {"id": "de-DE-ConradNeural", "label": "Conrad（男·标准德语）"},
     ],
 }
 
