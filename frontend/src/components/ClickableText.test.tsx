@@ -20,8 +20,12 @@ describe('ClickableText', () => {
     const onLookup = vi.fn()
     render(<ClickableText text="Wir gehen." sentence="Wir gehen." language="de" onLookup={onLookup} />)
     await user.tab()
-    expect(screen.getByRole('button', { name: 'Look up Wir' })).toHaveFocus()
+    const word = screen.getByRole('button', { name: 'Look up Wir' })
+    expect(word).toHaveFocus()
     await user.keyboard('{Enter}')
-    expect(onLookup).toHaveBeenCalledWith({ word: 'Wir', sentence: 'Wir gehen.', language: 'de' })
+    expect(onLookup).toHaveBeenCalledWith(
+      { word: 'Wir', sentence: 'Wir gehen.', language: 'de' },
+      word,
+    )
   })
 })
