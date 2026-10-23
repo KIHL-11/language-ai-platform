@@ -20,6 +20,8 @@ The FastAPI backend provides:
 - deterministic Daily Review and Sync Shadowing over curated/saved material
 - an explicit, provider-backed Intelligent Speaking Agent with bounded local
   transcript/session persistence
+- a local, source-attributed English/German contextual dictionary for clickable
+  Listening transcripts
 - a server-side endpoint for temporary OpenAI Realtime credentials
 
 ### Frontend
@@ -62,6 +64,12 @@ regenerating a Lesson. It uses the existing timestamped Lesson transcript,
 remote YouTube display when available, persistent audio fallback, deterministic
 dictation comparison, and Study Bank candidates. See
 [docs/LISTENING-WORKSPACE.md](docs/LISTENING-WORKSPACE.md).
+
+Visible English and German transcript words are clickable after local dictionary
+data is imported. The compact panel uses progressive monolingual, cross-language,
+and Chinese disclosure without mutating Study Bank or review state. See
+[docs/M5-CONTEXTUAL-LEARNING-DESIGN.md](docs/M5-CONTEXTUAL-LEARNING-DESIGN.md)
+for data import, licensing, pronunciation, and coverage limitations.
 
 The standalone Intelligent Speaking Agent uses Gemini Live by default and an
 explicitly selected OpenAI Realtime adapter optionally. No provider connection

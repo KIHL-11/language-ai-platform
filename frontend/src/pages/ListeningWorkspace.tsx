@@ -17,6 +17,9 @@ import { compareDictation, type DictationResult } from '../training/dictation'
 import { practiceableSentences, restoredPracticeIndex } from '../transcript/hygiene'
 import type { LibraryItem, ListeningMode, ListeningPlaybackRate, ListeningProgress } from '../types/library'
 import type { StudyCandidate } from '../types/studyBank'
+import type { DictionarySelection } from '../types/dictionary'
+import ClickableText from '../components/ClickableText'
+import DictionaryPanel from '../components/DictionaryPanel'
 
 const CLOCK_INTERVAL_MS = 200
 const PERSIST_INTERVAL_SECONDS = 5
@@ -29,7 +32,8 @@ function formatTime(seconds: number): string {
 
 function isTypingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable)
+    target instanceof HTMLSelectElement || target instanceof HTMLButtonElement ||
+    target instanceof HTMLAnchorElement || (target instanceof HTMLElement && target.isContentEditable)
 }
 
 interface ListeningWorkspaceProps {
@@ -74,9 +78,10 @@ export default function ListeningWorkspace({
   const [candidates, setCandidates] = useState<StudyCandidate[]>([])
   const [candidateError, setCandidateError] = useState<string | null>(null)
   const [savingCandidate, setSavingCandidate] = useState<string | null>(null)
+  const [dictionarySelection, setDictionarySelection] = useState<DictionarySelection | null>(null)
   const [learnerId] = useState(getOrCreateLearnerId)
   const mediaHostRef = useRef<HTMLDivElement>(null)
-  const transcriptRows = useRef(new Map<number, HTMLButtonElement>())
+  const transcriptRows = useRef(new Map<number, HTMLLIElement>())
   const currentIndexRef = useRef(currentIndex)
   const isPlayingRef = useRef(isPlaying)
   const loopRef = useRef(loop)
@@ -368,12 +373,14 @@ export default function ListeningWorkspace({
           <div className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
             <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(sentences.length).padStart(2, '0')}</p>
             {currentSentence ? <>
-              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : currentSentence.text}</p>
+              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} onLookup={setDictionarySelection} />}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
               {mode === 'blind' && <button type="button" onClick={() => setBlindRevealed((value) => !value)} className="mt-3 text-sm font-semibold text-[#176b5b]">{blindRevealed ? 'Hide again' : 'Reveal text'}</button>}
               {onShadowing && <button type="button" onClick={() => onShadowing(currentSentence.id)} className="mt-3 ml-3 text-sm font-semibold text-[#176b5b]">Practice Sync Shadowing</button>}
             </> : <p className="mt-3">This Lesson has no transcript sentences.</p>}
           </div>
+
+          {dictionarySelection && !hideText && sourceVisible && <DictionaryPanel selection={dictionarySelection} onClose={() => setDictionarySelection(null)} />}
 
           <div className="mt-5 flex flex-wrap gap-2" aria-label="Listening mode">
             {(['listen', 'blind', 'dictation'] as const).map((value) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => changeMode(value)} className="h-10 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white">{value[0].toUpperCase() + value.slice(1)}</button>)}
@@ -407,11 +414,11 @@ export default function ListeningWorkspace({
           <ol className="mt-4 max-h-[75vh] space-y-2 overflow-y-auto pr-2">
             {sentences.map((sentence, index) => {
               const active = index === currentIndex
-              return <li key={sentence.id}><button ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} type="button" aria-current={active ? 'true' : undefined} onClick={() => selectSentence(index)} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
-                <span className="block text-xs tabular-nums text-[#66726e]">{formatTime(sentence.start)}</span>
-                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : sentence.text}</span>
+              return <li ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} key={sentence.id} aria-current={active ? 'true' : undefined} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
+                <button type="button" aria-label={`Seek to ${sentence.text}`} onClick={() => selectSentence(index)} className="block text-xs tabular-nums text-[#66726e] hover:underline focus-visible:outline-2 focus-visible:outline-[#176b5b]">{formatTime(sentence.start)}</button>
+                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} onLookup={setDictionarySelection} />}</span>
                 <span className={`mt-1 block text-sm ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : sentence.translation}</span>
-              </button></li>
+              </li>
             })}
           </ol>
         </section>

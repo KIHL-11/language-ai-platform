@@ -6,6 +6,7 @@ import type { MediaController, MediaControllerStatus } from '../listening/mediaC
 import type { ListeningControllerFactory } from '../listening/createController'
 import { libraryItem } from '../testFixtures/libraryItem'
 import { studyCandidates, studyItem } from '../testFixtures/studyBank'
+import { dictionaryEntry } from '../testFixtures/dictionary'
 import ListeningWorkspace from './ListeningWorkspace'
 
 class FakeController implements MediaController {
@@ -31,6 +32,7 @@ function fetchRoutes(url: string, options?: RequestInit) {
   const value = String(url)
   if (value.includes('/study-candidates')) return Promise.resolve(response({ candidates: studyCandidates }))
   if (value.includes('/study-bank/items/bulk')) return Promise.resolve(response({ items: [studyItem] }))
+  if (value.includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
   if (value.includes('/listening-progress') && options?.method === 'PATCH') {
     return Promise.resolve(response({
       ...libraryItem,
@@ -167,10 +169,55 @@ describe('Listening Workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Blind' }))
     expect(screen.getAllByText('Source text hidden').length).toBeGreaterThan(0)
     await user.click(screen.getByRole('button', { name: 'Reveal text' }))
-    expect(screen.getAllByText('Sentence 2.').length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('button', { name: 'Look up Sentence' }).length).toBeGreaterThan(0)
     expect(screen.getAllByText('Translation hidden').length).toBeGreaterThan(0)
     await user.click(screen.getByRole('button', { name: 'Listen' }))
     expect(screen.getByRole('button', { name: 'Show translation' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('looks up an English word on demand without seeking or changing playback position', async () => {
+    const user = userEvent.setup()
+    const { fake } = setup()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled())
+    const seekCalls = fake?.seek.mock.calls.length
+    await user.click(screen.getAllByRole('button', { name: 'Look up Sentence' })[0])
+    expect(await screen.findByRole('heading', { name: 'sentence' })).toBeInTheDocument()
+    const lookupCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/dictionary/lookup'))
+    expect(JSON.parse(String(lookupCall?.[1]?.body))).toMatchObject({
+      language: 'en', word: 'Sentence', sentence: 'Sentence 2.', target_language: 'zh-CN',
+    })
+    expect(fake?.seek).toHaveBeenCalledTimes(seekCalls ?? 0)
+    expect(fake?.time).toBe(libraryItem.listening_progress.last_position_seconds)
+    await user.click(screen.getByRole('button', { name: 'Close dictionary' }))
+    expect(screen.queryByLabelText('Contextual dictionary')).not.toBeInTheDocument()
+  })
+
+  it('supports German Unicode lookup and never exposes lexical controls while Blind text is hidden', async () => {
+    const user = userEvent.setup()
+    const german = {
+      ...libraryItem,
+      lesson: {
+        ...libraryItem.lesson,
+        source_language: 'de' as const,
+        sentences: libraryItem.lesson.sentences.map((sentence, index) => index === 1
+          ? { ...sentence, text: 'Die Häuser sind größer.' }
+          : sentence),
+      },
+    }
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({
+      controller: new FakeController(), kind: 'audio', message: null,
+    })
+    render(<ListeningWorkspace item={german} onBack={vi.fn()} controllerFactory={factory} />)
+    await user.click(screen.getAllByRole('button', { name: 'Look up Häuser' })[0])
+    const lookupCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/dictionary/lookup'))
+    const lookupCall = lookupCalls[lookupCalls.length - 1]
+    expect(JSON.parse(String(lookupCall?.[1]?.body))).toMatchObject({ language: 'de', word: 'Häuser' })
+    await user.click(screen.getByRole('button', { name: 'Blind' }))
+    expect(screen.queryByLabelText('Contextual dictionary')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Look up Häuser/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('Die Häuser sind größer.')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Reveal text' }))
+    expect(screen.getAllByRole('button', { name: 'Look up Häuser' }).length).toBeGreaterThan(0)
   })
 
   it('reuses deterministic dictation comparison and keyboard does not hijack its input', async () => {
@@ -226,7 +273,7 @@ describe('Listening Workspace', () => {
     })
     render(<ListeningWorkspace item={item} onBack={vi.fn()} onShadowing={onShadowing} controllerFactory={factory} />)
     expect(screen.getByText(/CURRENT SENTENCE 02 \/ 02/)).toBeInTheDocument()
-    expect(screen.getAllByText('Keep going.').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'Seek to Keep going.' })).toBeInTheDocument()
     expect(screen.queryByText('[music] [APPLAUSE]')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Practice Sync Shadowing' }))
     expect(onShadowing).toHaveBeenCalledWith(3)
