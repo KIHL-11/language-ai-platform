@@ -30,7 +30,7 @@ function isDictionaryLookup(value: unknown): value is DictionaryLookup {
     isRecord(value.explanations) && isExplanation(value.explanations.monolingual) &&
     isExplanation(value.explanations.cross_language) && isExplanation(value.explanations.chinese) &&
     isRecord(value.context) && typeof value.context.source_sentence === 'string' &&
-    ['lexical_overlap', 'source_order', 'ambiguous', 'unavailable'].includes(String(value.context.selection_method)) &&
+    ['lexical_overlap', 'part_of_speech', 'morphology', 'source_order', 'ambiguous', 'unavailable'].includes(String(value.context.selection_method)) &&
     nullableString(value.context.contextual_sense) && nullableString(value.context.contextual_explanation) &&
     Array.isArray(value.inflections) && value.inflections.every((item) => typeof item === 'string') &&
     Array.isArray(value.examples) && value.examples.every((item) => typeof item === 'string') &&

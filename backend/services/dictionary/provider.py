@@ -421,14 +421,17 @@ class SQLiteDictionaryProvider:
     def _entry_ids(self, connection: sqlite3.Connection, language: str, surface: str, sentence: str) -> list[tuple[int, str]]:
         normalized = normalize_lexical(surface)
         exact = connection.execute(
-            "SELECT id FROM entries WHERE language = ? AND normalized_lemma = ? ORDER BY id",
+            """SELECT id FROM entries
+               WHERE language = ? AND normalized_lemma = ?
+               ORDER BY id LIMIT 20""",
             (language, normalized),
         ).fetchall()
         output: list[tuple[int, str]] = [(int(row["id"]), "lemma") for row in exact]
         forms = connection.execute(
             """SELECT DISTINCT entries.id FROM forms
                JOIN entries ON entries.id = forms.entry_id
-               WHERE entries.language = ? AND forms.normalized_form = ? ORDER BY entries.id""",
+               WHERE entries.language = ? AND forms.normalized_form = ?
+               ORDER BY entries.id LIMIT 20""",
             (language, normalized),
         ).fetchall()
         output.extend((int(row["id"]), "inflection") for row in forms if int(row["id"]) not in {value[0] for value in output})
@@ -449,7 +452,7 @@ class SQLiteDictionaryProvider:
                 if len(components) > 1 and entry_id not in known and self._ordered_subsequence(components, sentence_tokens):
                     output.append((entry_id, "separated_form"))
                     known.add(entry_id)
-        return output[:20]
+        return output[:40]
 
     def lookup(self, language: str, surface: str, sentence: str) -> list[ProviderEntry]:
         connection = self._connect()
