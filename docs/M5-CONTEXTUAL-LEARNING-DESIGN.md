@@ -90,7 +90,7 @@ Build one atomic index from both files:
 
 ```bash
 cd backend
-../.venv/bin/python scripts/import_kaikki_dictionary.py \
+.venv/bin/python scripts/import_kaikki_dictionary.py \
   --database storage/dictionary.sqlite3 \
   --content-license "CC BY-SA 4.0" \
   --english-input /path/to/english-raw-wiktextract-data.jsonl.gz \
