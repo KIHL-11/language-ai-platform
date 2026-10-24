@@ -93,7 +93,7 @@ def test_installed_dictionary_context_and_translation_quality(real_dictionary):
     greeting = real_dictionary.lookup("de", "Hallo", "Hallo, wie geht es dir?")
     assert greeting.part_of_speech == "phrase"
     greeting_definition = (greeting.explanations.monolingual.value or "").casefold()
-    assert any(value in greeting_definition for value in ("grüß", "gruß", "begrüß"))
+    assert any(value.casefold() in greeting_definition for value in ("grüß", "gruß", "begrüß"))
     assert greeting.status in {"found", "ambiguous"}
 
     nominal = real_dictionary.lookup("de", "Hallo", "Das Hallo war laut.")
