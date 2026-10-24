@@ -19,6 +19,7 @@ from services.dictionary.provider import (
     safe_wikimedia_audio_url,
 )
 from services.dictionary.service import DictionaryService
+from scripts.diagnose_dictionary_quality import diagnose
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -33,6 +34,16 @@ class FakeDictionaryProvider:
 
     def lookup(self, language: str, surface: str, sentence: str) -> list[ProviderEntry]:
         return self.entries
+
+
+class LazyFormsProvider(FakeDictionaryProvider):
+    def __init__(self, entries: list[ProviderEntry]):
+        super().__init__(entries)
+        self.form_requests: list[int] = []
+
+    def forms_for_entry(self, entry_id: int) -> tuple[str, ...]:
+        self.form_requests.append(entry_id)
+        return (f"form-for-{entry_id}",)
 
 
 def provider_entry(
@@ -174,6 +185,26 @@ def test_context_ranks_senses_across_entries_instead_of_using_the_first_entry():
     ]
 
 
+def test_display_forms_are_loaded_only_for_the_selected_entry():
+    provider = LazyFormsProvider([
+        provider_entry(1, "bank", "en", "A financial institution."),
+        provider_entry(
+            2,
+            "bank",
+            "en",
+            "The land alongside a river.",
+            examples=("We sat beside the river bank.",),
+        ),
+    ])
+    service = DictionaryService(provider)
+
+    result = service.lookup("en", "bank", "We sat beside the river bank.")
+
+    assert result.lemma == "bank"
+    assert result.inflections == ["form-for-2"]
+    assert provider.form_requests == [2]
+
+
 def test_duplicate_source_entries_do_not_create_false_ambiguity():
     duplicate = provider_entry(
         1,
@@ -242,6 +273,147 @@ def test_sentence_initial_greeting_prefers_interjection_part_of_speech():
     assert result.explanations.monolingual.value == "Eine Grußformel."
     assert result.context.selection_method == "part_of_speech"
     assert result.status == "found"
+
+
+def test_single_word_lookup_rejects_unmatched_multiword_lemma_but_keeps_real_phrase():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "go", "en", "To move from one place to another.", part_of_speech="verb"),
+        provider_entry(
+            2,
+            "go jump in the lake",
+            "en",
+            "A dismissive phrase used when telling someone to go away from work.",
+            part_of_speech="phrase",
+            match_kind="inflection",
+        ),
+    ]))
+
+    ordinary = service.lookup("en", "go", "We go to work by train.")
+    phrase = service.lookup("en", "go", "You can go jump in the lake.")
+
+    assert ordinary.lemma == "go"
+    assert ordinary.lemma_candidates == ["go"]
+    assert phrase.lemma == "go jump in the lake"
+
+
+def test_separated_form_requires_particle_at_clause_boundary(tmp_path):
+    input_path = tmp_path / "separated.jsonl"
+    values = [
+        {
+            "word": "gehen",
+            "lang_code": "de",
+            "pos": "verb",
+            "senses": [{"glosses": ["Sich zu Fuß bewegen."]}],
+            "forms": [{"form": "ging", "tags": ["past"]}],
+        },
+        {
+            "word": "nachgehen",
+            "lang_code": "de",
+            "pos": "verb",
+            "senses": [{"glosses": ["Eine Sache untersuchen."]}],
+            "forms": [{"form": "ging nach", "tags": ["past"]}],
+        },
+    ]
+    input_path.write_text(
+        "".join(f"{json.dumps(value)}\n" for value in values),
+        encoding="utf-8",
+    )
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(input_path, "de", "https://kaikki.org/dewiktionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+    provider = SQLiteDictionaryProvider(database)
+
+    home = provider.lookup("de", "ging", "Er ging nach Hause.")
+    investigation = provider.lookup("de", "ging", "Er ging der Sache nach.")
+
+    assert [(entry.lemma, entry.match_kind) for entry in home] == [
+        ("gehen", "inflection")
+    ]
+    assert [(entry.lemma, entry.match_kind) for entry in investigation] == [
+        ("gehen", "inflection"),
+        ("nachgehen", "separated_form"),
+    ]
+
+
+def test_greeting_query_retains_late_interjection_without_general_pos_bias(tmp_path):
+    input_path = tmp_path / "greeting.jsonl"
+    values = [
+        {
+            "word": "Hallo",
+            "lang_code": "de",
+            "pos": "noun",
+            "senses": [{"glosses": [f"Substantivbedeutung {index}."]}],
+        }
+        for index in range(25)
+    ]
+    values.append({
+        "word": "Hallo",
+        "lang_code": "de",
+        "pos": "intj",
+        "senses": [{"glosses": ["Eine Grußformel."]}],
+    })
+    input_path.write_text(
+        "".join(f"{json.dumps(value)}\n" for value in values),
+        encoding="utf-8",
+    )
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(input_path, "de", "https://kaikki.org/dewiktionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+    service = DictionaryService(SQLiteDictionaryProvider(database))
+
+    greeting = service.lookup("de", "Hallo", "Hallo, wie geht es dir?")
+    ordinary_noun = service.lookup("de", "Hallo", "Das Hallo war laut.")
+
+    assert greeting.part_of_speech == "intj"
+    assert greeting.explanations.monolingual.value == "Eine Grußformel."
+    assert ordinary_noun.part_of_speech == "noun"
+
+
+def test_alternate_sense_payload_is_bounded():
+    base = provider_entry(1, "bank", "en", "placeholder")
+    entry = replace(base, senses=tuple(
+        ProviderSense(f"Meaning {index}.", (), {}) for index in range(75)
+    ))
+    service = DictionaryService(FakeDictionaryProvider([entry]))
+
+    result = service.lookup("en", "bank", "That bank is over there.")
+
+    assert len(result.alternate_senses) == 50
+
+
+def test_quality_diagnostics_are_read_only_and_report_indexed_query_plans(dictionary):
+    database = dictionary.provider.path
+    before = database.stat()
+
+    results = diagnose(database)
+
+    after = database.stat()
+    assert [(value["language"], value["surface"]) for value in results] == [
+        ("en", "go"),
+        ("de", "ging"),
+        ("de", "Hallo"),
+    ]
+    assert before.st_size == after.st_size
+    assert before.st_mtime_ns == after.st_mtime_ns
+    for result in results:
+        assert result["provider_elapsed_ms"] >= 0
+        assert result["lookup_elapsed_ms"] >= 0
+        assert result["provider_candidate_count"] <= 40
+        assert set(result["queries"]) == {
+            "exact", "inflection", "separated_component", "hydration"
+        }
+        assert all(
+            query["count"] >= 0 and query["plan"]
+            for name, query in result["queries"].items()
+            if name != "hydration"
+        )
+        assert all(result["queries"]["hydration"].values())
 
 
 def test_chinese_translation_rejects_cyrillic_and_prefers_source_simplified_variants():
