@@ -1,6 +1,7 @@
 import gzip
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ import app as app_module
 from services.api import dictionary_api
 from services.api import library_api, study_bank_api
 from services.dictionary.provider import (
+    ProviderEntry,
+    ProviderSense,
     SQLiteDictionaryProvider,
     import_kaikki_sources,
     safe_dictionary_source_url,
@@ -20,6 +23,48 @@ from services.dictionary.service import DictionaryService
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TEST_CONTENT_LICENSE = "Synthetic test fixture; not upstream dictionary content"
+
+
+class FakeDictionaryProvider:
+    configured = True
+
+    def __init__(self, entries: list[ProviderEntry]):
+        self.entries = entries
+
+    def lookup(self, language: str, surface: str, sentence: str) -> list[ProviderEntry]:
+        return self.entries
+
+
+def provider_entry(
+    entry_id: int,
+    lemma: str,
+    language: str,
+    definition: str,
+    *,
+    part_of_speech: str = "noun",
+    match_kind: str = "lemma",
+    examples: tuple[str, ...] = (),
+    translations: dict[str, tuple[str, ...]] | None = None,
+    source_url: str | None = None,
+) -> ProviderEntry:
+    return ProviderEntry(
+        entry_id=entry_id,
+        language=language,
+        lemma=lemma,
+        part_of_speech=part_of_speech,
+        definition_language=language,
+        source_url=source_url or f"https://{language}.wiktionary.org/wiki/{lemma}",
+        source_name="Wiktionary data extracted by Wiktextract/Kaikki",
+        license=TEST_CONTENT_LICENSE,
+        senses=(ProviderSense(
+            definition=definition,
+            examples=examples,
+            translations=translations or {},
+        ),),
+        forms=(),
+        pronunciations=(),
+        match_kind=match_kind,
+    )
 
 
 @pytest.fixture()
@@ -67,6 +112,196 @@ def test_inflections_and_separated_verbs_use_imported_lexical_forms(
     dictionary, language, surface, sentence, lemma
 ):
     assert dictionary.lookup(language, surface, sentence).lemma == lemma
+
+
+@pytest.mark.parametrize(
+    ("language", "surface", "sentence", "lemma", "definition"),
+    [
+        ("en", "went", "We went home.", "go", "To move from one place to another."),
+        ("en", "children", "The children laughed.", "child", "A young human being."),
+        ("de", "ging", "Er ging nach Hause.", "gehen", "Sich zu Fuß bewegen."),
+        ("de", "Häuser", "Die Häuser stehen am Fluss.", "Haus", "Ein Gebäude zum Wohnen."),
+    ],
+)
+def test_source_forms_beat_unrelated_exact_entries_without_suffix_guessing(
+    language, surface, sentence, lemma, definition
+):
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, surface, language, "An unrelated lexical entry."),
+        provider_entry(
+            2,
+            lemma,
+            language,
+            definition,
+            part_of_speech="verb" if lemma in {"go", "gehen"} else "noun",
+            match_kind="inflection",
+        ),
+    ]))
+
+    result = service.lookup(language, surface, sentence)
+
+    assert result.lemma == lemma
+    assert result.surface_form == surface
+    assert result.status == "found"
+    assert result.context.selection_method == "morphology"
+
+
+def test_context_ranks_senses_across_entries_instead_of_using_the_first_entry():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(
+            1,
+            "bank",
+            "en",
+            "A financial institution where people keep money.",
+            examples=("She deposited money at the bank.",),
+        ),
+        provider_entry(
+            2,
+            "bank",
+            "en",
+            "The land alongside a river.",
+            examples=("We sat beside the river bank.",),
+        ),
+    ]))
+
+    result = service.lookup("en", "bank", "We sat beside the river bank.")
+
+    assert result.explanations.monolingual.value == "The land alongside a river."
+    assert result.context.selection_method == "lexical_overlap"
+    assert result.status == "found"
+    assert [value.definition for value in result.alternate_senses] == [
+        "A financial institution where people keep money."
+    ]
+
+
+def test_duplicate_source_entries_do_not_create_false_ambiguity():
+    duplicate = provider_entry(
+        1,
+        "bank",
+        "en",
+        "The land alongside a river.",
+        examples=("They sat on the bank.",),
+    )
+    service = DictionaryService(FakeDictionaryProvider([
+        duplicate,
+        provider_entry(
+            2,
+            "bank",
+            "en",
+            "The land alongside a river.",
+            examples=("Grass grows on a river bank.",),
+        ),
+    ]))
+
+    result = service.lookup("en", "bank", "That bank is over there.")
+
+    assert result.status == "found"
+    assert result.alternate_senses == []
+
+
+def test_distinct_unranked_meanings_remain_legitimately_ambiguous():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "bank", "en", "A financial institution."),
+        provider_entry(2, "bank", "en", "Land at the edge of water."),
+    ]))
+
+    result = service.lookup("en", "bank", "That bank is over there.")
+
+    assert result.status == "ambiguous"
+    assert result.context.selection_method == "ambiguous"
+
+
+def test_all_distinct_source_senses_remain_available_as_alternatives():
+    base = provider_entry(1, "bank", "en", "placeholder")
+    entry = replace(base, senses=tuple(
+        ProviderSense(f"Meaning {index}.", (), {}) for index in range(12)
+    ) + (ProviderSense("The edge of a river.", (), {}),))
+    service = DictionaryService(FakeDictionaryProvider([entry]))
+
+    result = service.lookup("en", "bank", "We sat beside the river bank.")
+
+    assert result.explanations.monolingual.value == "The edge of a river."
+    assert len(result.alternate_senses) == 12
+
+
+def test_sentence_initial_greeting_prefers_interjection_part_of_speech():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "Hallo", "de", "Ein männlicher Vorname."),
+        provider_entry(
+            2,
+            "Hallo",
+            "de",
+            "Eine Grußformel.",
+            part_of_speech="intj",
+        ),
+    ]))
+
+    result = service.lookup("de", "Hallo", "Hallo, wie geht es dir?")
+
+    assert result.part_of_speech == "intj"
+    assert result.explanations.monolingual.value == "Eine Grußformel."
+    assert result.context.selection_method == "part_of_speech"
+    assert result.status == "found"
+
+
+def test_chinese_translation_rejects_cyrillic_and_prefers_source_simplified_variants():
+    entry = provider_entry(
+        1,
+        "bank",
+        "en",
+        "A financial institution.",
+        translations={"zh-CN": ("банк", "銀行／银行", "兒童; 儿童")},
+    )
+    service = DictionaryService(FakeDictionaryProvider([entry]))
+
+    result = service.lookup("en", "bank", "A bank.")
+
+    assert result.explanations.chinese.value == "银行; 儿童; 銀行"
+    assert "банк" not in result.explanations.chinese.value
+    assert result.explanations.chinese.source_url == entry.source_url
+
+
+def test_provider_keeps_source_form_candidates_when_exact_duplicates_hit_limit(tmp_path):
+    input_path = tmp_path / "many.jsonl"
+    values = [
+        {
+            "word": "went",
+            "lang_code": "en",
+            "pos": "noun",
+            "senses": [{"glosses": [f"Unrelated entry {index}."]}],
+        }
+        for index in range(25)
+    ]
+    values.append({
+        "word": "go",
+        "lang_code": "en",
+        "pos": "verb",
+        "senses": [{"glosses": ["To move from one place to another."]}],
+        "forms": [{"form": "went", "tags": ["past"]}],
+    })
+    input_path.write_text(
+        "".join(f"{json.dumps(value)}\n" for value in values),
+        encoding="utf-8",
+    )
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(input_path, "en", "https://kaikki.org/dictionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+
+    service = DictionaryService(SQLiteDictionaryProvider(database))
+    result = service.lookup("en", "went", "We went home.")
+
+    assert result.lemma == "go"
+    assert result.context.selection_method == "morphology"
+
+
+def test_lemma_resolution_does_not_guess_suffixes_without_a_source_form(dictionary):
+    result = dictionary.lookup("en", "inventedworded", "They inventedworded it.")
+
+    assert result.status == "not_found"
+    assert result.lemma is None
 
 
 def test_multiple_meanings_use_context_when_grounded_and_show_ambiguity(dictionary):

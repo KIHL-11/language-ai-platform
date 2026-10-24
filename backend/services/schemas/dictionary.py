@@ -69,7 +69,8 @@ class DictionarySense(DictionaryModel):
 class DictionaryContext(DictionaryModel):
     source_sentence: str
     selection_method: Literal[
-        "lexical_overlap", "source_order", "ambiguous", "unavailable"
+        "lexical_overlap", "part_of_speech", "morphology", "source_order",
+        "ambiguous", "unavailable"
     ]
     contextual_sense: str | None = None
     contextual_explanation: str | None = None
@@ -88,5 +89,5 @@ class DictionaryLookupResponse(DictionaryModel):
     context: DictionaryContext
     inflections: list[str] = Field(default_factory=list, max_length=30)
     examples: list[str] = Field(default_factory=list, max_length=10)
-    alternate_senses: list[DictionarySense] = Field(default_factory=list, max_length=10)
+    alternate_senses: list[DictionarySense] = Field(default_factory=list)
     source_attribution: list[DictionaryAttribution] = Field(default_factory=list)

@@ -39,7 +39,7 @@ export interface DictionaryLookup {
   }
   context: {
     source_sentence: string
-    selection_method: 'lexical_overlap' | 'source_order' | 'ambiguous' | 'unavailable'
+    selection_method: 'lexical_overlap' | 'part_of_speech' | 'morphology' | 'source_order' | 'ambiguous' | 'unavailable'
     contextual_sense: string | null
     contextual_explanation: string | null
   }
