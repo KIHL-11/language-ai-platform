@@ -1,4 +1,6 @@
+import gzip
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ from services.dictionary.service import DictionaryService
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+TEST_CONTENT_LICENSE = "Synthetic test fixture; not upstream dictionary content"
 
 
 @pytest.fixture()
@@ -28,6 +31,7 @@ def dictionary(tmp_path):
             (FIXTURES / "kaikki_de_fixture.jsonl", "de", "https://kaikki.org/dewiktionary/Deutsch/"),
         ],
         database,
+        content_license=TEST_CONTENT_LICENSE,
     )
     assert count == 8
     return DictionaryService(SQLiteDictionaryProvider(database))
@@ -39,7 +43,7 @@ def test_english_and_german_lemma_lookup_have_three_source_attributed_levels(dic
     assert english.explanations.monolingual.value == "To move from one place to another."
     assert english.explanations.cross_language.value == "gehen"
     assert english.explanations.chinese.value == "去"
-    assert english.source_attribution[0].license == "CC BY-SA 3.0 or GFDL"
+    assert english.source_attribution[0].license == TEST_CONTENT_LICENSE
 
     german = dictionary.lookup("de", "herausfinden", "Wir wollen herausfinden, was passiert.")
     assert (german.lemma, german.part_of_speech) == ("herausfinden", "verb")
@@ -130,14 +134,86 @@ def test_lookup_cache_avoids_repeated_provider_reads(dictionary, monkeypatch):
 def test_import_failure_is_atomic_and_does_not_replace_existing_index(tmp_path):
     database = tmp_path / "dictionary.sqlite3"
     import_kaikki_sources(
-        [(FIXTURES / "kaikki_en_fixture.jsonl", "en", "https://kaikki.org/")], database
+        [(FIXTURES / "kaikki_en_fixture.jsonl", "en", "https://kaikki.org/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
     )
     previous = database.read_bytes()
     malformed = tmp_path / "bad.jsonl"
     malformed.write_text('{"word":', encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid JSON"):
-        import_kaikki_sources([(malformed, "en", "https://kaikki.org/")], database)
+        import_kaikki_sources(
+            [(malformed, "en", "https://kaikki.org/")],
+            database,
+            content_license=TEST_CONTENT_LICENSE,
+        )
     assert database.read_bytes() == previous
+
+
+def _write_gzip_jsonl(path: Path, values: list[dict]) -> bytes:
+    jsonl = "".join(
+        f"{json.dumps(value, ensure_ascii=False, separators=(',', ':'))}\n"
+        for value in values
+    ).encode()
+    compressed = gzip.compress(jsonl, mtime=0)
+    path.write_bytes(compressed)
+    return compressed
+
+
+def test_gzip_import_streams_and_rejects_entries_from_the_wrong_edition_language(tmp_path):
+    english = tmp_path / "english.jsonl.gz"
+    german = tmp_path / "german.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(english, [
+        {"word": "hello", "lang_code": "en", "senses": [{"glosses": ["A greeting."]}]},
+        {"word": "Hallo", "lang_code": "de", "senses": [{"glosses": ["A greeting."]}]},
+    ])
+    _write_gzip_jsonl(german, [
+        {"word": "Haus", "lang_code": "de", "senses": [{"glosses": ["Ein Gebäude."]}]},
+        {"word": "house", "lang_code": "en", "senses": [{"glosses": ["A building."]}]},
+    ])
+
+    count = import_kaikki_sources(
+        [
+            (english, "en", "https://kaikki.org/dictionary/"),
+            (german, "de", "https://kaikki.org/dewiktionary/"),
+        ],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+
+    assert count == 2
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute(
+            "SELECT language, definition_language, lemma FROM entries ORDER BY language"
+        ).fetchall() == [("de", "de", "Haus"), ("en", "en", "hello")]
+
+
+@pytest.mark.parametrize("damage", ["truncated", "corrupt"])
+def test_invalid_gzip_is_detected_without_replacing_existing_database(tmp_path, damage):
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(FIXTURES / "kaikki_en_fixture.jsonl", "en", "https://kaikki.org/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+    previous = database.read_bytes()
+    compressed = tmp_path / "damaged.jsonl.gz"
+    valid = _write_gzip_jsonl(compressed, [
+        {"word": "safe", "lang_code": "en", "senses": [{"glosses": ["Not imported."]}]},
+    ])
+    compressed.write_bytes(valid[:-8] if damage == "truncated" else b"not a gzip stream")
+
+    with pytest.raises(ValueError, match="Corrupt or incomplete gzip"):
+        import_kaikki_sources(
+            [(compressed, "en", "https://kaikki.org/dictionary/")],
+            database,
+            content_license=TEST_CONTENT_LICENSE,
+        )
+
+    assert database.read_bytes() == previous
+    assert not database.with_suffix(".sqlite3.tmp").exists()
 
 
 def test_lookup_api_validates_input_and_does_not_touch_learning_stores(dictionary, monkeypatch):

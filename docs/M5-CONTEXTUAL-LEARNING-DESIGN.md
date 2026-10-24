@@ -45,10 +45,17 @@ dump date; none of those fields is assumed to exist.
 Important license boundaries:
 
 - Wiktextract software is MIT licensed.
-- Extracted Wiktionary content retains the applicable Wiktionary content
-  license. The upstream Wiktextract repository identifies relevant test/content
-  data as CC BY-SA 3.0 or GFDL. Confirm the current terms of the specific dump
-  before redistributing an index.
+- Extracted Wiktionary content retains the applicable current Wiktionary
+  edition/dump license. As checked on 2026-10-24, Wikimedia's current
+  [production configuration](https://github.com/wikimedia/operations-mediawiki-config/blob/master/wmf-config/InitialiseSettings.php)
+  gives Wiktionary the default **Creative Commons
+  Attribution-ShareAlike 4.0** notice; English and German Wiktionary have no
+  license override in that configuration. The importer deliberately has no
+  built-in license default: record the current dump label with
+  `--content-license`, and recheck the Kaikki download notice before each real
+  import. Attribution and ShareAlike obligations apply when redistributing an
+  index; content that carries additional source-specific terms remains subject
+  to those terms.
 - The UI attributes each returned entry to Wiktionary data extracted by
   Wiktextract/Kaikki and links to its source entry.
 - Wikimedia Commons pronunciation files have per-file licenses. M5.1 links to
@@ -64,11 +71,20 @@ is claimed by automated tests.
 
 ## Installing or updating local dictionary data
 
-Download the desired current JSONL exports directly from Kaikki in accordance
-with their terms. For Level 1 definitions, use both the English Wiktionary
-edition for English entries and the German Wiktionary edition for German
-entries. An English-edition definition of a German word is not presented as a
-German monolingual definition.
+Download the desired current JSONL gzip exports directly from Kaikki in
+accordance with their terms. The supported edition exports are:
+
+- English Wiktionary edition:
+  `https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz`
+- German Wiktionary edition:
+  `https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz`
+
+The importer decompresses these files as streams; no expanded JSONL copy is
+needed. Each raw edition contains entries for multiple languages. The English
+source therefore imports only `lang_code == "en"`, and the German source only
+`lang_code == "de"`. All mismatched entries are read to validate the complete
+gzip stream but are excluded from SQLite. This ensures an English-edition
+definition of a German word is not presented as German monolingual content.
 
 Build one atomic index from both files:
 
@@ -76,20 +92,22 @@ Build one atomic index from both files:
 cd backend
 ../.venv/bin/python scripts/import_kaikki_dictionary.py \
   --database storage/dictionary.sqlite3 \
-  --content-license "CC BY-SA 3.0 or GFDL" \
-  --english-input /path/to/english-edition.jsonl \
-  --english-source-url https://kaikki.org/dictionary/ \
-  --german-input /path/to/german-edition.jsonl \
-  --german-source-url https://kaikki.org/dewiktionary/
+  --content-license "CC BY-SA 4.0" \
+  --english-input /path/to/english-raw-wiktextract-data.jsonl.gz \
+  --english-source-url https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz \
+  --german-input /path/to/german-raw-wiktextract-data.jsonl.gz \
+  --german-source-url https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz
 ```
 
-Use the actual current license label published for the downloaded editions;
-the value above reflects the upstream Wiktextract/Wiktionary notice inspected
-during M5.1 and must be rechecked when the dump terms change.
+Reconfirm the label on the current Kaikki/Wiktionary source notices immediately
+before the real import. The command will not silently substitute a historical
+label.
 
 The default runtime location is `backend/storage/dictionary.sqlite3`. Set the
 non-secret `DICTIONARY_DB_PATH` to use another path. Re-run the same command to
-update data; an invalid JSONL build leaves the previous database untouched.
+update data. Invalid JSON, corrupt gzip data, a truncated gzip trailer, or a
+decompression checksum failure aborts the build, removes the temporary index,
+and leaves the previous database untouched.
 The database lives under ignored runtime storage and must not be committed.
 
 ## Lookup, morphology, and contextual selection
