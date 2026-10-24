@@ -1,7 +1,9 @@
+import gzip
 import json
 import re
 import sqlite3
 import unicodedata
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -9,7 +11,6 @@ from urllib.parse import urlparse
 
 
 SCHEMA_VERSION = 1
-CONTENT_LICENSE = "CC BY-SA 3.0 or GFDL"
 SOURCE_NAME = "Wiktionary data extracted by Wiktextract/Kaikki"
 _LEXICAL = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.UNICODE)
 
@@ -187,13 +188,19 @@ def _strings(values: object, *, limit: int, max_length: int) -> list[str]:
     return output
 
 
+def _open_dictionary_source(input_path: Path):
+    if input_path.suffix.casefold() == ".gz":
+        return gzip.open(input_path, mode="rt", encoding="utf-8")
+    return input_path.open(encoding="utf-8")
+
+
 def import_kaikki_sources(
     sources: Iterable[tuple[Path, str, str]],
     database_path: Path,
     *,
-    content_license: str = CONTENT_LICENSE,
+    content_license: str,
 ) -> int:
-    """Atomically stream one or more edition-tagged JSONL files into SQLite."""
+    """Atomically stream edition-tagged JSONL or JSONL gzip files into SQLite."""
     source_values = list(sources)
     if not source_values:
         raise ValueError("At least one dictionary source is required")
@@ -215,68 +222,41 @@ def import_kaikki_sources(
         )
         connection.execute("INSERT INTO metadata VALUES ('content_license', ?)", (content_license,))
         for input_path, edition_language, source_url in source_values:
-            with input_path.open(encoding="utf-8") as source:
-                for line_number, line in enumerate(source, start=1):
-                    if not line.strip():
-                        continue
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(f"Invalid JSON on line {line_number}") from exc
-                    language = value.get("lang_code")
-                    lemma = value.get("word")
-                    if language not in {"en", "de"} or not isinstance(lemma, str):
-                        continue
-                    lemma = lemma.strip()
-                    normalized = normalize_lexical(lemma)
-                    if not normalized or len(lemma) > 200:
-                        continue
-                    pos = value.get("pos") if isinstance(value.get("pos"), str) else None
-                    fallback_source = f"https://{edition_language}.wiktionary.org/wiki/{lemma.replace(' ', '_')}"
-                    entry_source = safe_dictionary_source_url(
-                        value.get("source_url"), fallback=fallback_source
-                    )
-                    cursor = connection.execute(
-                        """INSERT INTO entries(
-                            language, lemma, normalized_lemma, part_of_speech,
-                            definition_language, source_url, source_name, license
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (language, lemma, normalized, pos, edition_language, entry_source, SOURCE_NAME, content_license),
-                    )
-                    entry_id = int(cursor.lastrowid)
-
-                    translation_records: list[tuple[str, str, str]] = []
-                    for translation in value.get("translations", []):
-                        if not isinstance(translation, dict):
+            try:
+                with _open_dictionary_source(input_path) as source:
+                    for line_number, line in enumerate(source, start=1):
+                        if not line.strip():
                             continue
-                        code = _translation_code(
-                            translation.get("code")
-                            or translation.get("lang_code")
-                            or translation.get("lang")
+                        try:
+                            value = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(
+                                f"Invalid JSON in {input_path.name} on line {line_number}"
+                            ) from exc
+                        language = value.get("lang_code")
+                        lemma = value.get("word")
+                        if language != edition_language or not isinstance(lemma, str):
+                            continue
+                        lemma = lemma.strip()
+                        normalized = normalize_lexical(lemma)
+                        if not normalized or len(lemma) > 200:
+                            continue
+                        pos = value.get("pos") if isinstance(value.get("pos"), str) else None
+                        fallback_source = f"https://{edition_language}.wiktionary.org/wiki/{lemma.replace(' ', '_')}"
+                        entry_source = safe_dictionary_source_url(
+                            value.get("source_url"), fallback=fallback_source
                         )
-                        word = translation.get("word")
-                        if code and isinstance(word, str) and 0 < len(word.strip()) <= 500:
-                            hint = translation.get("sense")
-                            translation_records.append((
-                                code,
-                                word.strip(),
-                                hint.strip() if isinstance(hint, str) else "",
-                            ))
+                        cursor = connection.execute(
+                            """INSERT INTO entries(
+                                language, lemma, normalized_lemma, part_of_speech,
+                                definition_language, source_url, source_name, license
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (language, lemma, normalized, pos, edition_language, entry_source, SOURCE_NAME, content_license),
+                        )
+                        entry_id = int(cursor.lastrowid)
 
-                    senses = value.get("senses") if isinstance(value.get("senses"), list) else []
-                    valid_sense_count = sum(
-                        bool(_strings(sense.get("glosses"), limit=1, max_length=2_000))
-                        for sense in senses if isinstance(sense, dict)
-                    )
-                    sense_index = 0
-                    for sense in senses:
-                        if not isinstance(sense, dict):
-                            continue
-                        definitions = _strings(sense.get("glosses"), limit=3, max_length=2_000)
-                        if not definitions:
-                            continue
-                        local_records = list(translation_records)
-                        for translation in sense.get("translations", []):
+                        translation_records: list[tuple[str, str, str]] = []
+                        for translation in value.get("translations", []):
                             if not isinstance(translation, dict):
                                 continue
                             code = _translation_code(
@@ -285,70 +265,104 @@ def import_kaikki_sources(
                                 or translation.get("lang")
                             )
                             word = translation.get("word")
-                            if code and isinstance(word, str) and word.strip():
-                                local_records.append((code, word.strip(), definitions[0]))
-                        translations = _sense_translation_values(
-                            local_records,
-                            definitions[0],
-                            sense_count=valid_sense_count,
+                            if code and isinstance(word, str) and 0 < len(word.strip()) <= 500:
+                                hint = translation.get("sense")
+                                translation_records.append((
+                                    code,
+                                    word.strip(),
+                                    hint.strip() if isinstance(hint, str) else "",
+                                ))
+
+                        senses = value.get("senses") if isinstance(value.get("senses"), list) else []
+                        valid_sense_count = sum(
+                            bool(_strings(sense.get("glosses"), limit=1, max_length=2_000))
+                            for sense in senses if isinstance(sense, dict)
                         )
-                        examples: list[str] = []
-                        for example in sense.get("examples", []):
-                            if isinstance(example, dict):
-                                text = example.get("text")
-                                if isinstance(text, str) and 0 < len(text.strip()) <= 2_000:
-                                    examples.append(text.strip())
-                            if len(examples) >= 5:
-                                break
-                        connection.execute(
-                            "INSERT INTO senses VALUES (?, ?, ?, ?, ?)",
-                            (
-                                entry_id,
-                                sense_index,
+                        sense_index = 0
+                        for sense in senses:
+                            if not isinstance(sense, dict):
+                                continue
+                            definitions = _strings(sense.get("glosses"), limit=3, max_length=2_000)
+                            if not definitions:
+                                continue
+                            local_records = list(translation_records)
+                            for translation in sense.get("translations", []):
+                                if not isinstance(translation, dict):
+                                    continue
+                                code = _translation_code(
+                                    translation.get("code")
+                                    or translation.get("lang_code")
+                                    or translation.get("lang")
+                                )
+                                word = translation.get("word")
+                                if code and isinstance(word, str) and word.strip():
+                                    local_records.append((code, word.strip(), definitions[0]))
+                            translations = _sense_translation_values(
+                                local_records,
                                 definitions[0],
-                                json.dumps(examples, ensure_ascii=False),
-                                json.dumps(translations, ensure_ascii=False),
-                            ),
-                        )
-                        sense_index += 1
-
-                    forms_seen: set[str] = set()
-                    for form in value.get("forms", []):
-                        if not isinstance(form, dict) or not isinstance(form.get("form"), str):
-                            continue
-                        text = form["form"].strip()
-                        normalized_form = normalize_lexical(text)
-                        if not normalized_form or normalized_form == normalized or normalized_form in forms_seen:
-                            continue
-                        if len(text) > 300:
-                            continue
-                        forms_seen.add(normalized_form)
-                        form_cursor = connection.execute(
-                            "INSERT INTO forms(entry_id, form, normalized_form, tags_json) VALUES (?, ?, ?, ?)",
-                            (entry_id, text, normalized_form, json.dumps(form.get("tags", []), ensure_ascii=False)),
-                        )
-                        for position, component in enumerate(normalized_form.split()):
-                            connection.execute(
-                                "INSERT INTO form_components VALUES (?, ?, ?)",
-                                (int(form_cursor.lastrowid), component, position),
+                                sense_count=valid_sense_count,
                             )
+                            examples: list[str] = []
+                            for example in sense.get("examples", []):
+                                if isinstance(example, dict):
+                                    text = example.get("text")
+                                    if isinstance(text, str) and 0 < len(text.strip()) <= 2_000:
+                                        examples.append(text.strip())
+                                if len(examples) >= 5:
+                                    break
+                            connection.execute(
+                                "INSERT INTO senses VALUES (?, ?, ?, ?, ?)",
+                                (
+                                    entry_id,
+                                    sense_index,
+                                    definitions[0],
+                                    json.dumps(examples, ensure_ascii=False),
+                                    json.dumps(translations, ensure_ascii=False),
+                                ),
+                            )
+                            sense_index += 1
 
-                    pronunciation_index = 0
-                    for sound in value.get("sounds", []):
-                        if not isinstance(sound, dict):
-                            continue
-                        ipa = sound.get("ipa") if isinstance(sound.get("ipa"), str) else None
-                        audio_url = safe_wikimedia_audio_url(sound.get("mp3_url") or sound.get("ogg_url"))
-                        if not ipa and not audio_url:
-                            continue
-                        tags = _strings(sound.get("tags"), limit=4, max_length=50)
-                        accent = ", ".join(tags) if tags else ("Standard German" if language == "de" else "Unspecified")
-                        connection.execute(
-                            "INSERT INTO pronunciations VALUES (?, ?, ?, ?, ?)",
-                            (entry_id, pronunciation_index, ipa, accent, audio_url),
-                        )
-                        pronunciation_index += 1
-                    count += 1
+                        forms_seen: set[str] = set()
+                        for form in value.get("forms", []):
+                            if not isinstance(form, dict) or not isinstance(form.get("form"), str):
+                                continue
+                            text = form["form"].strip()
+                            normalized_form = normalize_lexical(text)
+                            if not normalized_form or normalized_form == normalized or normalized_form in forms_seen:
+                                continue
+                            if len(text) > 300:
+                                continue
+                            forms_seen.add(normalized_form)
+                            form_cursor = connection.execute(
+                                "INSERT INTO forms(entry_id, form, normalized_form, tags_json) VALUES (?, ?, ?, ?)",
+                                (entry_id, text, normalized_form, json.dumps(form.get("tags", []), ensure_ascii=False)),
+                            )
+                            for position, component in enumerate(normalized_form.split()):
+                                connection.execute(
+                                    "INSERT INTO form_components VALUES (?, ?, ?)",
+                                    (int(form_cursor.lastrowid), component, position),
+                                )
+
+                        pronunciation_index = 0
+                        for sound in value.get("sounds", []):
+                            if not isinstance(sound, dict):
+                                continue
+                            ipa = sound.get("ipa") if isinstance(sound.get("ipa"), str) else None
+                            audio_url = safe_wikimedia_audio_url(sound.get("mp3_url") or sound.get("ogg_url"))
+                            if not ipa and not audio_url:
+                                continue
+                            tags = _strings(sound.get("tags"), limit=4, max_length=50)
+                            accent = ", ".join(tags) if tags else ("Standard German" if language == "de" else "Unspecified")
+                            connection.execute(
+                                "INSERT INTO pronunciations VALUES (?, ?, ?, ?, ?)",
+                                (entry_id, pronunciation_index, ipa, accent, audio_url),
+                            )
+                            pronunciation_index += 1
+                        count += 1
+            except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+                raise ValueError(
+                    f"Corrupt or incomplete gzip dictionary source: {input_path.name}"
+                ) from exc
         connection.commit()
     except Exception:
         connection.close()
@@ -367,10 +381,13 @@ def import_kaikki_jsonl(
     *,
     edition_language: str,
     source_url: str,
+    content_license: str,
 ) -> int:
     """Backward-compatible one-source import helper used by focused tests."""
     return import_kaikki_sources(
-        [(input_path, edition_language, source_url)], database_path
+        [(input_path, edition_language, source_url)],
+        database_path,
+        content_license=content_license,
     )
 
 

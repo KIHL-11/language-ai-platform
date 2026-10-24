@@ -10,7 +10,10 @@ from services.dictionary.provider import import_kaikki_sources  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build the local Language AI dictionary index from Kaikki/Wiktextract JSONL.",
+        description=(
+            "Build the local Language AI dictionary index from Kaikki/Wiktextract "
+            "JSONL or JSONL gzip files."
+        ),
     )
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument(
@@ -18,9 +21,9 @@ def main() -> int:
         required=True,
         help="Verified content-license label for the downloaded dictionary editions",
     )
-    parser.add_argument("--english-input", type=Path)
+    parser.add_argument("--english-input", type=Path, help="English-edition JSONL or .jsonl.gz")
     parser.add_argument("--english-source-url")
-    parser.add_argument("--german-input", type=Path)
+    parser.add_argument("--german-input", type=Path, help="German-edition JSONL or .jsonl.gz")
     parser.add_argument("--german-source-url")
     args = parser.parse_args()
     sources = []
