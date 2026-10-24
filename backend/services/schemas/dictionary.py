@@ -18,6 +18,7 @@ class DictionaryLookupRequest(DictionaryModel):
     word: str = Field(min_length=1, max_length=100)
     sentence: str = Field(default="", max_length=2_000)
     target_language: Literal["zh-CN"] = "zh-CN"
+    include_inflections: bool = False
 
     @field_validator("word")
     @classmethod

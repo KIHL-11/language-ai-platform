@@ -22,8 +22,13 @@ from services.dictionary.service import (  # noqa: E402
 
 CASES = (
     ("en", "go", "We go to work by train."),
+    ("en", "went", "We went home."),
+    ("en", "children", "The children laughed."),
+    ("en", "bank", "We sat beside the river bank."),
     ("de", "ging", "Er ging nach Hause."),
     ("de", "Hallo", "Hallo, wie geht es dir?"),
+    ("de", "Häuser", "Die Häuser stehen am Fluss."),
+    ("de", "herausfinden", "Wir wollen herausfinden, was passiert."),
 )
 
 
@@ -183,6 +188,26 @@ def diagnose(database: Path) -> list[dict[str, object]]:
         connection.execute("PRAGMA query_only = ON")
         for language, surface, sentence in CASES:
             started = time.perf_counter()
+            selected = service.lookup(language, surface, sentence)
+            core_cold_elapsed_ms = round(
+                (time.perf_counter() - started) * 1_000, 2
+            )
+            started = time.perf_counter()
+            service.lookup(language, surface, sentence)
+            core_hot_elapsed_ms = round(
+                (time.perf_counter() - started) * 1_000, 2
+            )
+            started = time.perf_counter()
+            detailed = service.lookup(
+                language,
+                surface,
+                sentence,
+                include_inflections=True,
+            )
+            optional_forms_elapsed_ms = round(
+                (time.perf_counter() - started) * 1_000, 2
+            )
+            started = time.perf_counter()
             entries = provider.lookup(language, surface, sentence)
             provider_elapsed_ms = round((time.perf_counter() - started) * 1_000, 2)
             applicable = {
@@ -217,15 +242,15 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                     ),
                     "selected_definition": candidate.sense.definition if candidate else None,
                 })
-            started = time.perf_counter()
-            selected = service.lookup(language, surface, sentence)
-            lookup_elapsed_ms = round((time.perf_counter() - started) * 1_000, 2)
             output.append({
                 "language": language,
                 "surface": surface,
                 "sentence": sentence,
+                "core_cold_elapsed_ms": core_cold_elapsed_ms,
+                "core_hot_elapsed_ms": core_hot_elapsed_ms,
+                "optional_forms_elapsed_ms": optional_forms_elapsed_ms,
+                "optional_inflection_count": len(detailed.inflections),
                 "provider_elapsed_ms": provider_elapsed_ms,
-                "lookup_elapsed_ms": lookup_elapsed_ms,
                 "provider_candidate_count": len(entries),
                 "top_rank_tie_count": len(top_ranked),
                 "top_rank_distinct_definition_count": len(top_definitions),
@@ -233,8 +258,10 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                     len(top_ranked) - len(top_definitions)
                 ),
                 "candidates": candidates,
-                "source_entries": _source_entry_evidence(
-                    connection, language, surface
+                "source_entries": (
+                    _source_entry_evidence(connection, language, surface)
+                    if surface.casefold() == "hallo"
+                    else []
                 ),
                 "selected": {
                     "lemma": selected.lemma,

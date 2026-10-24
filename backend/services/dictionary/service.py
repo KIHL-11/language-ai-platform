@@ -312,16 +312,21 @@ class DictionaryService:
         return "; ".join(values[:3]) if values else None
 
     @lru_cache(maxsize=1_024)
-    def _lookup_cached(self, language: str, surface: str, sentence: str) -> DictionaryLookupResponse:
+    def _lookup_cached(
+        self,
+        language: str,
+        surface: str,
+        sentence: str,
+    ) -> tuple[DictionaryLookupResponse, int | None]:
         if not self.provider.configured:
-            return self._empty(surface, language, sentence, "not_configured")
+            return self._empty(surface, language, sentence, "not_configured"), None
         entries = self.provider.lookup(language, surface, sentence)
         if not entries:
-            return self._empty(surface, language, sentence, "not_found")
+            return self._empty(surface, language, sentence, "not_found"), None
 
         candidate_entries = self._candidate_entries(entries, sentence, surface)
         if not candidate_entries:
-            return self._empty(surface, language, sentence, "not_found")
+            return self._empty(surface, language, sentence, "not_found"), None
         ranked, selection_method, ambiguous, all_ranked = self._select_candidate(
             candidate_entries, sentence, surface
         )
@@ -332,10 +337,6 @@ class DictionaryService:
         cross = self._translation(selected, cross_language)
         chinese = self._translation(selected, "zh-CN")
         pronunciations = self.pronunciation_provider.options(entry)
-        forms = entry.forms
-        load_forms = getattr(self.provider, "forms_for_entry", None)
-        if not forms and callable(load_forms):
-            forms = load_forms(entry.entry_id)
         alternatives: list[DictionarySense] = []
         seen_senses = {self._sense_identity(ranked)} if ranked else set()
         for candidate in all_ranked:
@@ -378,14 +379,14 @@ class DictionaryService:
                 contextual_sense=definition,
                 contextual_explanation=None,
             ),
-            inflections=list(forms)[:30],
+            inflections=list(entry.forms)[:30],
             examples=examples,
             alternate_senses=alternatives,
             source_attribution=[
                 DictionaryAttribution(source=source, source_url=url, license=license)
                 for source, url, license in attributions
             ],
-        )
+        ), entry.entry_id
 
     def _empty(self, surface: str, language: str, sentence: str, status: str) -> DictionaryLookupResponse:
         cross = "de" if language == "en" else "en"
@@ -405,10 +406,25 @@ class DictionaryService:
             ),
         )
 
-    def lookup(self, language: str, word: str, sentence: str) -> DictionaryLookupResponse:
+    def lookup(
+        self,
+        language: str,
+        word: str,
+        sentence: str,
+        *,
+        include_inflections: bool = False,
+    ) -> DictionaryLookupResponse:
         normalized_word = normalize_lexical(word)
         normalized_sentence = unicodedata.normalize("NFKC", sentence).casefold().strip()
-        cached = self._lookup_cached(language, normalized_word, normalized_sentence)
+        cached, entry_id = self._lookup_cached(
+            language, normalized_word, normalized_sentence
+        )
+        if include_inflections and entry_id is not None and not cached.inflections:
+            load_forms = getattr(self.provider, "forms_for_entry", None)
+            if callable(load_forms):
+                cached = cached.model_copy(
+                    update={"inflections": list(load_forms(entry_id))[:30]}
+                )
         return cached.model_copy(
             update={
                 "query": word,

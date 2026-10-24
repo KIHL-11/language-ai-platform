@@ -44,6 +44,7 @@ function isDictionaryLookup(value: unknown): value is DictionaryLookup {
 export async function lookupDictionary(
   selection: DictionarySelection,
   signal?: AbortSignal,
+  includeInflections = false,
 ): Promise<DictionaryLookup> {
   const response = await fetch(`${API_BASE_URL}/api/dictionary/lookup`, {
     method: 'POST',
@@ -53,6 +54,7 @@ export async function lookupDictionary(
       word: selection.word,
       sentence: selection.sentence,
       target_language: 'zh-CN',
+      include_inflections: includeInflections,
     }),
     signal,
   })

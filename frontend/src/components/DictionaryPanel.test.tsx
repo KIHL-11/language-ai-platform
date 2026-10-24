@@ -59,6 +59,16 @@ describe('DictionaryPanel', () => {
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('Audio', FakeAudio)
   })
+
+  it('renders the anchored shell and loading state before lookup completes', () => {
+    fetchMock.mockReturnValue(new Promise(() => undefined))
+
+    render(panel())
+
+    expect(screen.getByLabelText('Contextual dictionary')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Sentence' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Looking up Sentence…')
+  })
   afterEach(() => {
     anchors.splice(0).forEach((anchor) => anchor.remove())
     vi.unstubAllGlobals()
@@ -111,6 +121,30 @@ describe('DictionaryPanel', () => {
     expect(screen.getByRole('link', { name: /Wiktionary data/ })).toHaveAttribute('href', 'https://en.wiktionary.org/wiki/sentence')
     await user.click(screen.getByRole('button', { name: 'Close dictionary' }))
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('loads optional inflections only when More is expanded', async () => {
+    const user = userEvent.setup()
+    let resolveDetails: ((value: ReturnType<typeof response>) => void) | undefined
+    fetchMock
+      .mockResolvedValueOnce(response({ ...dictionaryEntry, inflections: [] }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveDetails = resolve }))
+    render(panel())
+    await screen.findByText('A group of words that expresses a complete thought.')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      include_inflections: false,
+    })
+    await user.click(screen.getByText('More'))
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading inflections…')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+      include_inflections: true,
+    })
+    resolveDetails?.(response(dictionaryEntry))
+    expect(await screen.findByText('sentences')).toBeInTheDocument()
   })
 
   it('plays dictionary recordings and requests TTS only for an explicit fallback click', async () => {

@@ -201,7 +201,17 @@ def test_display_forms_are_loaded_only_for_the_selected_entry():
     result = service.lookup("en", "bank", "We sat beside the river bank.")
 
     assert result.lemma == "bank"
-    assert result.inflections == ["form-for-2"]
+    assert result.inflections == []
+    assert provider.form_requests == []
+
+    detailed = service.lookup(
+        "en",
+        "bank",
+        "We sat beside the river bank.",
+        include_inflections=True,
+    )
+
+    assert detailed.inflections == ["form-for-2"]
     assert provider.form_requests == [2]
 
 
@@ -441,14 +451,21 @@ def test_quality_diagnostics_are_read_only_and_report_indexed_query_plans(dictio
     after = database.stat()
     assert [(value["language"], value["surface"]) for value in results] == [
         ("en", "go"),
+        ("en", "went"),
+        ("en", "children"),
+        ("en", "bank"),
         ("de", "ging"),
         ("de", "Hallo"),
+        ("de", "Häuser"),
+        ("de", "herausfinden"),
     ]
     assert before.st_size == after.st_size
     assert before.st_mtime_ns == after.st_mtime_ns
     for result in results:
         assert result["provider_elapsed_ms"] >= 0
-        assert result["lookup_elapsed_ms"] >= 0
+        assert result["core_cold_elapsed_ms"] >= 0
+        assert result["core_hot_elapsed_ms"] >= 0
+        assert result["optional_forms_elapsed_ms"] >= 0
         assert result["provider_candidate_count"] <= 40
         assert set(result["queries"]) == {
             "exact", "inflection", "separated_component", "hydration"
@@ -689,6 +706,16 @@ def test_lookup_api_validates_input_and_does_not_touch_learning_stores(dictionar
     })
     assert response.status_code == 200
     assert response.json()["lemma"] == "Haus"
+    assert response.json()["inflections"] == []
+    detailed = client.post("/api/dictionary/lookup", json={
+        "language": "de",
+        "word": "Häuser",
+        "sentence": "Die Häuser stehen am Fluss.",
+        "target_language": "zh-CN",
+        "include_inflections": True,
+    })
+    assert detailed.status_code == 200
+    assert "Häuser" in detailed.json()["inflections"]
     assert client.post("/api/dictionary/lookup", json={
         "language": "de", "word": "!!!", "sentence": ""
     }).status_code == 422
