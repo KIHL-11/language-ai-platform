@@ -37,6 +37,34 @@ _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _TRADITIONAL_ONLY = set("國學體銀兒門車馬風書話語東萬與為這個們來時會見長樂後裡麼說")
 _SIMPLIFIED_ONLY = set("国学体银儿门车马风书话语东万与为这个们来时会见长乐后里么说")
 _INTERJECTION_POS = {"intj", "interj", "interjection"}
+_GREETING_PHRASE_POS = {"phrase"}
+_GREETING_DEFINITION_MARKERS = {
+    "begrüß",
+    "begrüss",
+    "greet",
+    "grüß",
+    "gruss",
+    "gruß",
+    "salutation",
+}
+_NOUN_DETERMINERS = {
+    "a",
+    "an",
+    "das",
+    "der",
+    "die",
+    "dies",
+    "diese",
+    "dieser",
+    "dieses",
+    "ein",
+    "eine",
+    "einer",
+    "eines",
+    "jenes",
+    "the",
+}
+_MAX_ALTERNATE_SENSES = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +74,18 @@ class _SenseCandidate:
     entry_index: int
     sense_index: int
     lexical_score: int
-    part_of_speech_score: int
+    greeting_score: int
+    noun_context_score: int
     morphology_score: int
 
     @property
-    def rank(self) -> tuple[int, int, int]:
-        return self.lexical_score, self.part_of_speech_score, self.morphology_score
+    def rank(self) -> tuple[int, int, int, int]:
+        return (
+            self.greeting_score,
+            self.noun_context_score,
+            self.lexical_score,
+            self.morphology_score,
+        )
 
 
 def default_dictionary_path() -> Path:
@@ -106,15 +140,78 @@ class DictionaryService:
         return len(context & evidence)
 
     @staticmethod
-    def _part_of_speech_score(entry: ProviderEntry, sentence: str, query: str) -> int:
-        if (entry.part_of_speech or "").casefold() not in _INTERJECTION_POS:
+    def _greeting_score(
+        entry: ProviderEntry,
+        sense: ProviderSense,
+        sentence: str,
+        query: str,
+    ) -> int:
+        part_of_speech = (entry.part_of_speech or "").casefold()
+        if part_of_speech not in _INTERJECTION_POS | _GREETING_PHRASE_POS:
             return 0
         greeting = re.match(
             rf"^\s*{re.escape(query)}\s*[,!?:;]",
             sentence,
             flags=re.IGNORECASE,
         )
-        return 1 if greeting else 0
+        if not greeting:
+            return 0
+        if part_of_speech in _INTERJECTION_POS:
+            return 1
+        definition = unicodedata.normalize("NFKC", sense.definition).casefold()
+        return int(any(marker in definition for marker in _GREETING_DEFINITION_MARKERS))
+
+    @staticmethod
+    def _noun_context_score(
+        entry: ProviderEntry,
+        sentence: str,
+        query: str,
+    ) -> int:
+        if (entry.part_of_speech or "").casefold() not in {"noun", "name"}:
+            return 0
+        sentence_tokens = lexical_tokens(sentence)
+        query_tokens = lexical_tokens(query)
+        if len(query_tokens) != 1:
+            return 0
+        return int(any(
+            token == query_tokens[0]
+            and index > 0
+            and sentence_tokens[index - 1] in _NOUN_DETERMINERS
+            for index, token in enumerate(sentence_tokens)
+        ))
+
+    @staticmethod
+    def _phrase_matches_context(entry: ProviderEntry, sentence: str, query: str) -> bool:
+        lemma_tokens = lexical_tokens(entry.lemma)
+        if len(lemma_tokens) <= 1:
+            return True
+        query_tokens = lexical_tokens(query)
+        if query_tokens == lemma_tokens:
+            return True
+        sentence_tokens = lexical_tokens(sentence)
+        width = len(lemma_tokens)
+        return any(
+            sentence_tokens[index:index + width] == lemma_tokens
+            for index in range(len(sentence_tokens) - width + 1)
+        )
+
+    def _candidate_entries(
+        self,
+        entries: list[ProviderEntry],
+        sentence: str,
+        query: str,
+    ) -> list[ProviderEntry]:
+        applicable = [
+            entry
+            for entry in entries
+            if self._phrase_matches_context(entry, sentence, query)
+        ]
+        preferred = [
+            entry
+            for entry in applicable
+            if entry.definition_language == entry.language and entry.senses
+        ]
+        return preferred or applicable
 
     def _ranked_senses(
         self,
@@ -131,7 +228,10 @@ class DictionaryService:
                 lexical_score=self._sense_score(
                     sense.definition, sense.examples, sentence, query
                 ),
-                part_of_speech_score=self._part_of_speech_score(
+                greeting_score=self._greeting_score(
+                    entry, sense, sentence, query
+                ),
+                noun_context_score=self._noun_context_score(
                     entry, sentence, query
                 ),
                 morphology_score=(
@@ -173,12 +273,14 @@ class DictionaryService:
         ambiguous = len({self._sense_identity(value) for value in tied}) > 1
         if ambiguous:
             method = "ambiguous"
+        elif selected.greeting_score:
+            method = "part_of_speech"
         elif selected.lexical_score:
             method = "lexical_overlap"
-        elif selected.part_of_speech_score:
-            method = "part_of_speech"
         elif selected.morphology_score:
             method = "morphology"
+        elif selected.noun_context_score:
+            method = "part_of_speech"
         else:
             method = "source_order"
         return selected, method, ambiguous, ranked
@@ -217,12 +319,9 @@ class DictionaryService:
         if not entries:
             return self._empty(surface, language, sentence, "not_found")
 
-        preferred = [
-            value
-            for value in entries
-            if value.definition_language == language and value.senses
-        ]
-        candidate_entries = preferred or entries
+        candidate_entries = self._candidate_entries(entries, sentence, surface)
+        if not candidate_entries:
+            return self._empty(surface, language, sentence, "not_found")
         ranked, selection_method, ambiguous, all_ranked = self._select_candidate(
             candidate_entries, sentence, surface
         )
@@ -233,6 +332,10 @@ class DictionaryService:
         cross = self._translation(selected, cross_language)
         chinese = self._translation(selected, "zh-CN")
         pronunciations = self.pronunciation_provider.options(entry)
+        forms = entry.forms
+        load_forms = getattr(self.provider, "forms_for_entry", None)
+        if not forms and callable(load_forms):
+            forms = load_forms(entry.entry_id)
         alternatives: list[DictionarySense] = []
         seen_senses = {self._sense_identity(ranked)} if ranked else set()
         for candidate in all_ranked:
@@ -245,7 +348,11 @@ class DictionaryService:
                 examples=list(candidate.sense.examples),
                 source=candidate.entry.source_name,
             ))
-        lemma_candidates = list(dict.fromkeys(value.lemma for value in entries))[:20]
+            if len(alternatives) >= _MAX_ALTERNATE_SENSES:
+                break
+        lemma_candidates = list(dict.fromkeys(
+            value.lemma for value in candidate_entries
+        ))[:20]
         examples = list(selected.examples if selected else ())[:10]
         attributions = list(dict.fromkeys(
             (value.source_name, value.source_url, value.license)
@@ -271,7 +378,7 @@ class DictionaryService:
                 contextual_sense=definition,
                 contextual_explanation=None,
             ),
-            inflections=list(entry.forms)[:30],
+            inflections=list(forms)[:30],
             examples=examples,
             alternate_senses=alternatives,
             source_attribution=[

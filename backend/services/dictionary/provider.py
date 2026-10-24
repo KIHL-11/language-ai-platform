@@ -5,6 +5,7 @@ import sqlite3
 import unicodedata
 import zlib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Protocol
 from urllib.parse import urlparse
@@ -13,6 +14,11 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = 1
 SOURCE_NAME = "Wiktionary data extracted by Wiktextract/Kaikki"
 _LEXICAL = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.UNICODE)
+_ENTRY_MATCH_LIMIT = 20
+_SEPARATED_FORM_SCAN_LIMIT = 100
+_SENSE_LIMIT = 100
+_FORM_LIMIT = 30
+_PRONUNCIATION_LIMIT = 20
 
 
 def normalize_lexical(value: str) -> str:
@@ -414,42 +420,91 @@ class SQLiteDictionaryProvider:
         return connection
 
     @staticmethod
-    def _ordered_subsequence(components: list[str], sentence: list[str]) -> bool:
-        iterator = iter(sentence)
-        return all(any(value == component for value in iterator) for component in components)
+    def _contiguous_subsequence(components: list[str], sentence: list[str]) -> bool:
+        width = len(components)
+        return any(
+            sentence[index:index + width] == components
+            for index in range(len(sentence) - width + 1)
+        )
+
+    @staticmethod
+    def _greeting_context(surface: str, sentence: str) -> bool:
+        query = normalize_lexical(surface)
+        if not query:
+            return False
+        return bool(re.match(
+            rf"^\s*{re.escape(query)}\s*[,!?:;]",
+            unicodedata.normalize("NFKC", sentence).casefold(),
+        ))
+
+    @staticmethod
+    def _separated_form_matches(components: list[str], sentence: str) -> bool:
+        """Require the final particle at a clause boundary, not before its object."""
+        normalized_sentence = unicodedata.normalize("NFKC", sentence).casefold()
+        matches = list(_LEXICAL.finditer(normalized_sentence))
+        tokens = [match.group(0).replace("’", "'") for match in matches]
+        for start_index, token in enumerate(tokens):
+            if token != components[0]:
+                continue
+            component_index = 1
+            for token_index in range(start_index + 1, len(tokens)):
+                if tokens[token_index] != components[component_index]:
+                    continue
+                component_index += 1
+                if component_index != len(components):
+                    continue
+                tail = normalized_sentence[matches[token_index].end():]
+                if re.match(r"\s*(?:$|[,.!?:;])", tail):
+                    return True
+                break
+        return False
 
     def _entry_ids(self, connection: sqlite3.Connection, language: str, surface: str, sentence: str) -> list[tuple[int, str]]:
         normalized = normalize_lexical(surface)
+        greeting_context = self._greeting_context(surface, sentence)
         exact = connection.execute(
             """SELECT id FROM entries
                WHERE language = ? AND normalized_lemma = ?
-               ORDER BY id LIMIT 20""",
-            (language, normalized),
+               ORDER BY
+                   CASE WHEN ? AND lower(coalesce(part_of_speech, '')) IN ('intj', 'interj', 'interjection', 'phrase')
+                        THEN 0 ELSE 1 END,
+                   id
+               LIMIT ?""",
+            (language, normalized, greeting_context, _ENTRY_MATCH_LIMIT),
         ).fetchall()
         output: list[tuple[int, str]] = [(int(row["id"]), "lemma") for row in exact]
         forms = connection.execute(
             """SELECT DISTINCT entries.id FROM forms
                JOIN entries ON entries.id = forms.entry_id
                WHERE entries.language = ? AND forms.normalized_form = ?
-               ORDER BY entries.id LIMIT 20""",
-            (language, normalized),
+               ORDER BY entries.id LIMIT ?""",
+            (language, normalized, _ENTRY_MATCH_LIMIT),
         ).fetchall()
         output.extend((int(row["id"]), "inflection") for row in forms if int(row["id"]) not in {value[0] for value in output})
         sentence_tokens = lexical_tokens(sentence)
         if normalized and sentence_tokens:
             separated = connection.execute(
-                """SELECT forms.id AS form_id, forms.entry_id, forms.normalized_form
+                """SELECT forms.id AS form_id, forms.entry_id, forms.normalized_form,
+                          entries.normalized_lemma
                    FROM form_components JOIN forms ON forms.id = form_components.form_id
                    JOIN entries ON entries.id = forms.entry_id
                    WHERE entries.language = ? AND form_components.component = ?
-                   ORDER BY forms.entry_id, forms.id""",
-                (language, normalized),
+                   ORDER BY forms.entry_id, forms.id
+                   LIMIT ?""",
+                (language, normalized, _SEPARATED_FORM_SCAN_LIMIT),
             ).fetchall()
             known = {value[0] for value in output}
             for row in separated:
                 components = str(row["normalized_form"]).split()
                 entry_id = int(row["entry_id"])
-                if len(components) > 1 and entry_id not in known and self._ordered_subsequence(components, sentence_tokens):
+                if len(components) <= 1 or entry_id in known:
+                    continue
+                lemma_components = str(row["normalized_lemma"]).split()
+                if len(lemma_components) > 1:
+                    matches_context = self._contiguous_subsequence(components, sentence_tokens)
+                else:
+                    matches_context = self._separated_form_matches(components, sentence)
+                if matches_context:
                     output.append((entry_id, "separated_form"))
                     known.add(entry_id)
         return output[:40]
@@ -471,18 +526,15 @@ class SQLiteDictionaryProvider:
                         },
                     )
                     for value in connection.execute(
-                        "SELECT * FROM senses WHERE entry_id = ? ORDER BY sense_index", (entry_id,)
-                    )
-                )
-                forms = tuple(
-                    value["form"] for value in connection.execute(
-                        "SELECT form FROM forms WHERE entry_id = ? ORDER BY id LIMIT 30", (entry_id,)
+                        "SELECT * FROM senses WHERE entry_id = ? ORDER BY sense_index LIMIT ?",
+                        (entry_id, _SENSE_LIMIT),
                     )
                 )
                 pronunciations = tuple(
                     ProviderPronunciation(value["ipa"], value["accent"], value["audio_url"])
                     for value in connection.execute(
-                        "SELECT * FROM pronunciations WHERE entry_id = ? ORDER BY pronunciation_index", (entry_id,)
+                        "SELECT * FROM pronunciations WHERE entry_id = ? ORDER BY pronunciation_index LIMIT ?",
+                        (entry_id, _PRONUNCIATION_LIMIT),
                     )
                 )
                 output.append(ProviderEntry(
@@ -495,10 +547,24 @@ class SQLiteDictionaryProvider:
                     source_name=row["source_name"],
                     license=row["license"],
                     senses=senses,
-                    forms=forms,
+                    forms=(),
                     pronunciations=pronunciations,
                     match_kind=match_kind,
                 ))
             return output
+        finally:
+            connection.close()
+
+    @lru_cache(maxsize=512)
+    def forms_for_entry(self, entry_id: int) -> tuple[str, ...]:
+        """Load bounded display-only forms after ranking selects one entry."""
+        connection = self._connect()
+        try:
+            return tuple(
+                value["form"] for value in connection.execute(
+                    "SELECT form FROM forms WHERE entry_id = ? ORDER BY id LIMIT ?",
+                    (entry_id, _FORM_LIMIT),
+                )
+            )
         finally:
             connection.close()
