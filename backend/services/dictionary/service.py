@@ -37,6 +37,33 @@ _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _TRADITIONAL_ONLY = set("國學體銀兒門車馬風書話語東萬與為這個們來時會見長樂後裡麼說")
 _SIMPLIFIED_ONLY = set("国学体银儿门车马风书话语东万与为这个们来时会见长乐后里么说")
 _INTERJECTION_POS = {"intj", "interj", "interjection"}
+_GREETING_PHRASE_POS = {"phrase"}
+_GREETING_DEFINITION_MARKERS = {
+    "begrüß",
+    "begrüss",
+    "greet",
+    "grüß",
+    "gruss",
+    "gruß",
+    "salutation",
+}
+_NOUN_DETERMINERS = {
+    "a",
+    "an",
+    "das",
+    "der",
+    "die",
+    "dies",
+    "diese",
+    "dieser",
+    "dieses",
+    "ein",
+    "eine",
+    "einer",
+    "eines",
+    "jenes",
+    "the",
+}
 _MAX_ALTERNATE_SENSES = 50
 
 
@@ -47,12 +74,18 @@ class _SenseCandidate:
     entry_index: int
     sense_index: int
     lexical_score: int
-    interjection_score: int
+    greeting_score: int
+    noun_context_score: int
     morphology_score: int
 
     @property
-    def rank(self) -> tuple[int, int, int]:
-        return self.interjection_score, self.lexical_score, self.morphology_score
+    def rank(self) -> tuple[int, int, int, int]:
+        return (
+            self.greeting_score,
+            self.noun_context_score,
+            self.lexical_score,
+            self.morphology_score,
+        )
 
 
 def default_dictionary_path() -> Path:
@@ -107,15 +140,45 @@ class DictionaryService:
         return len(context & evidence)
 
     @staticmethod
-    def _interjection_score(entry: ProviderEntry, sentence: str, query: str) -> int:
-        if (entry.part_of_speech or "").casefold() not in _INTERJECTION_POS:
+    def _greeting_score(
+        entry: ProviderEntry,
+        sense: ProviderSense,
+        sentence: str,
+        query: str,
+    ) -> int:
+        part_of_speech = (entry.part_of_speech or "").casefold()
+        if part_of_speech not in _INTERJECTION_POS | _GREETING_PHRASE_POS:
             return 0
         greeting = re.match(
             rf"^\s*{re.escape(query)}\s*[,!?:;]",
             sentence,
             flags=re.IGNORECASE,
         )
-        return 1 if greeting else 0
+        if not greeting:
+            return 0
+        if part_of_speech in _INTERJECTION_POS:
+            return 1
+        definition = unicodedata.normalize("NFKC", sense.definition).casefold()
+        return int(any(marker in definition for marker in _GREETING_DEFINITION_MARKERS))
+
+    @staticmethod
+    def _noun_context_score(
+        entry: ProviderEntry,
+        sentence: str,
+        query: str,
+    ) -> int:
+        if (entry.part_of_speech or "").casefold() not in {"noun", "name"}:
+            return 0
+        sentence_tokens = lexical_tokens(sentence)
+        query_tokens = lexical_tokens(query)
+        if len(query_tokens) != 1:
+            return 0
+        return int(any(
+            token == query_tokens[0]
+            and index > 0
+            and sentence_tokens[index - 1] in _NOUN_DETERMINERS
+            for index, token in enumerate(sentence_tokens)
+        ))
 
     @staticmethod
     def _phrase_matches_context(entry: ProviderEntry, sentence: str, query: str) -> bool:
@@ -165,7 +228,10 @@ class DictionaryService:
                 lexical_score=self._sense_score(
                     sense.definition, sense.examples, sentence, query
                 ),
-                interjection_score=self._interjection_score(
+                greeting_score=self._greeting_score(
+                    entry, sense, sentence, query
+                ),
+                noun_context_score=self._noun_context_score(
                     entry, sentence, query
                 ),
                 morphology_score=(
@@ -207,12 +273,14 @@ class DictionaryService:
         ambiguous = len({self._sense_identity(value) for value in tied}) > 1
         if ambiguous:
             method = "ambiguous"
-        elif selected.interjection_score:
+        elif selected.greeting_score:
             method = "part_of_speech"
         elif selected.lexical_score:
             method = "lexical_overlap"
         elif selected.morphology_score:
             method = "morphology"
+        elif selected.noun_context_score:
+            method = "part_of_speech"
         else:
             method = "source_order"
         return selected, method, ambiguous, ranked

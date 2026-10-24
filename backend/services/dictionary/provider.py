@@ -466,7 +466,7 @@ class SQLiteDictionaryProvider:
             """SELECT id FROM entries
                WHERE language = ? AND normalized_lemma = ?
                ORDER BY
-                   CASE WHEN ? AND lower(coalesce(part_of_speech, '')) IN ('intj', 'interj', 'interjection')
+                   CASE WHEN ? AND lower(coalesce(part_of_speech, '')) IN ('intj', 'interj', 'interjection', 'phrase')
                         THEN 0 ELSE 1 END,
                    id
                LIMIT ?""",

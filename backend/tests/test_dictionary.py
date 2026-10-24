@@ -275,6 +275,51 @@ def test_sentence_initial_greeting_prefers_interjection_part_of_speech():
     assert result.status == "found"
 
 
+def test_real_source_phrase_greeting_beats_noun_only_in_greeting_context():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(
+            1,
+            "Hallo",
+            "de",
+            "Ein lauter Zuruf.",
+            part_of_speech="noun",
+        ),
+        provider_entry(
+            2,
+            "hallo",
+            "de",
+            "Eine Begrüßungsformel.",
+            part_of_speech="phrase",
+        ),
+    ]))
+
+    greeting = service.lookup("de", "Hallo", "Hallo, wie geht es dir?")
+    noun = service.lookup("de", "Hallo", "Das Hallo war laut.")
+
+    assert greeting.part_of_speech == "phrase"
+    assert greeting.explanations.monolingual.value == "Eine Begrüßungsformel."
+    assert greeting.context.selection_method == "part_of_speech"
+    assert noun.part_of_speech == "noun"
+    assert noun.explanations.monolingual.value == "Ein lauter Zuruf."
+
+
+def test_sentence_initial_punctuation_does_not_promote_unrelated_phrase():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "Hallo", "de", "Ein lauter Zuruf."),
+        provider_entry(
+            2,
+            "hallo",
+            "de",
+            "Eine feste Redewendung.",
+            part_of_speech="phrase",
+        ),
+    ]))
+
+    result = service.lookup("de", "Hallo", "Hallo, das ist ungewöhnlich.")
+
+    assert result.part_of_speech == "noun"
+
+
 def test_single_word_lookup_rejects_unmatched_multiword_lemma_but_keeps_real_phrase():
     service = DictionaryService(FakeDictionaryProvider([
         provider_entry(1, "go", "en", "To move from one place to another.", part_of_speech="verb"),

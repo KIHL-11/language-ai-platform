@@ -63,7 +63,8 @@ def test_installed_dictionary_lemma_resolution(
             "applicable": entry.entry_id in applicable,
             "lexical_score": candidate.lexical_score if candidate else None,
             "morphology_score": candidate.morphology_score if candidate else None,
-            "interjection_score": candidate.interjection_score if candidate else None,
+            "greeting_score": candidate.greeting_score if candidate else None,
+            "noun_context_score": candidate.noun_context_score if candidate else None,
             "selected_definition": candidate.sense.definition if candidate else None,
         })
     result = real_dictionary.lookup(language, surface, sentence)
@@ -90,10 +91,16 @@ def test_installed_dictionary_context_and_translation_quality(real_dictionary):
     assert bank.status == "found"
 
     greeting = real_dictionary.lookup("de", "Hallo", "Hallo, wie geht es dir?")
-    assert greeting.part_of_speech in {"intj", "interj", "interjection"}
-    assert greeting.status == "found"
+    assert greeting.part_of_speech == "phrase"
+    greeting_definition = (greeting.explanations.monolingual.value or "").casefold()
+    assert any(value in greeting_definition for value in ("grüß", "gruß", "begrüß"))
+    assert greeting.status in {"found", "ambiguous"}
 
-    for result in (bank, greeting):
+    nominal = real_dictionary.lookup("de", "Hallo", "Das Hallo war laut.")
+    assert nominal.part_of_speech == "noun"
+    assert nominal.explanations.monolingual.value
+
+    for result in (bank, greeting, nominal):
         chinese = result.explanations.chinese.value
         if chinese:
             assert not re.fullmatch(r"[\W\d_\u0400-\u052f]+", chinese)

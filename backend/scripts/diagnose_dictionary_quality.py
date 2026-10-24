@@ -27,6 +27,57 @@ CASES = (
 )
 
 
+def _source_entry_evidence(
+    connection: sqlite3.Connection,
+    language: str,
+    surface: str,
+) -> list[dict[str, object]]:
+    entries = connection.execute(
+        """SELECT id, lemma, part_of_speech, definition_language
+           FROM entries
+           WHERE language = ? AND normalized_lemma = ?
+           ORDER BY id LIMIT 40""",
+        (language, normalize_lexical(surface)),
+    ).fetchall()
+    entry_ids = [int(entry["id"]) for entry in entries]
+    form_tags: dict[int, list[dict[str, object]]] = {
+        entry_id: [] for entry_id in entry_ids
+    }
+    if entry_ids:
+        placeholders = ", ".join("?" for _ in entry_ids)
+        for row in connection.execute(
+            f"""SELECT entry_id, form, tags_json FROM forms
+                  WHERE entry_id IN ({placeholders})
+                  ORDER BY id LIMIT 100""",
+            entry_ids,
+        ):
+            form_tags[int(row["entry_id"])].append({
+                "form": row["form"],
+                "tags": json.loads(row["tags_json"]),
+            })
+    output = []
+    for entry in entries:
+        entry_id = int(entry["id"])
+        glosses = [
+            row["definition"] for row in connection.execute(
+                """SELECT definition FROM senses
+                   WHERE entry_id = ? ORDER BY sense_index LIMIT 100""",
+                (entry_id,),
+            )
+        ]
+        output.append({
+            "entry_id": entry_id,
+            "lemma": entry["lemma"],
+            "part_of_speech": entry["part_of_speech"],
+            "definition_language": entry["definition_language"],
+            "glosses": glosses,
+            "entry_tags": "not retained by dictionary schema v1",
+            "sense_tags": "not retained by dictionary schema v1",
+            "stored_form_tags": form_tags[entry_id],
+        })
+    return output
+
+
 def _query_diagnostics(
     connection: sqlite3.Connection,
     language: str,
@@ -59,7 +110,7 @@ def _query_diagnostics(
             """SELECT id FROM entries
                WHERE language = ? AND normalized_lemma = ?
                ORDER BY
-                   CASE WHEN ? AND lower(coalesce(part_of_speech, '')) IN ('intj', 'interj', 'interjection')
+                   CASE WHEN ? AND lower(coalesce(part_of_speech, '')) IN ('intj', 'interj', 'interjection', 'phrase')
                         THEN 0 ELSE 1 END,
                    id
                LIMIT ?""",
@@ -160,7 +211,10 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                     "applicable": entry.entry_id in applicable,
                     "lexical_score": candidate.lexical_score if candidate else None,
                     "morphology_score": candidate.morphology_score if candidate else None,
-                    "interjection_score": candidate.interjection_score if candidate else None,
+                    "greeting_score": candidate.greeting_score if candidate else None,
+                    "noun_context_score": (
+                        candidate.noun_context_score if candidate else None
+                    ),
                     "selected_definition": candidate.sense.definition if candidate else None,
                 })
             started = time.perf_counter()
@@ -179,6 +233,9 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                     len(top_ranked) - len(top_definitions)
                 ),
                 "candidates": candidates,
+                "source_entries": _source_entry_evidence(
+                    connection, language, surface
+                ),
                 "selected": {
                     "lemma": selected.lemma,
                     "part_of_speech": selected.part_of_speech,
