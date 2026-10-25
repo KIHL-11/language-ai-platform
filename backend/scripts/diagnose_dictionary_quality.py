@@ -88,6 +88,7 @@ def _query_diagnostics(
     language: str,
     surface: str,
     sentence: str,
+    forms_index_path: Path,
 ) -> dict[str, object]:
     normalized = normalize_lexical(surface)
     counts = {
@@ -167,7 +168,7 @@ def _query_diagnostics(
                 (0, 20),
             )
         ],
-        "selected_entry_forms": [
+        "source_forms_without_sidecar_not_used_at_runtime": [
             str(row[3]) for row in connection.execute(
                 """EXPLAIN QUERY PLAN
                    SELECT form FROM forms
@@ -176,6 +177,23 @@ def _query_diagnostics(
             )
         ],
     }
+    if forms_index_path.is_file():
+        sidecar = sqlite3.connect(
+            f"file:{forms_index_path.resolve().as_posix()}?mode=ro", uri=True
+        )
+        try:
+            output["hydration"]["runtime_sidecar_forms"] = [
+                str(row[3]) for row in sidecar.execute(
+                    """EXPLAIN QUERY PLAN
+                       SELECT form FROM forms
+                       WHERE entry_id = ? ORDER BY form_order LIMIT ?""",
+                    (0, 30),
+                )
+            ]
+        finally:
+            sidecar.close()
+    else:
+        output["hydration"]["runtime_sidecar_forms"] = ["sidecar unavailable"]
     return output
 
 
@@ -250,6 +268,7 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                 "core_hot_elapsed_ms": core_hot_elapsed_ms,
                 "optional_forms_elapsed_ms": optional_forms_elapsed_ms,
                 "optional_inflection_count": len(detailed.inflections),
+                "optional_inflections_status": detailed.inflections_status,
                 "provider_elapsed_ms": provider_elapsed_ms,
                 "provider_candidate_count": len(entries),
                 "top_rank_tie_count": len(top_ranked),
@@ -272,7 +291,7 @@ def diagnose(database: Path) -> list[dict[str, object]]:
                     "alternate_sense_count": len(selected.alternate_senses),
                 },
                 "queries": _query_diagnostics(
-                    connection, language, surface, sentence
+                    connection, language, surface, sentence, provider.forms_index_path
                 ),
             })
     finally:

@@ -240,7 +240,9 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
           {moreLoading && <p role="status" className="text-xs text-[#66726e]">Loading inflections…</p>}
           {moreError && <p role="status" className="text-xs text-[#8f1d14]">{moreError}</p>}
           {entry.inflections.length > 0 && <div><h3 className="font-semibold">Inflections</h3><p className="mt-1">{entry.inflections.join(' · ')}</p></div>}
-          {moreLoaded && entry.inflections.length === 0 && <p className="text-xs text-[#66726e]">Inflections unavailable from this source.</p>}
+          {moreLoaded && entry.inflections.length === 0 && <p className="text-xs text-[#66726e]">
+            {entry.inflections_message ?? 'Inflections unavailable from this source.'}
+          </p>}
           {entry.alternate_senses.length > 0 && <div><h3 className="font-semibold">Alternative meanings</h3><ul className="mt-1 list-disc space-y-1 pl-5">{entry.alternate_senses.map((sense, index) => <li key={`${index}-${sense.definition}`}>{sense.definition}</li>)}</ul></div>}
           {entry.source_attribution.map((source) => <p key={source.source_url} className="text-xs text-[#66726e]">Source: <a href={source.source_url} target="_blank" rel="noreferrer" className="underline">{source.source}</a> · {source.license}</p>)}
         </div>

@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Iterable, Protocol
 from urllib.parse import urlparse
 
+from services.dictionary.forms_sidecar import (
+    FormsLookupResult,
+    default_forms_index_path,
+    lookup_forms,
+)
+
 
 SCHEMA_VERSION = 1
 SOURCE_NAME = "Wiktionary data extracted by Wiktextract/Kaikki"
@@ -17,7 +23,6 @@ _LEXICAL = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.UNICODE)
 _ENTRY_MATCH_LIMIT = 20
 _SEPARATED_FORM_SCAN_LIMIT = 100
 _SENSE_LIMIT = 100
-_FORM_LIMIT = 30
 _PRONUNCIATION_LIMIT = 20
 
 
@@ -398,8 +403,9 @@ def import_kaikki_jsonl(
 
 
 class SQLiteDictionaryProvider:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, forms_index_path: Path | None = None):
         self.path = path
+        self.forms_index_path = forms_index_path or default_forms_index_path(path)
 
     @property
     def configured(self) -> bool:
@@ -555,16 +561,27 @@ class SQLiteDictionaryProvider:
         finally:
             connection.close()
 
-    @lru_cache(maxsize=512)
-    def forms_for_entry(self, entry_id: int) -> tuple[str, ...]:
-        """Load bounded display-only forms after ranking selects one entry."""
-        connection = self._connect()
+    @staticmethod
+    def _file_stamp(path: Path) -> tuple[int, int, int, int] | None:
         try:
-            return tuple(
-                value["form"] for value in connection.execute(
-                    "SELECT form FROM forms WHERE entry_id = ? ORDER BY id LIMIT ?",
-                    (entry_id, _FORM_LIMIT),
-                )
-            )
-        finally:
-            connection.close()
+            stat = path.stat()
+        except OSError:
+            return None
+        return (stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino)
+
+    @lru_cache(maxsize=512)
+    def _forms_for_entry_cached(
+        self,
+        entry_id: int,
+        source_stamp: tuple[int, int, int, int] | None,
+        index_stamp: tuple[int, int, int, int] | None,
+    ) -> FormsLookupResult:
+        return lookup_forms(self.path, self.forms_index_path, entry_id)
+
+    def forms_for_entry(self, entry_id: int) -> FormsLookupResult:
+        """Read bounded display-only forms from the disposable indexed sidecar."""
+        return self._forms_for_entry_cached(
+            entry_id,
+            self._file_stamp(self.path),
+            self._file_stamp(self.forms_index_path),
+        )

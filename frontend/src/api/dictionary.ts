@@ -33,6 +33,8 @@ function isDictionaryLookup(value: unknown): value is DictionaryLookup {
     ['lexical_overlap', 'part_of_speech', 'morphology', 'source_order', 'ambiguous', 'unavailable'].includes(String(value.context.selection_method)) &&
     nullableString(value.context.contextual_sense) && nullableString(value.context.contextual_explanation) &&
     Array.isArray(value.inflections) && value.inflections.every((item) => typeof item === 'string') &&
+    ['not_requested', 'available', 'index_unavailable', 'index_stale', 'index_invalid'].includes(String(value.inflections_status)) &&
+    nullableString(value.inflections_message) &&
     Array.isArray(value.examples) && value.examples.every((item) => typeof item === 'string') &&
     Array.isArray(value.alternate_senses) && value.alternate_senses.every((item) => isRecord(item) &&
       typeof item.definition === 'string' && Array.isArray(item.examples) &&

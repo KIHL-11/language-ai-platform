@@ -147,6 +147,26 @@ describe('DictionaryPanel', () => {
     expect(await screen.findByText('sentences')).toBeInTheDocument()
   })
 
+  it('keeps dictionary details usable when the forms sidecar is unavailable', async () => {
+    const user = userEvent.setup()
+    fetchMock
+      .mockResolvedValueOnce(response({ ...dictionaryEntry, inflections: [], inflections_status: 'not_requested' }))
+      .mockResolvedValueOnce(response({
+        ...dictionaryEntry,
+        inflections: [],
+        inflections_status: 'index_unavailable',
+        inflections_message: 'Build the local dictionary forms index to load inflections.',
+      }))
+
+    render(panel())
+    expect(await screen.findByText('A group of words that expresses a complete thought.')).toBeVisible()
+    await user.click(screen.getByText('More'))
+
+    expect(await screen.findByText('Build the local dictionary forms index to load inflections.')).toBeVisible()
+    expect(screen.getByText('A judicial punishment.')).toBeVisible()
+    expect(screen.getByRole('button', { name: /US.*dictionary recording/ })).toBeEnabled()
+  })
+
   it('plays dictionary recordings and requests TTS only for an explicit fallback click', async () => {
     const user = userEvent.setup()
     fetchMock.mockImplementation((url: string) => String(url).endsWith('/api/tts')

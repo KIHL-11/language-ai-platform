@@ -97,6 +97,13 @@ def default_dictionary_path() -> Path:
     return Path(__file__).resolve().parents[2] / "storage" / "dictionary.sqlite3"
 
 
+def default_dictionary_forms_index_path(dictionary_path: Path) -> Path | None:
+    import os
+
+    configured = os.environ.get("DICTIONARY_FORMS_INDEX_PATH")
+    return Path(configured).expanduser() if configured else None
+
+
 class DictionaryService:
     def __init__(
         self,
@@ -110,7 +117,11 @@ class DictionaryService:
 
     @classmethod
     def default(cls) -> "DictionaryService":
-        return cls(SQLiteDictionaryProvider(default_dictionary_path()))
+        dictionary_path = default_dictionary_path()
+        return cls(SQLiteDictionaryProvider(
+            dictionary_path,
+            default_dictionary_forms_index_path(dictionary_path),
+        ))
 
     @staticmethod
     def _missing(language: str, kind: str) -> DictionaryExplanation:
@@ -419,12 +430,33 @@ class DictionaryService:
         cached, entry_id = self._lookup_cached(
             language, normalized_word, normalized_sentence
         )
-        if include_inflections and entry_id is not None and not cached.inflections:
-            load_forms = getattr(self.provider, "forms_for_entry", None)
-            if callable(load_forms):
-                cached = cached.model_copy(
-                    update={"inflections": list(load_forms(entry_id))[:30]}
-                )
+        if include_inflections and entry_id is not None:
+            if cached.inflections:
+                cached = cached.model_copy(update={"inflections_status": "available"})
+            else:
+                load_forms = getattr(self.provider, "forms_for_entry", None)
+                if callable(load_forms):
+                    loaded = load_forms(entry_id)
+                    if isinstance(loaded, tuple):
+                        forms = loaded
+                        inflections_status = "available"
+                        inflections_message = None
+                    else:
+                        forms = loaded.forms
+                        inflections_status = loaded.status
+                        inflections_message = loaded.message
+                    cached = cached.model_copy(
+                        update={
+                            "inflections": list(forms)[:30],
+                            "inflections_status": inflections_status,
+                            "inflections_message": inflections_message,
+                        }
+                    )
+                else:
+                    cached = cached.model_copy(update={
+                        "inflections_status": "index_unavailable",
+                        "inflections_message": "Inflections are unavailable from this dictionary provider.",
+                    })
         return cached.model_copy(
             update={
                 "query": word,
