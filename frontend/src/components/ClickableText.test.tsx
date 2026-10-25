@@ -28,4 +28,23 @@ describe('ClickableText', () => {
       word,
     )
   })
+
+  it('propagates the exact Library sentence identity for contextual saving', async () => {
+    const user = userEvent.setup()
+    const onLookup = vi.fn()
+    render(<ClickableText
+      text="Same sentence."
+      sentence="Same sentence."
+      language="en"
+      libraryItemId="library-one"
+      sentenceId={42}
+      learnerId="learner-one"
+      onLookup={onLookup}
+    />)
+    await user.click(screen.getByRole('button', { name: 'Look up Same' }))
+    expect(onLookup.mock.calls[0][0]).toEqual({
+      word: 'Same', sentence: 'Same sentence.', language: 'en',
+      libraryItemId: 'library-one', sentenceId: 42, learnerId: 'learner-one',
+    })
+  })
 })

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { dictionaryEntry } from '../testFixtures/dictionary'
+import { studyItem } from '../testFixtures/studyBank'
 import { calculateDictionaryPopoverPosition } from '../dictionary/popoverPosition'
 import DictionaryPanel from './DictionaryPanel'
 
@@ -47,6 +48,27 @@ function panel(anchor = createAnchor(), word = 'Sentence') {
     selection={{ word, sentence: `${word} 2.`, language: 'en' }}
     anchor={anchor}
     onClose={vi.fn()}
+  />
+}
+
+function contextualPanel(
+  anchor = createAnchor(),
+  updates: Partial<{ word: string; sentence: string; sentenceId: number }> = {},
+  onStudyItemSaved = vi.fn(),
+) {
+  const word = updates.word ?? 'Sentence'
+  return <DictionaryPanel
+    selection={{
+      word,
+      sentence: updates.sentence ?? `${word} 2.`,
+      language: 'en',
+      libraryItemId: 'library-item',
+      sentenceId: updates.sentenceId ?? 2,
+      learnerId: studyItem.user_id,
+    }}
+    anchor={anchor}
+    onClose={vi.fn()}
+    onStudyItemSaved={onStudyItemSaved}
   />
 }
 
@@ -248,5 +270,107 @@ describe('DictionaryPanel', () => {
     await Promise.resolve()
     expect(screen.getByRole('heading', { name: 'bank' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'sentence' })).not.toBeInTheDocument()
+  })
+
+  it('saves with authoritative identifiers, locks duplicate clicks, and reports success', async () => {
+    const user = userEvent.setup()
+    let resolveSave: ((value: ReturnType<typeof response>) => void) | undefined
+    const onSaved = vi.fn()
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
+      if (String(url).includes('/status')) return Promise.resolve(response({ status: 'unsaved', item: null }))
+      if (options?.method === 'POST' && String(url).includes('/study-bank/words')) {
+        return new Promise((resolve) => { resolveSave = resolve })
+      }
+      return Promise.resolve(response({}))
+    })
+    render(contextualPanel(createAnchor(), {}, onSaved))
+    await user.click(await screen.findByRole('button', { name: 'Save Word' }))
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Saving…' }))
+    const saveCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/study-bank/words'))
+    expect(saveCalls).toHaveLength(1)
+    expect(JSON.parse(String(saveCalls[0][1]?.body))).toEqual({
+      user_id: studyItem.user_id, sentence_id: 2, word: 'Sentence',
+    })
+    resolveSave?.(response({ item: { ...studyItem, text: 'Sentence', lemma: 'sentence', normalized_text: 'sentence' }, created: true }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(onSaved).toHaveBeenCalledOnce()
+  })
+
+  it('shows previously saved and archived states and restores only on explicit action', async () => {
+    const user = userEvent.setup()
+    const archived = { ...studyItem, active: false, text: 'Sentence', lemma: 'sentence', normalized_text: 'sentence' }
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
+      if (String(url).includes('/status')) return Promise.resolve(response({ status: 'archived', item: archived }))
+      if (options?.method === 'PATCH') return Promise.resolve(response({ ...archived, active: true }))
+      return Promise.resolve(response({}))
+    })
+    render(contextualPanel())
+    expect(await screen.findByText('Previously saved · Archived')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Restore' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const restore = fetchMock.mock.calls.find(([, options]) => options?.method === 'PATCH')
+    expect(String(restore?.[0])).toContain(`/study-bank/items/${studyItem.id}`)
+    expect(JSON.parse(String(restore?.[1]?.body))).toEqual({ active: true })
+  })
+
+  it('recognizes an active word without issuing another save', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
+      if (String(url).includes('/status')) return Promise.resolve(response({ status: 'saved', item: studyItem }))
+      return Promise.resolve(response({}))
+    })
+    render(contextualPanel())
+    expect(await screen.findByText('Previously Saved')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save Word' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url, options]) =>
+      String(url).endsWith('/study-bank/words') && options?.method === 'POST')).toBe(false)
+  })
+
+  it('keeps the panel open after save failure and allows an explicit retry', async () => {
+    const user = userEvent.setup()
+    let attempts = 0
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
+      if (String(url).includes('/status')) return Promise.resolve(response({ status: 'unsaved', item: null }))
+      if (options?.method === 'POST') {
+        attempts += 1
+        return attempts === 1
+          ? Promise.resolve(response({}, 500))
+          : Promise.resolve(response({ item: studyItem, created: true }))
+      }
+      return Promise.resolve(response({}))
+    })
+    render(contextualPanel())
+    await user.click(await screen.findByRole('button', { name: 'Save Word' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Save Failed')
+    expect(screen.getByLabelText('Contextual dictionary')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(attempts).toBe(2)
+  })
+
+  it('keys status by sentence id and ignores stale status after rapid switching', async () => {
+    let resolveFirstStatus: ((value: ReturnType<typeof response>) => void) | undefined
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
+      if (String(url).includes('sentence_id=2')) {
+        return new Promise((resolve) => { resolveFirstStatus = resolve })
+      }
+      if (String(url).includes('sentence_id=3')) return Promise.resolve(response({ status: 'unsaved', item: null }))
+      return Promise.resolve(response({}))
+    })
+    const anchor = createAnchor()
+    const { rerender } = render(contextualPanel(anchor, { sentence: 'Same.', sentenceId: 2 }))
+    await screen.findByText('A group of words that expresses a complete thought.')
+    rerender(contextualPanel(anchor, { sentence: 'Same.', sentenceId: 3 }))
+    expect(await screen.findByRole('button', { name: 'Save Word' })).toBeInTheDocument()
+    resolveFirstStatus?.(response({ status: 'saved', item: studyItem }))
+    await Promise.resolve()
+    expect(screen.getByRole('button', { name: 'Save Word' })).toBeInTheDocument()
+    expect(screen.queryByText('Previously Saved')).not.toBeInTheDocument()
   })
 })

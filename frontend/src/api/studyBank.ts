@@ -116,6 +116,56 @@ export async function saveStudyItems(items: StudyItemInput[]): Promise<StudyItem
   return value.items
 }
 
+export type ContextualWordStatus = 'unsaved' | 'saved' | 'archived'
+
+export interface ContextualWordStatusResult {
+  status: ContextualWordStatus
+  item: StudyItem | null
+}
+
+export async function getContextualWordStatus(
+  libraryItemId: string,
+  userId: string,
+  sentenceId: number,
+  word: string,
+  signal?: AbortSignal,
+): Promise<ContextualWordStatusResult> {
+  const params = new URLSearchParams({
+    user_id: userId,
+    sentence_id: String(sentenceId),
+    word,
+  })
+  const value = await json(await fetch(
+    `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words/status?${params}`,
+    { signal },
+  ), 'Loading saved-word status failed')
+  if (!isRecord(value) || !['unsaved', 'saved', 'archived'].includes(String(value.status)) ||
+      !(value.item === null || isStudyItem(value.item))) {
+    throw new Error('Saved-word status returned an unexpected response.')
+  }
+  return value as unknown as ContextualWordStatusResult
+}
+
+export async function saveContextualWord(
+  libraryItemId: string,
+  userId: string,
+  sentenceId: number,
+  word: string,
+): Promise<{ item: StudyItem; created: boolean }> {
+  const value = await json(await fetch(
+    `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, sentence_id: sentenceId, word }),
+    },
+  ), 'Saving word failed')
+  if (!isRecord(value) || !isStudyItem(value.item) || typeof value.created !== 'boolean') {
+    throw new Error('Saving word returned an unexpected response.')
+  }
+  return { item: value.item, created: value.created }
+}
+
 export interface StudyListFilters {
   userId: string
   kind: StudyKind

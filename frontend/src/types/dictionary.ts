@@ -55,4 +55,7 @@ export interface DictionarySelection {
   word: string
   sentence: string
   language: SourceLanguage
+  libraryItemId?: string
+  sentenceId?: number
+  learnerId?: string
 }
