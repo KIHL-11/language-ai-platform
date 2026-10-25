@@ -33,6 +33,8 @@ function isDictionaryLookup(value: unknown): value is DictionaryLookup {
     ['lexical_overlap', 'part_of_speech', 'morphology', 'source_order', 'ambiguous', 'unavailable'].includes(String(value.context.selection_method)) &&
     nullableString(value.context.contextual_sense) && nullableString(value.context.contextual_explanation) &&
     Array.isArray(value.inflections) && value.inflections.every((item) => typeof item === 'string') &&
+    ['not_requested', 'available', 'index_unavailable', 'index_stale', 'index_invalid'].includes(String(value.inflections_status)) &&
+    nullableString(value.inflections_message) &&
     Array.isArray(value.examples) && value.examples.every((item) => typeof item === 'string') &&
     Array.isArray(value.alternate_senses) && value.alternate_senses.every((item) => isRecord(item) &&
       typeof item.definition === 'string' && Array.isArray(item.examples) &&
@@ -44,6 +46,7 @@ function isDictionaryLookup(value: unknown): value is DictionaryLookup {
 export async function lookupDictionary(
   selection: DictionarySelection,
   signal?: AbortSignal,
+  includeInflections = false,
 ): Promise<DictionaryLookup> {
   const response = await fetch(`${API_BASE_URL}/api/dictionary/lookup`, {
     method: 'POST',
@@ -53,6 +56,7 @@ export async function lookupDictionary(
       word: selection.word,
       sentence: selection.sentence,
       target_language: 'zh-CN',
+      include_inflections: includeInflections,
     }),
     signal,
   })

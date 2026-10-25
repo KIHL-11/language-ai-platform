@@ -1,6 +1,9 @@
 import gzip
+import hashlib
 import json
+import os
 import sqlite3
+import fcntl
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,10 +18,17 @@ from services.dictionary.provider import (
     ProviderSense,
     SQLiteDictionaryProvider,
     import_kaikki_sources,
+    initialize_database,
     safe_dictionary_source_url,
     safe_wikimedia_audio_url,
 )
+from services.dictionary.forms_sidecar import (
+    build_forms_index,
+    default_forms_index_path,
+    lookup_forms,
+)
 from services.dictionary.service import DictionaryService
+from scripts.diagnose_dictionary_quality import diagnose
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -33,6 +43,16 @@ class FakeDictionaryProvider:
 
     def lookup(self, language: str, surface: str, sentence: str) -> list[ProviderEntry]:
         return self.entries
+
+
+class LazyFormsProvider(FakeDictionaryProvider):
+    def __init__(self, entries: list[ProviderEntry]):
+        super().__init__(entries)
+        self.form_requests: list[int] = []
+
+    def forms_for_entry(self, entry_id: int) -> tuple[str, ...]:
+        self.form_requests.append(entry_id)
+        return (f"form-for-{entry_id}",)
 
 
 def provider_entry(
@@ -79,7 +99,151 @@ def dictionary(tmp_path):
         content_license=TEST_CONTENT_LICENSE,
     )
     assert count == 8
+    build_forms_index(database)
     return DictionaryService(SQLiteDictionaryProvider(database))
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(64 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def test_forms_sidecar_is_atomic_indexed_and_preserves_source(dictionary):
+    provider = dictionary.provider
+    database = provider.path
+    sidecar = provider.forms_index_path
+    source_hash = file_sha256(database)
+    source_stat = database.stat()
+
+    result = build_forms_index(database, sidecar)
+
+    assert result.source_rows_scanned >= result.forms_indexed > 0
+    assert result.size_bytes == sidecar.stat().st_size
+    assert file_sha256(database) == source_hash
+    assert database.stat().st_mtime_ns == source_stat.st_mtime_ns
+    connection = sqlite3.connect(f"file:{sidecar.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        plan = " ".join(
+            row[3] for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT form FROM forms WHERE entry_id = ? ORDER BY form_order LIMIT 30",
+                (1,),
+            )
+        )
+        assert "SEARCH forms USING PRIMARY KEY" in plan
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        connection.close()
+
+
+def test_forms_sidecar_preserves_source_order_and_first_thirty(dictionary):
+    provider = dictionary.provider
+    selected = provider.lookup("de", "Häuser", "Die Häuser stehen am Fluss.")[0]
+    source = sqlite3.connect(
+        f"file:{provider.path.resolve().as_posix()}?mode=ro", uri=True
+    )
+    try:
+        expected = tuple(
+            row[0] for row in source.execute(
+                "SELECT form FROM forms WHERE entry_id = ? ORDER BY id LIMIT 30",
+                (selected.entry_id,),
+            )
+        )
+    finally:
+        source.close()
+
+    loaded = provider.forms_for_entry(selected.entry_id)
+
+    assert loaded.status == "available"
+    assert loaded.forms == expected
+
+
+def test_forms_sidecar_preserves_first_thirty_rows_including_duplicates(tmp_path):
+    database = tmp_path / "dictionary.sqlite3"
+    with sqlite3.connect(database) as connection:
+        initialize_database(connection)
+        entry_id = connection.execute(
+            """INSERT INTO entries(
+                   language, lemma, normalized_lemma, part_of_speech,
+                   definition_language, source_url, source_name, license
+               ) VALUES ('en', 'test', 'test', 'noun', 'en',
+                         'https://en.wiktionary.org/wiki/test', 'test', 'test')"""
+        ).lastrowid
+        values = ["duplicate", "duplicate", *(f"form-{index}" for index in range(33))]
+        connection.executemany(
+            "INSERT INTO forms(entry_id, form, normalized_form, tags_json) VALUES (?, ?, ?, '[]')",
+            ((entry_id, value, value) for value in values),
+        )
+    sidecar = default_forms_index_path(database)
+
+    result = build_forms_index(database, sidecar)
+    loaded = lookup_forms(database, sidecar, int(entry_id))
+
+    assert result.forms_indexed == 30
+    assert loaded.forms == tuple(values[:30])
+
+
+def test_interrupted_sidecar_build_preserves_previous_index(dictionary):
+    provider = dictionary.provider
+    previous_hash = file_sha256(provider.forms_index_path)
+
+    with pytest.raises(InterruptedError, match="Simulated"):
+        build_forms_index(
+            provider.path,
+            provider.forms_index_path,
+            _interrupt_after_rows=1,
+        )
+
+    assert file_sha256(provider.forms_index_path) == previous_hash
+    assert not Path(f"{provider.forms_index_path}.building").exists()
+
+
+def test_concurrent_sidecar_build_is_rejected_without_replacing_index(dictionary):
+    provider = dictionary.provider
+    previous_hash = file_sha256(provider.forms_index_path)
+    lock_path = Path(f"{provider.forms_index_path}.lock")
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="already running"):
+            build_forms_index(provider.path, provider.forms_index_path)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    assert file_sha256(provider.forms_index_path) == previous_hash
+
+
+def test_missing_stale_and_corrupt_sidecars_degrade_without_source_scan(dictionary):
+    provider = dictionary.provider
+    selected = provider.lookup("en", "go", "We go to work by train.")[0]
+    sidecar = provider.forms_index_path
+
+    sidecar.unlink()
+    missing = lookup_forms(provider.path, sidecar, selected.entry_id)
+    assert missing.status == "index_unavailable"
+    assert "Build" in (missing.message or "")
+
+    build_forms_index(provider.path, sidecar)
+    source_stat = provider.path.stat()
+    os.utime(provider.path, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1))
+    stale = lookup_forms(provider.path, sidecar, selected.entry_id)
+    assert stale.status == "index_stale"
+
+    sidecar.write_bytes(b"not sqlite")
+    corrupt = lookup_forms(provider.path, sidecar, selected.entry_id)
+    assert corrupt.status == "index_invalid"
+
+
+def test_sidecar_lookup_cache_is_invalidated_by_file_identity(dictionary):
+    provider = dictionary.provider
+    selected = provider.lookup("en", "go", "We go to work by train.")[0]
+    before = provider._forms_for_entry_cached.cache_info()
+
+    first = provider.forms_for_entry(selected.entry_id)
+    second = provider.forms_for_entry(selected.entry_id)
+
+    after = provider._forms_for_entry_cached.cache_info()
+    assert first == second
+    assert after.hits == before.hits + 1
 
 
 def test_english_and_german_lemma_lookup_have_three_source_attributed_levels(dictionary):
@@ -174,6 +338,38 @@ def test_context_ranks_senses_across_entries_instead_of_using_the_first_entry():
     ]
 
 
+def test_display_forms_are_loaded_only_for_the_selected_entry():
+    provider = LazyFormsProvider([
+        provider_entry(1, "bank", "en", "A financial institution."),
+        provider_entry(
+            2,
+            "bank",
+            "en",
+            "The land alongside a river.",
+            examples=("We sat beside the river bank.",),
+        ),
+    ])
+    service = DictionaryService(provider)
+
+    result = service.lookup("en", "bank", "We sat beside the river bank.")
+
+    assert result.lemma == "bank"
+    assert result.inflections == []
+    assert result.inflections_status == "not_requested"
+    assert provider.form_requests == []
+
+    detailed = service.lookup(
+        "en",
+        "bank",
+        "We sat beside the river bank.",
+        include_inflections=True,
+    )
+
+    assert detailed.inflections == ["form-for-2"]
+    assert detailed.inflections_status == "available"
+    assert provider.form_requests == [2]
+
+
 def test_duplicate_source_entries_do_not_create_false_ambiguity():
     duplicate = provider_entry(
         1,
@@ -242,6 +438,199 @@ def test_sentence_initial_greeting_prefers_interjection_part_of_speech():
     assert result.explanations.monolingual.value == "Eine Grußformel."
     assert result.context.selection_method == "part_of_speech"
     assert result.status == "found"
+
+
+def test_real_source_phrase_greeting_beats_noun_only_in_greeting_context():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(
+            1,
+            "Hallo",
+            "de",
+            "Ein lauter Zuruf.",
+            part_of_speech="noun",
+        ),
+        provider_entry(
+            2,
+            "hallo",
+            "de",
+            "Eine Begrüßungsformel.",
+            part_of_speech="phrase",
+        ),
+    ]))
+
+    greeting = service.lookup("de", "Hallo", "Hallo, wie geht es dir?")
+    noun = service.lookup("de", "Hallo", "Das Hallo war laut.")
+
+    assert greeting.part_of_speech == "phrase"
+    assert greeting.explanations.monolingual.value == "Eine Begrüßungsformel."
+    assert greeting.context.selection_method == "part_of_speech"
+    assert noun.part_of_speech == "noun"
+    assert noun.explanations.monolingual.value == "Ein lauter Zuruf."
+
+
+def test_sentence_initial_punctuation_does_not_promote_unrelated_phrase():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "Hallo", "de", "Ein lauter Zuruf."),
+        provider_entry(
+            2,
+            "hallo",
+            "de",
+            "Eine feste Redewendung.",
+            part_of_speech="phrase",
+        ),
+    ]))
+
+    result = service.lookup("de", "Hallo", "Hallo, das ist ungewöhnlich.")
+
+    assert result.part_of_speech == "noun"
+
+
+def test_single_word_lookup_rejects_unmatched_multiword_lemma_but_keeps_real_phrase():
+    service = DictionaryService(FakeDictionaryProvider([
+        provider_entry(1, "go", "en", "To move from one place to another.", part_of_speech="verb"),
+        provider_entry(
+            2,
+            "go jump in the lake",
+            "en",
+            "A dismissive phrase used when telling someone to go away from work.",
+            part_of_speech="phrase",
+            match_kind="inflection",
+        ),
+    ]))
+
+    ordinary = service.lookup("en", "go", "We go to work by train.")
+    phrase = service.lookup("en", "go", "You can go jump in the lake.")
+
+    assert ordinary.lemma == "go"
+    assert ordinary.lemma_candidates == ["go"]
+    assert phrase.lemma == "go jump in the lake"
+
+
+def test_separated_form_requires_particle_at_clause_boundary(tmp_path):
+    input_path = tmp_path / "separated.jsonl"
+    values = [
+        {
+            "word": "gehen",
+            "lang_code": "de",
+            "pos": "verb",
+            "senses": [{"glosses": ["Sich zu Fuß bewegen."]}],
+            "forms": [{"form": "ging", "tags": ["past"]}],
+        },
+        {
+            "word": "nachgehen",
+            "lang_code": "de",
+            "pos": "verb",
+            "senses": [{"glosses": ["Eine Sache untersuchen."]}],
+            "forms": [{"form": "ging nach", "tags": ["past"]}],
+        },
+    ]
+    input_path.write_text(
+        "".join(f"{json.dumps(value)}\n" for value in values),
+        encoding="utf-8",
+    )
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(input_path, "de", "https://kaikki.org/dewiktionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+    provider = SQLiteDictionaryProvider(database)
+
+    home = provider.lookup("de", "ging", "Er ging nach Hause.")
+    investigation = provider.lookup("de", "ging", "Er ging der Sache nach.")
+
+    assert [(entry.lemma, entry.match_kind) for entry in home] == [
+        ("gehen", "inflection")
+    ]
+    assert [(entry.lemma, entry.match_kind) for entry in investigation] == [
+        ("gehen", "inflection"),
+        ("nachgehen", "separated_form"),
+    ]
+
+
+def test_greeting_query_retains_late_interjection_without_general_pos_bias(tmp_path):
+    input_path = tmp_path / "greeting.jsonl"
+    values = [
+        {
+            "word": "Hallo",
+            "lang_code": "de",
+            "pos": "noun",
+            "senses": [{"glosses": [f"Substantivbedeutung {index}."]}],
+        }
+        for index in range(25)
+    ]
+    values.append({
+        "word": "Hallo",
+        "lang_code": "de",
+        "pos": "intj",
+        "senses": [{"glosses": ["Eine Grußformel."]}],
+    })
+    input_path.write_text(
+        "".join(f"{json.dumps(value)}\n" for value in values),
+        encoding="utf-8",
+    )
+    database = tmp_path / "dictionary.sqlite3"
+    import_kaikki_sources(
+        [(input_path, "de", "https://kaikki.org/dewiktionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+    service = DictionaryService(SQLiteDictionaryProvider(database))
+
+    greeting = service.lookup("de", "Hallo", "Hallo, wie geht es dir?")
+    ordinary_noun = service.lookup("de", "Hallo", "Das Hallo war laut.")
+
+    assert greeting.part_of_speech == "intj"
+    assert greeting.explanations.monolingual.value == "Eine Grußformel."
+    assert ordinary_noun.part_of_speech == "noun"
+
+
+def test_alternate_sense_payload_is_bounded():
+    base = provider_entry(1, "bank", "en", "placeholder")
+    entry = replace(base, senses=tuple(
+        ProviderSense(f"Meaning {index}.", (), {}) for index in range(75)
+    ))
+    service = DictionaryService(FakeDictionaryProvider([entry]))
+
+    result = service.lookup("en", "bank", "That bank is over there.")
+
+    assert len(result.alternate_senses) == 50
+
+
+def test_quality_diagnostics_are_read_only_and_report_indexed_query_plans(dictionary):
+    database = dictionary.provider.path
+    before = database.stat()
+
+    results = diagnose(database)
+
+    after = database.stat()
+    assert [(value["language"], value["surface"]) for value in results] == [
+        ("en", "go"),
+        ("en", "went"),
+        ("en", "children"),
+        ("en", "bank"),
+        ("de", "ging"),
+        ("de", "Hallo"),
+        ("de", "Häuser"),
+        ("de", "herausfinden"),
+    ]
+    assert before.st_size == after.st_size
+    assert before.st_mtime_ns == after.st_mtime_ns
+    for result in results:
+        assert result["provider_elapsed_ms"] >= 0
+        assert result["core_cold_elapsed_ms"] >= 0
+        assert result["core_hot_elapsed_ms"] >= 0
+        assert result["optional_forms_elapsed_ms"] >= 0
+        assert result["provider_candidate_count"] <= 40
+        assert set(result["queries"]) == {
+            "exact", "inflection", "separated_component", "hydration"
+        }
+        assert all(
+            query["count"] >= 0 and query["plan"]
+            for name, query in result["queries"].items()
+            if name != "hydration"
+        )
+        assert all(result["queries"]["hydration"].values())
 
 
 def test_chinese_translation_rejects_cyrillic_and_prefers_source_simplified_variants():
@@ -472,6 +861,18 @@ def test_lookup_api_validates_input_and_does_not_touch_learning_stores(dictionar
     })
     assert response.status_code == 200
     assert response.json()["lemma"] == "Haus"
+    assert response.json()["inflections"] == []
+    assert response.json()["inflections_status"] == "not_requested"
+    detailed = client.post("/api/dictionary/lookup", json={
+        "language": "de",
+        "word": "Häuser",
+        "sentence": "Die Häuser stehen am Fluss.",
+        "target_language": "zh-CN",
+        "include_inflections": True,
+    })
+    assert detailed.status_code == 200
+    assert "Häuser" in detailed.json()["inflections"]
+    assert detailed.json()["inflections_status"] == "available"
     assert client.post("/api/dictionary/lookup", json={
         "language": "de", "word": "!!!", "sentence": ""
     }).status_code == 422

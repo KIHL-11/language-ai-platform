@@ -43,6 +43,8 @@ export const dictionaryEntry: DictionaryLookup = {
     contextual_sense: 'A group of words that expresses a complete thought.', contextual_explanation: null,
   },
   inflections: ['sentences'],
+  inflections_status: 'available',
+  inflections_message: null,
   examples: ['This is a sentence.'],
   alternate_senses: [{ definition: 'A judicial punishment.', examples: [], source: 'Wiktionary' }],
   source_attribution: [{

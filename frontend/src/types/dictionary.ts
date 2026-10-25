@@ -44,6 +44,8 @@ export interface DictionaryLookup {
     contextual_explanation: string | null
   }
   inflections: string[]
+  inflections_status: 'not_requested' | 'available' | 'index_unavailable' | 'index_stale' | 'index_invalid'
+  inflections_message: string | null
   examples: string[]
   alternate_senses: Array<{ definition: string; examples: string[]; source: string }>
   source_attribution: Array<{ source: string; source_url: string; license: string }>

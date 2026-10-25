@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type SyntheticEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -40,9 +41,13 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState<string | null>(null)
   const [pronunciationError, setPronunciationError] = useState<string | null>(null)
+  const [moreLoading, setMoreLoading] = useState(false)
+  const [moreLoaded, setMoreLoaded] = useState(false)
+  const [moreError, setMoreError] = useState<string | null>(null)
   const [position, setPosition] = useState<DictionaryPopoverPosition>(() =>
     calculateDictionaryPopoverPosition(anchor.getBoundingClientRect(), 0, window.innerWidth, window.innerHeight))
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const moreControllerRef = useRef<AbortController | null>(null)
   const panelRef = useRef<HTMLElement | null>(null)
   const closeRef = useRef<HTMLButtonElement | null>(null)
   const headingId = useId()
@@ -63,6 +68,9 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
   useEffect(() => {
     closeRef.current?.focus({ preventScroll: true })
     return () => {
+      const moreController = moreControllerRef.current
+      moreControllerRef.current = null
+      moreController?.abort()
       audioRef.current?.pause()
       audioRef.current = null
     }
@@ -150,6 +158,35 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
     }
   }
 
+  function loadInflectionsWhenOpened(event: SyntheticEvent<HTMLDetailsElement>) {
+    if (!event.currentTarget.open) {
+      const controller = moreControllerRef.current
+      moreControllerRef.current = null
+      controller?.abort()
+      setMoreLoading(false)
+      return
+    }
+    if (!entry || moreLoaded || moreLoading) return
+    const controller = new AbortController()
+    moreControllerRef.current?.abort()
+    moreControllerRef.current = controller
+    setMoreLoading(true)
+    setMoreError(null)
+    void lookupDictionary(selection, controller.signal, true).then((detailedEntry) => {
+      setEntry(detailedEntry)
+      setMoreLoaded(true)
+    }).catch((reason) => {
+      if ((reason as { name?: string }).name !== 'AbortError') {
+        setMoreError('Inflections are unavailable. Other dictionary details remain available.')
+      }
+    }).finally(() => {
+      if (moreControllerRef.current === controller) {
+        moreControllerRef.current = null
+        setMoreLoading(false)
+      }
+    })
+  }
+
   const labels = levelLabels(selection.language)
   return <aside
     ref={panelRef}
@@ -195,12 +232,17 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
         <details className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[2]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.chinese} /></div></details>
       </div>
 
-      <details className="border-t border-[#dfe7e3] py-2">
+      <details className="border-t border-[#dfe7e3] py-2" onToggle={loadInflectionsWhenOpened}>
         <summary className="cursor-pointer text-sm font-semibold">More</summary>
         <div className="mt-2 space-y-3 text-sm">
           <div><p className="text-[10px] font-semibold tracking-wider text-[#66726e]">SOURCE CONTEXT</p><p className="mt-1">{entry.context.source_sentence}</p></div>
           {entry.examples.length > 0 && <div><h3 className="font-semibold">Examples</h3><p className="mt-1">{entry.examples[0]}</p></div>}
+          {moreLoading && <p role="status" className="text-xs text-[#66726e]">Loading inflections…</p>}
+          {moreError && <p role="status" className="text-xs text-[#8f1d14]">{moreError}</p>}
           {entry.inflections.length > 0 && <div><h3 className="font-semibold">Inflections</h3><p className="mt-1">{entry.inflections.join(' · ')}</p></div>}
+          {moreLoaded && entry.inflections.length === 0 && <p className="text-xs text-[#66726e]">
+            {entry.inflections_message ?? 'Inflections unavailable from this source.'}
+          </p>}
           {entry.alternate_senses.length > 0 && <div><h3 className="font-semibold">Alternative meanings</h3><ul className="mt-1 list-disc space-y-1 pl-5">{entry.alternate_senses.map((sense, index) => <li key={`${index}-${sense.definition}`}>{sense.definition}</li>)}</ul></div>}
           {entry.source_attribution.map((source) => <p key={source.source_url} className="text-xs text-[#66726e]">Source: <a href={source.source_url} target="_blank" rel="noreferrer" className="underline">{source.source}</a> · {source.license}</p>)}
         </div>

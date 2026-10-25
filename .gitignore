@@ -16,6 +16,10 @@ __pycache__/
 .DS_Store
 **/.DS_Store
 backend/storage/
+# Disposable local dictionary forms sidecar and build artifacts.
+**/dictionary.forms.sqlite3
+**/dictionary.forms.sqlite3.building*
+**/dictionary.forms.sqlite3.lock
 frontend/.env.local
 frontend/node_modules/
 frontend/dist/

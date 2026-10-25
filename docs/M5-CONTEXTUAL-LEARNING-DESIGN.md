@@ -110,6 +110,34 @@ decompression checksum failure aborts the build, removes the temporary index,
 and leaves the previous database untouched.
 The database lives under ignored runtime storage and must not be committed.
 
+The optional inflection list shown under **More** uses a separate disposable
+Sidecar index. The source dictionary has no `forms(entry_id)` index, so querying
+that list directly can scan the multi-gigabyte `forms` table. Build the Sidecar
+after installing or replacing the source dictionary:
+
+```bash
+cd backend
+.venv/bin/python scripts/build_dictionary_forms_index.py \
+  --database storage/dictionary.sqlite3
+```
+
+The default output is `backend/storage/dictionary.forms.sqlite3`. Set the
+non-secret `DICTIONARY_FORMS_INDEX_PATH` only when a different runtime location
+is needed. The builder opens the source with SQLite `mode=ro` and
+`PRAGMA query_only=ON`, streams rows with bounded memory, retains the first 30
+forms in source order, validates the completed index, and atomically publishes
+it. A process lock prevents concurrent builders. An interrupted build leaves an
+existing valid Sidecar untouched; incomplete build files are removed on the
+next safe build.
+
+The Sidecar records the source path, schema version, size, nanosecond mtime,
+device and inode. A missing, stale, unsupported, or corrupt Sidecar never causes
+a runtime fallback to the unindexed source-table scan. Core definitions,
+translations, pronunciation, examples and alternative meanings remain usable,
+while **More** displays a rebuild instruction for inflections. Sidecar files,
+build artifacts and lock files are generated runtime data and must not be
+committed.
+
 ## Lookup, morphology, and contextual selection
 
 The importer indexes lemmas and source-provided forms. Irregular English forms,
@@ -155,11 +183,14 @@ media controller is not sought, paused, or restarted by pronunciation lookup.
 ## API and caching
 
 `POST /api/dictionary/lookup` accepts `language`, a bounded lexical `word`, a
-bounded source `sentence`, and `target_language=zh-CN`. It returns optional
+bounded source `sentence`, `target_language=zh-CN`, and optional
+`include_inflections`. It returns optional
 lemma/POS/pronunciation fields, the three explanation levels, contextual
-selection status, forms, examples, alternate senses, and attribution. Unknown
-and unconfigured states are normal structured responses. Invalid input is 422;
-an unreadable or unsupported index is a controlled 503.
+selection status, forms, a structured inflection-index status/message, examples,
+alternate senses, and attribution. Unknown and unconfigured states are normal
+structured responses. Invalid input is 422; an unreadable or unsupported source
+dictionary is a controlled 503. A Sidecar problem is a non-fatal structured
+state because it affects only optional forms.
 
 Successful and unavailable lookups use a process-local 1,024-entry LRU cache.
 Lookups are read-only and do not persist full transcript text.

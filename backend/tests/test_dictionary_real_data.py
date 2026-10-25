@@ -44,6 +44,29 @@ def real_dictionary() -> DictionaryService:
 def test_installed_dictionary_lemma_resolution(
     real_dictionary, language, surface, sentence, expected_lemma
 ):
+    entries = real_dictionary.provider.lookup(language, surface, sentence)
+    applicable = {
+        entry.entry_id
+        for entry in real_dictionary._candidate_entries(entries, sentence, surface)
+    }
+    ranked = real_dictionary._ranked_senses(entries, sentence, surface)
+    best_by_entry = {}
+    for candidate in ranked:
+        best_by_entry.setdefault(candidate.entry.entry_id, candidate)
+    evidence = []
+    for entry in entries:
+        candidate = best_by_entry.get(entry.entry_id)
+        evidence.append({
+            "lemma": entry.lemma,
+            "part_of_speech": entry.part_of_speech,
+            "match_kind": entry.match_kind,
+            "applicable": entry.entry_id in applicable,
+            "lexical_score": candidate.lexical_score if candidate else None,
+            "morphology_score": candidate.morphology_score if candidate else None,
+            "greeting_score": candidate.greeting_score if candidate else None,
+            "noun_context_score": candidate.noun_context_score if candidate else None,
+            "selected_definition": candidate.sense.definition if candidate else None,
+        })
     result = real_dictionary.lookup(language, surface, sentence)
     print(json.dumps({
         "surface": surface,
@@ -56,6 +79,7 @@ def test_installed_dictionary_lemma_resolution(
         "cross_language": result.explanations.cross_language.value,
         "chinese": result.explanations.chinese.value,
         "alternate_sense_count": len(result.alternate_senses),
+        "candidate_evidence": evidence,
     }, ensure_ascii=False, sort_keys=True))
     assert (result.lemma or "").casefold() == expected_lemma.casefold()
     assert result.surface_form == surface
@@ -67,10 +91,16 @@ def test_installed_dictionary_context_and_translation_quality(real_dictionary):
     assert bank.status == "found"
 
     greeting = real_dictionary.lookup("de", "Hallo", "Hallo, wie geht es dir?")
-    assert greeting.part_of_speech in {"intj", "interj", "interjection"}
-    assert greeting.status == "found"
+    assert greeting.part_of_speech == "phrase"
+    greeting_definition = (greeting.explanations.monolingual.value or "").casefold()
+    assert any(value.casefold() in greeting_definition for value in ("grüß", "gruß", "begrüß"))
+    assert greeting.status in {"found", "ambiguous"}
 
-    for result in (bank, greeting):
+    nominal = real_dictionary.lookup("de", "Hallo", "Das Hallo war laut.")
+    assert nominal.part_of_speech == "noun"
+    assert nominal.explanations.monolingual.value
+
+    for result in (bank, greeting, nominal):
         chinese = result.explanations.chinese.value
         if chinese:
             assert not re.fullmatch(r"[\W\d_\u0400-\u052f]+", chinese)

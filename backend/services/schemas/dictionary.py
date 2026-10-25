@@ -11,6 +11,9 @@ class DictionaryModel(BaseModel):
 
 DictionaryStatus = Literal["found", "ambiguous", "not_found", "not_configured"]
 ExplanationStatus = Literal["available", "unavailable"]
+InflectionsStatus = Literal[
+    "not_requested", "available", "index_unavailable", "index_stale", "index_invalid"
+]
 
 
 class DictionaryLookupRequest(DictionaryModel):
@@ -18,6 +21,7 @@ class DictionaryLookupRequest(DictionaryModel):
     word: str = Field(min_length=1, max_length=100)
     sentence: str = Field(default="", max_length=2_000)
     target_language: Literal["zh-CN"] = "zh-CN"
+    include_inflections: bool = False
 
     @field_validator("word")
     @classmethod
@@ -88,6 +92,8 @@ class DictionaryLookupResponse(DictionaryModel):
     explanations: DictionaryExplanationLevels
     context: DictionaryContext
     inflections: list[str] = Field(default_factory=list, max_length=30)
+    inflections_status: InflectionsStatus = "not_requested"
+    inflections_message: str | None = None
     examples: list[str] = Field(default_factory=list, max_length=10)
     alternate_senses: list[DictionarySense] = Field(default_factory=list)
     source_attribution: list[DictionaryAttribution] = Field(default_factory=list)
