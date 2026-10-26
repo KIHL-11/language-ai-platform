@@ -204,6 +204,47 @@ describe('DictionaryPanel', () => {
     expect(play).toHaveBeenCalledTimes(2)
   })
 
+  it.each([
+    ['tts_upstream_rejected', 502, 'pronunciation service rejected the request'],
+    ['tts_upstream_unavailable', 503, 'pronunciation service is unreachable'],
+    ['tts_upstream_timeout', 504, 'pronunciation service timed out'],
+    ['tts_no_audio', 502, 'pronunciation service returned no audio'],
+    ['tts_upstream_error', 502, 'pronunciation service returned an unexpected response'],
+    ['tts_invalid_response', 502, 'local pronunciation API returned an invalid response'],
+  ])('preserves the TTS error category %s', async (code, status, message) => {
+    const user = userEvent.setup()
+    fetchMock.mockImplementation((url: string) => String(url).endsWith('/api/tts')
+      ? Promise.resolve(response({ detail: { code, message: 'safe server message' } }, status))
+      : Promise.resolve(response(dictionaryEntry)))
+
+    render(panel())
+    await user.click(await screen.findByRole('button', { name: /en-GB.*TTS/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+  })
+
+  it('distinguishes a local TTS API connection failure from audio playback failure', async () => {
+    const user = userEvent.setup()
+    fetchMock.mockImplementation((url: string) => String(url).endsWith('/api/tts')
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : Promise.resolve(response(dictionaryEntry)))
+
+    render(panel())
+    await user.click(await screen.findByRole('button', { name: /en-GB.*TTS/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('local pronunciation API is unreachable')
+  })
+
+  it('reports dictionary recording playback failure separately from TTS failures', async () => {
+    const user = userEvent.setup()
+    play.mockRejectedValueOnce(new Error('browser playback rejected'))
+
+    render(panel())
+    await user.click(await screen.findByRole('button', { name: /US.*dictionary recording/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('dictionary recording could not be played')
+  })
+
   it('handles pronunciation, lookup, unknown, and unconfigured states without crashing', async () => {
     const user = userEvent.setup()
     play.mockRejectedValueOnce(new Error('offline'))
@@ -211,7 +252,7 @@ describe('DictionaryPanel', () => {
     const onClose = vi.fn()
     const { rerender } = render(<DictionaryPanel selection={{ word: 'Sentence', sentence: 'Sentence 2.', language: 'en' }} anchor={anchor} onClose={onClose} />)
     await user.click(await screen.findByRole('button', { name: /US.*dictionary recording/ }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Pronunciation audio is unavailable')
+    expect(await screen.findByRole('alert')).toHaveTextContent('dictionary recording could not be played')
 
     fetchMock.mockResolvedValueOnce(response({ ...dictionaryEntry, status: 'not_found', lemma: null }))
     rerender(<DictionaryPanel selection={{ word: 'Unknown', sentence: 'Unknown.', language: 'en' }} anchor={anchor} onClose={onClose} />)

@@ -4,6 +4,7 @@ r"""
 跑法：  .venv\Scripts\python -m uvicorn app:app --port 8000
 然后浏览器打开 http://localhost:8000
 """
+import asyncio
 import base64
 import math
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Optional
 
 import edge_tts
+from aiohttp import ClientError, ClientResponseError
+from edge_tts.exceptions import EdgeTTSException, NoAudioReceived, WebSocketError
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -125,6 +128,16 @@ class TTSReq(BaseModel):
     voice: Optional[str] = None   # 指定具体嗓音，优先于 accent/gender
     rate: float = 1.0             # 0.5 ~ 2.0
 
+TTS_TIMEOUT_SECONDS = 20
+
+
+def _tts_error(status_code: int, code: str, message: str) -> HTTPException:
+    """Return a stable, non-sensitive error contract for pronunciation clients."""
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
 def rate_to_str(rate: float) -> str:
     # edge-tts 的语速是百分比字符串： 1.0->+0%  1.2->+20%  0.5->-50%
     pct = int(round((rate - 1.0) * 100))
@@ -160,7 +173,51 @@ async def api_tts(req: TTSReq):
     if key in _cache:
         audio, marks = _cache[key]
     else:
-        audio, marks = await synth(req.text, voice, req.rate)
+        try:
+            async with asyncio.timeout(TTS_TIMEOUT_SECONDS):
+                audio, marks = await synth(req.text, voice, req.rate)
+        except TimeoutError as exc:
+            raise _tts_error(
+                504,
+                "tts_upstream_timeout",
+                "The pronunciation service did not respond in time.",
+            ) from exc
+        except NoAudioReceived as exc:
+            raise _tts_error(
+                502,
+                "tts_no_audio",
+                "The pronunciation service returned no audio.",
+            ) from exc
+        except ClientResponseError as exc:
+            if exc.status in {401, 403}:
+                raise _tts_error(
+                    502,
+                    "tts_upstream_rejected",
+                    "The pronunciation service rejected the request.",
+                ) from exc
+            raise _tts_error(
+                502,
+                "tts_upstream_error",
+                "The pronunciation service returned an unexpected response.",
+            ) from exc
+        except (ClientError, WebSocketError) as exc:
+            raise _tts_error(
+                503,
+                "tts_upstream_unavailable",
+                "The pronunciation service could not be reached.",
+            ) from exc
+        except EdgeTTSException as exc:
+            raise _tts_error(
+                502,
+                "tts_upstream_error",
+                "The pronunciation service returned an unexpected response.",
+            ) from exc
+        if not audio:
+            raise _tts_error(
+                502,
+                "tts_no_audio",
+                "The pronunciation service returned no audio.",
+            )
         if len(_cache) > 800:
             _cache.pop(next(iter(_cache)))
         _cache[key] = (audio, marks)
