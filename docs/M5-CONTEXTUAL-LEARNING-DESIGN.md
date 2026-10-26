@@ -11,7 +11,91 @@ in Listening. It is intentionally separate from Study Bank and Daily Review.
 - M5.3: bounded, user-approved video chunk recommendations.
 - M5.4: saved-chunk speaking practice with transcript-grounded reuse evidence.
 
-M5.1 does not save words, alter `ReviewState`, or rate SRS cards.
+M5.1 lookup alone does not save words, alter `ReviewState`, or rate SRS cards.
+M5.2 adds a separate, explicit **Save Word** action to the Listening dictionary.
+It reuses Study Bank and Daily Review rather than creating another vocabulary
+store.
+
+## M5.2 contextual word saving
+
+The complete flow is:
+
+```text
+Listening subtitle word
+  -> local dictionary lookup
+  -> explicit Save Word
+  -> authoritative Library context resolution
+  -> Study Bank word
+  -> existing Daily Review new-card queue
+```
+
+The write endpoint is:
+
+```text
+POST /api/library/items/{library_item_id}/study-bank/words
+{
+  "user_id": "...",
+  "sentence_id": 3,
+  "word": "children"
+}
+```
+
+The browser does not submit a Lesson ID, media title, URL, sentence content,
+timestamps, lemma, part of speech, meaning, or provenance. The backend loads
+the Library item, requires `sentence_id` to identify exactly one sentence,
+checks that `word` is a complete Unicode lexical token in that sentence, and
+performs the same local contextual dictionary lookup again. Only source-backed
+`found` and `ambiguous` results can be saved. Missing or unconfigured dictionary
+data produces a controlled error and no partial Study Bank record.
+
+The resulting word uses the clicked surface form plus the dictionary lemma and
+part of speech. Its meaning is the source-provided Simplified Chinese
+translation when available, otherwise the empty string; a monolingual or
+cross-language definition is never substituted. The first source example is
+stored when present. Media/Lesson IDs, source URL/title, exact sentence and
+translation, timestamps, and target language all come from the authoritative
+Library snapshot.
+
+The read-only companion endpoint is:
+
+```text
+GET /api/library/items/{library_item_id}/study-bank/words/status
+    ?user_id=...&sentence_id=3&word=children
+```
+
+It uses the same grounding and dictionary-derived lemma identity as the write.
+The compact dictionary renders immediately while this status check runs.
+
+Study Bank's existing identity remains authoritative:
+
+```text
+user_id + source_language + kind + normalized lemma
+```
+
+Inflected surfaces therefore converge on one word card when the local source
+dictionary resolves them to the same lemma. A new media sentence appends one
+immutable provenance snapshot; an identical snapshot is not duplicated.
+Existing meanings, notes, active state, and `ReviewState` are preserved.
+Saving never resets due dates, intervals, ease, counters, or review history.
+An archived match remains archived and is shown as **Previously saved ·
+Archived**. Only the deliberate **Restore** action uses the existing Study Bank
+PATCH endpoint, which preserves that review state.
+
+A new active item starts with the existing `ReviewState.new()` behavior and is
+therefore eligible for Daily Review as a new card. Contextual word saving never
+writes to Chunk Memory and does not rate or reschedule a card.
+
+The clicked transcript row carries its own Library item ID and sentence ID into
+the dictionary selection. Saving never derives provenance from the currently
+playing sentence, because a learner can click a non-current row. Requests are
+isolated by Library item, sentence ID, word, and language so delayed status or
+lookup responses cannot replace the state for a newer selection.
+
+Blind mode and hidden source text contain no lexical controls or save entry
+point. Hiding text closes the dictionary immediately. Lookup, status, save, and
+restore do not call the media controller, change playback, select a sentence,
+alter loops, or affect Guided Lesson progress. A failed write stays visible and
+requires an explicit Retry; writes are never retried automatically.
 
 ## Architecture
 
@@ -219,8 +303,36 @@ an explicit pronunciation action. No credentials are used or returned.
 - Separable and inflected forms require a source-provided indexed form.
 - Commons per-file audio license metadata is not yet imported.
 - Edge TTS is a network fallback, not offline or a dictionary recording.
-- No word saving, contextual AI explanation, chunk recommendation, or speaking
-  integration is implemented until M5.2–M5.4.
+- No contextual AI explanation, chunk recommendation, or speaking integration
+  is implemented until M5.3–M5.4. M5.2 saving is explicit and source-grounded.
+
+## M5.2 Real-Mac acceptance
+
+1. Start the local backend with the installed Kaikki dictionary and forms
+   Sidecar, then start/open the Personal Desktop frontend.
+2. Open a saved English media item in Listening, click a visible inflected word,
+   and confirm the dictionary appears without pausing or seeking playback.
+3. Confirm **Save Word** appears after the non-blocking saved-status check.
+4. Save it and verify **Saved** appears only after the request completes.
+5. Open Words & Chunks and confirm the surface, dictionary lemma/POS, available
+   Chinese meaning, and exact media sentence/timestamp provenance.
+6. Reopen the same word and confirm **Previously Saved**, with no duplicate
+   card or duplicate provenance.
+7. Save another surface form resolving to the same lemma and confirm it reuses
+   the card while adding only genuinely new provenance.
+8. Open Daily Review and confirm a newly created active word appears as a new
+   card without changing any existing card's schedule.
+9. Archive the word in Words & Chunks, reopen it in Listening, confirm
+   **Previously saved · Archived**, then deliberately Restore it and confirm
+   its previous review counters and due date remain unchanged.
+10. While another sentence is playing, click a different transcript row and
+    verify the saved provenance uses the clicked row, not the playing row.
+11. Simulate a backend failure, confirm **Save Failed** leaves the dictionary
+    open, and verify Retry occurs only after pressing it.
+12. Enter Blind mode and hide source text; confirm the panel closes and no word
+    or save label remains in the focus/accessibility tree.
+13. Recheck pronunciation, the three explanation levels, More/inflections,
+    Listening auto-follow/loops, Words & Chunks, and Daily Review.
 
 ## Real-Mac acceptance checklist
 

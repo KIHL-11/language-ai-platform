@@ -31,6 +31,13 @@ const response = (body: unknown, status = 200) => ({ ok: status < 400, status, j
 function fetchRoutes(url: string, options?: RequestInit) {
   const value = String(url)
   if (value.includes('/study-candidates')) return Promise.resolve(response({ candidates: studyCandidates }))
+  if (value.includes('/study-bank/words/status')) return Promise.resolve(response({ status: 'unsaved', item: null }))
+  if (value.endsWith('/study-bank/words') && options?.method === 'POST') {
+    return Promise.resolve(response({
+      item: { ...studyItem, text: 'Sentence', lemma: 'sentence', normalized_text: 'sentence' },
+      created: true,
+    }))
+  }
   if (value.includes('/study-bank/items/bulk')) return Promise.resolve(response({ items: [studyItem] }))
   if (value.includes('/dictionary/lookup')) return Promise.resolve(response(dictionaryEntry))
   if (value.includes('/listening-progress') && options?.method === 'PATCH') {
@@ -192,6 +199,53 @@ describe('Listening Workspace', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/review/items/'))).toBe(false)
     await user.click(screen.getByRole('button', { name: 'Close dictionary' }))
     expect(screen.queryByLabelText('Contextual dictionary')).not.toBeInTheDocument()
+  })
+
+  it('saves the word from the exact clicked transcript row without changing playback', async () => {
+    const user = userEvent.setup()
+    const { fake } = setup()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled())
+    const lookupButtons = screen.getAllByRole('button', { name: 'Look up Sentence' })
+    const seekCalls = fake?.seek.mock.calls.length ?? 0
+    await user.click(lookupButtons.at(-1)!)
+    await user.click(await screen.findByRole('button', { name: 'Save Word' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+
+    const statusCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/study-bank/words/status'))
+    expect(String(statusCall?.[0])).toContain('sentence_id=3')
+    const saveCall = fetchMock.mock.calls.find(([url, options]) =>
+      String(url).endsWith('/study-bank/words') && options?.method === 'POST')
+    expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ sentence_id: 3, word: 'Sentence' })
+    expect(fake?.seek).toHaveBeenCalledTimes(seekCalls)
+    expect(fake?.time).toBe(libraryItem.listening_progress.last_position_seconds)
+  })
+
+  it('reflects a contextual save in existing Words candidates', async () => {
+    const user = userEvent.setup()
+    fetchMock.mockImplementation((url: string, options?: RequestInit) =>
+      String(url).endsWith('/study-bank/words') && options?.method === 'POST'
+        ? Promise.resolve(response({ item: studyItem, created: true }))
+        : fetchRoutes(url, options))
+    const item = {
+      ...libraryItem,
+      lesson: {
+        ...libraryItem.lesson,
+        sentences: libraryItem.lesson.sentences.map((sentence) => sentence.id === 1
+          ? { ...sentence, text: 'We are figuring things out.' }
+          : sentence),
+      },
+    }
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({
+      controller: new FakeController(), kind: 'audio', message: null,
+    })
+    render(<ListeningWorkspace item={item} onBack={vi.fn()} controllerFactory={factory} />)
+    await user.click(screen.getByRole('button', { name: 'Seek to We are figuring things out.' }))
+    await user.click(screen.getAllByRole('button', { name: 'Look up figuring' })[0])
+    await user.click(await screen.findByRole('button', { name: 'Save Word' }))
+
+    const row = screen.getByText('figuring', { selector: 'strong' }).closest('li')
+    expect(row).not.toBeNull()
+    expect(row).toHaveTextContent('Saved')
   })
 
   it('supports German Unicode lookup and never exposes lexical controls while Blind text is hidden', async () => {

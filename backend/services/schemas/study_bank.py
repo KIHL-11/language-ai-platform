@@ -191,6 +191,29 @@ class StudyBulkResult(StudyModel):
     created: int
 
 
+class ContextualWordSaveRequest(StudyModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    sentence_id: int = Field(gt=0)
+    word: str = Field(min_length=1, max_length=100)
+
+    @field_validator("word")
+    @classmethod
+    def lexical_word_only(cls, value: str):
+        if not any(character.isalpha() for character in value):
+            raise ValueError("word must contain lexical characters")
+        return value
+
+
+class ContextualWordSaveResult(StudyModel):
+    item: StudyItem
+    created: bool
+
+
+class ContextualWordStatusResult(StudyModel):
+    status: Literal["unsaved", "saved", "archived"]
+    item: StudyItem | None = None
+
+
 class StudyListResponse(StudyModel):
     items: list[StudyItem]
 

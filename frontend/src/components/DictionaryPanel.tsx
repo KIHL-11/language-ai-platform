@@ -10,14 +10,32 @@ import {
 import { createPortal } from 'react-dom'
 
 import { lookupDictionary, synthesizePronunciation } from '../api/dictionary'
+import {
+  getContextualWordStatus,
+  saveContextualWord,
+  updateStudyItem,
+} from '../api/studyBank'
 import { calculateDictionaryPopoverPosition, type DictionaryPopoverPosition } from '../dictionary/popoverPosition'
 import type { DictionaryLookup, DictionaryPronunciation, DictionarySelection } from '../types/dictionary'
+import type { StudyItem } from '../types/studyBank'
 
 
 interface DictionaryPanelProps {
   selection: DictionarySelection
   anchor: HTMLElement
   onClose: () => void
+  onStudyItemSaved?: (item: StudyItem) => void
+}
+
+type SaveState = 'checking' | 'unsaved' | 'saving' | 'saved' | 'previously-saved' |
+  'archived' | 'status-error' | 'save-error' | 'restoring' | 'restore-error'
+
+function contextualSelection(selection: DictionarySelection): selection is DictionarySelection & {
+  libraryItemId: string
+  sentenceId: number
+  learnerId: string
+} {
+  return Boolean(selection.libraryItemId && selection.sentenceId && selection.learnerId)
 }
 
 function Explanation({ value }: { value: DictionaryLookup['explanations']['monolingual'] }) {
@@ -36,7 +54,7 @@ function levelLabels(language: 'en' | 'de') {
     : ['01 English → English', '02 English → Deutsch', '03 English → 中文']
 }
 
-function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelProps) {
+function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }: DictionaryPanelProps) {
   const [entry, setEntry] = useState<DictionaryLookup | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState<string | null>(null)
@@ -44,6 +62,8 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
   const [moreLoading, setMoreLoading] = useState(false)
   const [moreLoaded, setMoreLoaded] = useState(false)
   const [moreError, setMoreError] = useState<string | null>(null)
+  const [saveState, setSaveState] = useState<SaveState>('checking')
+  const [studyItem, setStudyItem] = useState<StudyItem | null>(null)
   const [position, setPosition] = useState<DictionaryPopoverPosition>(() =>
     calculateDictionaryPopoverPosition(anchor.getBoundingClientRect(), 0, window.innerWidth, window.innerHeight))
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -64,6 +84,34 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
     })
     return () => controller.abort()
   }, [selection])
+
+  const loadSaveStatus = useCallback((signal?: AbortSignal) => {
+    if (!contextualSelection(selection)) return
+    void getContextualWordStatus(
+      selection.libraryItemId,
+      selection.learnerId,
+      selection.sentenceId,
+      selection.word,
+      signal,
+    ).then((result) => {
+      setStudyItem(result.item)
+      setSaveState(result.status === 'saved' ? 'previously-saved' : result.status)
+    }).catch((reason) => {
+      if ((reason as { name?: string }).name !== 'AbortError') setSaveState('status-error')
+    })
+  }, [selection])
+
+  function retrySaveStatus() {
+    setSaveState('checking')
+    loadSaveStatus()
+  }
+
+  useEffect(() => {
+    if (!entry || !['found', 'ambiguous'].includes(entry.status) || !contextualSelection(selection)) return
+    const controller = new AbortController()
+    loadSaveStatus(controller.signal)
+    return () => controller.abort()
+  }, [entry, loadSaveStatus, selection])
 
   useEffect(() => {
     closeRef.current?.focus({ preventScroll: true })
@@ -158,6 +206,41 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
     }
   }
 
+  async function saveWord() {
+    if (!contextualSelection(selection) || saveState === 'saving') return
+    setSaveState('saving')
+    try {
+      const result = await saveContextualWord(
+        selection.libraryItemId,
+        selection.learnerId,
+        selection.sentenceId,
+        selection.word,
+      )
+      setStudyItem(result.item)
+      if (!result.item.active) {
+        setSaveState('archived')
+      } else {
+        setSaveState('saved')
+        onStudyItemSaved?.(result.item)
+      }
+    } catch {
+      setSaveState('save-error')
+    }
+  }
+
+  async function restoreWord() {
+    if (!contextualSelection(selection) || !studyItem || saveState === 'restoring') return
+    setSaveState('restoring')
+    try {
+      const restored = await updateStudyItem(selection.learnerId, studyItem.id, { active: true })
+      setStudyItem(restored)
+      setSaveState('saved')
+      onStudyItemSaved?.(restored)
+    } catch {
+      setSaveState('restore-error')
+    }
+  }
+
   function loadInflectionsWhenOpened(event: SyntheticEvent<HTMLDetailsElement>) {
     if (!event.currentTarget.open) {
       const controller = moreControllerRef.current
@@ -226,6 +309,19 @@ function DictionaryPanelContent({ selection, anchor, onClose }: DictionaryPanelP
       </div>
       {pronunciationError && <p role="alert" className="mt-2 text-xs text-[#8f1d14]">{pronunciationError}</p>}
 
+      {contextualSelection(selection) && <div className="mt-3 border-t border-[#dfe7e3] pt-3" aria-live="polite">
+        {saveState === 'checking' && <p role="status" className="text-xs text-[#66726e]">Checking saved status…</p>}
+        {saveState === 'unsaved' && <button type="button" onClick={() => void saveWord()} className="h-9 rounded-md bg-[#176b5b] px-3 text-sm font-semibold text-white">Save Word</button>}
+        {saveState === 'saving' && <button type="button" disabled className="h-9 rounded-md bg-[#9aaba5] px-3 text-sm font-semibold text-white">Saving…</button>}
+        {saveState === 'saved' && <p className="text-sm font-semibold text-[#176b5b]">Saved</p>}
+        {saveState === 'previously-saved' && <p className="text-sm font-semibold text-[#176b5b]">Previously Saved</p>}
+        {saveState === 'archived' && <div className="flex flex-wrap items-center gap-2"><span className="text-sm">Previously saved · Archived</span><button type="button" onClick={() => void restoreWord()} className="h-8 rounded-md border border-[#176b5b] px-2 text-xs font-semibold">Restore</button></div>}
+        {saveState === 'restoring' && <button type="button" disabled className="h-8 rounded-md border border-[#9aaba5] px-2 text-xs">Restoring…</button>}
+        {saveState === 'status-error' && <div><p role="alert" className="text-xs text-[#8f1d14]">Saved status unavailable.</p><button type="button" onClick={retrySaveStatus} className="mt-1 text-xs font-semibold text-[#176b5b]">Retry status</button></div>}
+        {saveState === 'save-error' && <div><p role="alert" className="text-xs text-[#8f1d14]">Save Failed</p><button type="button" onClick={() => void saveWord()} className="mt-1 text-xs font-semibold text-[#176b5b]">Retry</button></div>}
+        {saveState === 'restore-error' && <div><p role="alert" className="text-xs text-[#8f1d14]">Restore failed.</p><button type="button" onClick={() => void restoreWord()} className="mt-1 text-xs font-semibold text-[#176b5b]">Retry Restore</button></div>}
+      </div>}
+
       <div className="mt-3 space-y-1">
         <details open className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[0]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.monolingual} /></div></details>
         <details className="border-t border-[#dfe7e3] py-2"><summary className="cursor-pointer text-sm font-semibold">{labels[1]}</summary><div className="mt-1.5"><Explanation value={entry.explanations.cross_language} /></div></details>
@@ -255,7 +351,7 @@ export default function DictionaryPanel(props: DictionaryPanelProps) {
   const { selection } = props
   return createPortal(
     <DictionaryPanelContent
-      key={`${selection.language}:${selection.word}:${selection.sentence}`}
+      key={`${selection.language}:${selection.libraryItemId ?? ''}:${selection.sentenceId ?? ''}:${selection.word}:${selection.sentence}`}
       {...props}
     />,
     document.body,
