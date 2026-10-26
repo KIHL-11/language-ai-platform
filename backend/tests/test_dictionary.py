@@ -815,6 +815,98 @@ def test_gzip_import_streams_and_rejects_entries_from_the_wrong_edition_language
         ).fetchall() == [("de", "de", "Haus"), ("en", "en", "hello")]
 
 
+def test_importer_requires_distinctive_evidence_for_entry_level_sense_translations(tmp_path):
+    source = tmp_path / "strict-sense-alignment.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(source, [{
+        "word": "get",
+        "lang_code": "en",
+        "pos": "verb",
+        "translations": [
+            {"code": "zh", "word": "成为；获得；得到", "sense": "to get"},
+            {"code": "zh", "word": "理解", "sense": "understand meaning"},
+            {"code": "zh", "word": "无提示译文"},
+            {"code": "zh", "word": "元标签译文", "sense": "figurative sense"},
+            {"code": "zh", "word": "仅词元译文", "sense": "get"},
+        ],
+        "senses": [
+            {
+                "glosses": ["To understand the meaning of something."],
+                "translations": [{"code": "zh", "word": "明白"}],
+            },
+            {"glosses": ["To become or enter a state."]},
+            {
+                "glosses": ["To obtain or acquire something."],
+                "translations": [{"code": "zh", "word": "获得"}],
+            },
+            {"glosses": ["A figurative sense used in speech."]},
+            {"glosses": ["To get possession of something."]},
+        ],
+    }])
+
+    import_kaikki_sources(
+        [(source, "en", "https://kaikki.org/dictionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+
+    with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
+        stored = [
+            (definition, json.loads(translations).get("zh-CN", []))
+            for definition, translations in connection.execute(
+                "SELECT definition, translations_json FROM senses ORDER BY sense_index"
+            )
+        ]
+
+    assert stored == [
+        ("To understand the meaning of something.", ["明白", "理解"]),
+        ("To become or enter a state.", []),
+        ("To obtain or acquire something.", ["获得"]),
+        ("A figurative sense used in speech.", []),
+        ("To get possession of something.", []),
+    ]
+    assert sum(bool(values) for _, values in stored) == 2
+    assert sum("成为；获得；得到" in values for _, values in stored) == 0
+    assert all("成为；获得；得到" not in values for _, values in stored)
+    assert all("无提示译文" not in values for _, values in stored)
+    assert all("元标签译文" not in values for _, values in stored)
+    assert all("仅词元译文" not in values for _, values in stored)
+
+
+def test_importer_uses_distinctive_german_tokens_for_sense_alignment(tmp_path):
+    source = tmp_path / "strict-german-sense-alignment.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(source, [{
+        "word": "kommen",
+        "lang_code": "de",
+        "pos": "verb",
+        "translations": [
+            {"code": "zh", "word": "泛化译文", "sense": "zu kommen"},
+            {"code": "zh", "word": "到达", "sense": "einen Ort erreichen"},
+        ],
+        "senses": [
+            {"glosses": ["Einen Ort erreichen."]},
+            {"glosses": ["Zu einem Ergebnis kommen."]},
+        ],
+    }])
+
+    import_kaikki_sources(
+        [(source, "de", "https://kaikki.org/dewiktionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+
+    with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
+        stored = [
+            json.loads(row[0]).get("zh-CN", [])
+            for row in connection.execute(
+                "SELECT translations_json FROM senses ORDER BY sense_index"
+            )
+        ]
+
+    assert stored == [["到达"], []]
+
+
 @pytest.mark.parametrize("damage", ["truncated", "corrupt"])
 def test_invalid_gzip_is_detected_without_replacing_existing_database(tmp_path, damage):
     database = tmp_path / "dictionary.sqlite3"

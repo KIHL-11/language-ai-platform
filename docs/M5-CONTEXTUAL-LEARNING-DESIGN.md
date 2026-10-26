@@ -236,8 +236,17 @@ overlap between the current sentence and source definitions/examples. A unique
 positive match is prioritized. Otherwise source ordering is used and multiple
 senses are marked ambiguous under **More meanings**. It is not semantic AI
 ranking. For multi-sense entries, a translation is associated only when its
-source sense label can be linked to that definition; uncertain translations
-remain unavailable rather than being shown for the wrong sense.
+source sense label and definition share at least one distinctive lexical token.
+English/German function words, the entry lemma, generic placeholders, and usage
+labels are not alignment evidence. A translation nested directly under a source
+sense is retained without this heuristic and takes priority over aligned
+entry-level translations. Unscoped entry-level translations remain valid for a
+single-sense entry; uncertain multi-sense translations remain unavailable rather
+than being shown for the wrong sense.
+
+This rule is applied while building SQLite. Updating the importer does not repair
+an already-built dictionary: changing existing data requires a separately
+approved backup, rebuild, validation, and atomic replacement workflow.
 
 ## Three-level explanation contract
 

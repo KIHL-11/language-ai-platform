@@ -24,6 +24,18 @@ _ENTRY_MATCH_LIMIT = 20
 _SEPARATED_FORM_SCAN_LIMIT = 100
 _SENSE_LIMIT = 100
 _PRONUNCIATION_LIMIT = 20
+_SENSE_ALIGNMENT_IGNORED_TOKENS = frozenset({
+    # English and German function words cannot distinguish dictionary senses.
+    "a", "an", "and", "are", "as", "at", "be", "being", "by", "das", "der",
+    "die", "ein", "eine", "einem", "einen", "einer", "eines",
+    "er", "es", "for", "from", "für", "im", "in", "is", "ist", "mit", "of",
+    "on", "oder", "or", "the", "to", "und", "vom", "von", "was", "were", "with",
+    "zu", "zum", "zur",
+    # Source labels and generic placeholders describe usage, not lexical meaning.
+    "archaic", "colloquial", "etwas", "figurative", "general", "idiomatic",
+    "intransitive", "jemand", "literal", "meaning", "obsolete", "one", "person",
+    "sense", "slang", "something", "term", "thing", "transitive", "usage", "word",
+})
 
 
 def normalize_lexical(value: str) -> str:
@@ -168,20 +180,33 @@ def _translation_code(value: object) -> str | None:
 
 
 def _sense_translation_values(
-    records: list[tuple[str, str, str]],
+    entry_records: list[tuple[str, str, str]],
+    sense_records: list[tuple[str, str]],
     definition: str,
     *,
+    lemma: str,
     sense_count: int,
 ) -> dict[str, list[str]]:
     output: dict[str, list[str]] = {}
-    definition_tokens = set(lexical_tokens(definition))
-    for code, word, hint in records:
-        hint_tokens = set(lexical_tokens(hint))
-        if sense_count > 1 and (not hint_tokens or not definition_tokens.intersection(hint_tokens)):
-            continue
+
+    def append(code: str, word: str) -> None:
         values = output.setdefault(code, [])
         if word not in values and len(values) < 10:
             values.append(word)
+
+    # A translation nested under a source sense is direct evidence and takes priority.
+    for code, word in sense_records:
+        append(code, word)
+
+    lemma_tokens = set(lexical_tokens(lemma))
+    ignored = _SENSE_ALIGNMENT_IGNORED_TOKENS | lemma_tokens
+    definition_tokens = set(lexical_tokens(definition)) - ignored
+    for code, word, hint in entry_records:
+        if sense_count > 1:
+            hint_tokens = set(lexical_tokens(hint)) - ignored
+            if not hint_tokens or not definition_tokens.intersection(hint_tokens):
+                continue
+        append(code, word)
     return output
 
 
@@ -296,7 +321,7 @@ def import_kaikki_sources(
                             definitions = _strings(sense.get("glosses"), limit=3, max_length=2_000)
                             if not definitions:
                                 continue
-                            local_records = list(translation_records)
+                            sense_translation_records: list[tuple[str, str]] = []
                             for translation in sense.get("translations", []):
                                 if not isinstance(translation, dict):
                                     continue
@@ -307,10 +332,12 @@ def import_kaikki_sources(
                                 )
                                 word = translation.get("word")
                                 if code and isinstance(word, str) and word.strip():
-                                    local_records.append((code, word.strip(), definitions[0]))
+                                    sense_translation_records.append((code, word.strip()))
                             translations = _sense_translation_values(
-                                local_records,
+                                translation_records,
+                                sense_translation_records,
                                 definitions[0],
+                                lemma=lemma,
                                 sense_count=valid_sense_count,
                             )
                             examples: list[str] = []
