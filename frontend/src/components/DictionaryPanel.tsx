@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 
-import { lookupDictionary, synthesizePronunciation } from '../api/dictionary'
+import { lookupDictionary, PronunciationSynthesisError, synthesizePronunciation } from '../api/dictionary'
 import {
   getContextualWordStatus,
   saveContextualWord,
@@ -197,12 +197,29 @@ function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }
       audio.addEventListener('ended', () => setPlaying(null), { once: true })
       audio.addEventListener('error', () => {
         setPlaying(null)
-        setPronunciationError('Pronunciation audio is unavailable. Try again when online.')
+        setPronunciationError(pronunciation.tts_fallback
+          ? 'The synthesized pronunciation could not be played in this browser.'
+          : 'The dictionary recording could not be played. Try another pronunciation source.')
       }, { once: true })
       await audio.play()
-    } catch {
+    } catch (error) {
       setPlaying(null)
-      setPronunciationError('Pronunciation audio is unavailable. Try again when online.')
+      if (!pronunciation.tts_fallback) {
+        setPronunciationError('The dictionary recording could not be played. Try another pronunciation source.')
+      } else if (error instanceof PronunciationSynthesisError) {
+        const messages: Record<string, string> = {
+          tts_upstream_rejected: 'The pronunciation service rejected the request. Try again later.',
+          tts_upstream_unavailable: 'The pronunciation service is unreachable. Check your connection and try again.',
+          tts_upstream_timeout: 'The pronunciation service timed out. Try again.',
+          tts_no_audio: 'The pronunciation service returned no audio. Try another pronunciation.',
+          tts_upstream_error: 'The pronunciation service returned an unexpected response. Try again later.',
+          tts_api_unreachable: 'The local pronunciation API is unreachable. Check that Language AI is running.',
+          tts_invalid_response: 'The local pronunciation API returned an invalid response.',
+        }
+        setPronunciationError(messages[error.code] ?? 'Pronunciation synthesis failed. Try again later.')
+      } else {
+        setPronunciationError('The synthesized pronunciation could not be played in this browser.')
+      }
     }
   }
 

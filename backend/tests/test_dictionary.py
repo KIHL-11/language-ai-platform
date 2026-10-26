@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import hashlib
 import json
@@ -893,6 +894,114 @@ def test_explicit_german_tts_uses_standard_german_voice(monkeypatch):
     assert response.status_code == 200
     assert captured == {"text": "herausfinden", "voice": "de-DE-KatjaNeural", "rate": 1.0}
     assert response.json()["mime"] == "audio/mpeg"
+
+
+@pytest.mark.parametrize(
+    ("accent", "gender", "expected_voice"),
+    [
+        ("en-US", "female", "en-US-AvaNeural"),
+        ("en-US", "male", "en-US-AndrewNeural"),
+        ("en-GB", "female", "en-GB-SoniaNeural"),
+        ("en-GB", "male", "en-GB-RyanNeural"),
+    ],
+)
+def test_english_tts_voice_mapping_is_preserved(monkeypatch, accent, gender, expected_voice):
+    captured = {}
+
+    async def fake_synth(text, voice, rate):
+        captured.update(text=text, voice=voice, rate=rate)
+        return b"audio", []
+
+    monkeypatch.setattr(app_module, "synth", fake_synth)
+    app_module._cache.clear()
+    response = TestClient(app_module.app).post("/api/tts", json={
+        "text": "hello", "accent": accent, "gender": gender, "rate": 1.25,
+    })
+
+    assert response.status_code == 200
+    assert captured == {"text": "hello", "voice": expected_voice, "rate": 1.25}
+
+
+@pytest.mark.parametrize(
+    ("raised", "status", "code"),
+    [
+        (
+            app_module.ClientResponseError(
+                None,
+                (),
+                status=403,
+                message="secret signed websocket URL",
+            ),
+            502,
+            "tts_upstream_rejected",
+        ),
+        (
+            app_module.ClientError("secret connection parameters"),
+            503,
+            "tts_upstream_unavailable",
+        ),
+        (
+            app_module.NoAudioReceived("secret upstream diagnostic"),
+            502,
+            "tts_no_audio",
+        ),
+        (
+            app_module.EdgeTTSException("secret upstream diagnostic"),
+            502,
+            "tts_upstream_error",
+        ),
+    ],
+)
+def test_tts_maps_upstream_failures_without_leaking_details(monkeypatch, raised, status, code):
+    async def fake_synth(*_args):
+        raise raised
+
+    monkeypatch.setattr(app_module, "synth", fake_synth)
+    app_module._cache.clear()
+    response = TestClient(app_module.app).post("/api/tts", json={
+        "text": "hello", "accent": "en-US",
+    })
+
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code
+    assert "secret" not in response.text
+    assert "websocket" not in response.text.lower()
+
+
+def test_tts_maps_timeout_and_cancels_synthesis(monkeypatch):
+    cancelled = asyncio.Event()
+
+    async def blocked_synth(*_args):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(app_module, "synth", blocked_synth)
+    monkeypatch.setattr(app_module, "TTS_TIMEOUT_SECONDS", 0.01)
+    app_module._cache.clear()
+    response = TestClient(app_module.app).post("/api/tts", json={
+        "text": "hello", "accent": "en-GB",
+    })
+
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "tts_upstream_timeout"
+    assert cancelled.is_set()
+
+
+def test_tts_rejects_empty_audio_without_caching_it(monkeypatch):
+    async def fake_synth(*_args):
+        return b"", []
+
+    monkeypatch.setattr(app_module, "synth", fake_synth)
+    app_module._cache.clear()
+    response = TestClient(app_module.app).post("/api/tts", json={
+        "text": "hello", "accent": "en-US",
+    })
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "tts_no_audio"
+    assert app_module._cache == {}
 
 
 def test_fixture_is_declared_test_data_not_real_coverage():

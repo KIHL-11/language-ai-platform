@@ -70,15 +70,43 @@ export async function synthesizePronunciation(
   text: string,
   accent: 'en-US' | 'en-GB' | 'de-DE',
 ): Promise<{ audioUrl: string; mime: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/tts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, accent, gender: 'female', rate: 1 }),
-  })
-  if (!response.ok) throw new Error(`Pronunciation synthesis failed (${response.status}).`)
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}/api/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, accent, gender: 'female', rate: 1 }),
+    })
+  } catch {
+    throw new PronunciationSynthesisError('tts_api_unreachable', 0)
+  }
+  if (!response.ok) {
+    let code = 'tts_request_failed'
+    try {
+      const errorBody: unknown = await response.json()
+      if (isRecord(errorBody) && isRecord(errorBody.detail) && typeof errorBody.detail.code === 'string') {
+        code = errorBody.detail.code
+      }
+    } catch {
+      // Preserve the stable fallback category when the server returns non-JSON.
+    }
+    throw new PronunciationSynthesisError(code, response.status)
+  }
   const value: unknown = await response.json()
   if (!isRecord(value) || typeof value.audio_b64 !== 'string' || typeof value.mime !== 'string') {
-    throw new Error('Pronunciation synthesis returned an unexpected response.')
+    throw new PronunciationSynthesisError('tts_invalid_response', response.status)
   }
   return { audioUrl: `data:${value.mime};base64,${value.audio_b64}`, mime: value.mime }
+}
+
+export class PronunciationSynthesisError extends Error {
+  readonly code: string
+  readonly status: number
+
+  constructor(code: string, status: number) {
+    super(`Pronunciation synthesis failed (${status}).`)
+    this.name = 'PronunciationSynthesisError'
+    this.code = code
+    this.status = status
+  }
 }

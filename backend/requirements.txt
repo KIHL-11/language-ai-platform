@@ -11,7 +11,7 @@ pytest>=8,<9
 httpx2==2.13.1
 
 # TTS：自然嗓音 + 词级时间点
-edge-tts==7.2.8
+edge-tts==7.3.1
 
 # 视频/音频提取（字幕优先，没字幕走下面的 Whisper）
 yt-dlp==2026.6.9
