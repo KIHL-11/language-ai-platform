@@ -159,10 +159,10 @@ def _installer_dictionary_arguments(tmp_path, *, link: bool, plist_text: str | N
         (backend / "storage" / "dictionary_current").symlink_to("dictionary_releases/a")
     plist = tmp_path / "agent.plist"
     if plist_text is not None:
-        plist.write_text(plist_text, encoding="utf-8")
+        plist.write_bytes(plist_text.encode("latin-1") if "bplist" in plist_text[:8] else plist_text.encode("utf-8"))
     script = (
         "set -euo pipefail\n"
-        f'BACKEND="{backend}"\nPLIST_PATH="{plist}"\n'
+        f'BACKEND="{backend}"\nPLIST_PATH="{plist}"\nPYTHON="{sys.executable}"\n'
         + source[start:end]
         + 'echo "${#DICTIONARY_ARGUMENTS[@]} ${DICTIONARY_ARGUMENTS[*]+${DICTIONARY_ARGUMENTS[*]}}"\n'
     )
@@ -171,9 +171,15 @@ def _installer_dictionary_arguments(tmp_path, *, link: bool, plist_text: str | N
 
 
 def test_installer_keeps_versioned_paths_only_when_agent_already_uses_them(tmp_path):
-    versioned = "<string>/x/backend/storage/dictionary_current/dictionary.sqlite3</string>"
+    versioned = plistlib.dumps({"Label": "x", "EnvironmentVariables": {
+        "DICTIONARY_DB_PATH": "/x/backend/storage/dictionary_current/dictionary.sqlite3"}}).decode()
     assert _installer_dictionary_arguments(
         tmp_path / "a", link=True, plist_text=versioned).startswith("2 --dictionary-current ")
+    binary = tmp_path / "binary"
+    binary.mkdir()
+    payload = plistlib.dumps(plistlib.loads(versioned.encode()), fmt=plistlib.FMT_BINARY)
+    assert _installer_dictionary_arguments(
+        binary, link=True, plist_text=payload.decode("latin-1")).startswith("2 --dictionary-current ")
     # A stray link (e.g. from an interrupted run) must not redirect the service.
     assert _installer_dictionary_arguments(tmp_path / "b", link=True, plist_text="<plist/>").strip() == "0"
     assert _installer_dictionary_arguments(tmp_path / "c", link=True, plist_text=None).strip() == "0"

@@ -32,7 +32,13 @@ mkdir -p "$(dirname "${PLIST_PATH}")" "${LOG_DIR}" "$(dirname "${APP_PATH}")"
 # service; scripts/cutover_dictionary_macos.sh is the only way to switch.
 DICTIONARY_ARGUMENTS=()
 if [[ -L "${BACKEND}/storage/dictionary_current" && -f "${PLIST_PATH}" ]] \
-  && grep -q "storage/dictionary_current/dictionary.sqlite3" "${PLIST_PATH}"; then
+  && "${PYTHON}" -c '
+import plistlib, sys
+with open(sys.argv[1], "rb") as handle:
+    environment = plistlib.load(handle).get("EnvironmentVariables", {})
+path = environment.get("DICTIONARY_DB_PATH", "")
+sys.exit(0 if path.endswith("/dictionary_current/dictionary.sqlite3") else 1)
+' "${PLIST_PATH}" 2>/dev/null; then
   DICTIONARY_ARGUMENTS=(--dictionary-current "${BACKEND}/storage/dictionary_current")
 fi
 

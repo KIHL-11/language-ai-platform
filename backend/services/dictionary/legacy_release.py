@@ -162,9 +162,18 @@ def create_legacy_rollback_release(
     if legacy_database.resolve().is_relative_to(layout.releases.resolve()):
         raise LegacyConversionError("legacy dictionary must not live inside dictionary_releases")
     before = legacy_fingerprint(legacy_database)
-    use_backup = before["wal_present"] or before["wal_mode"]
+    # Only a live -wal file needs SQLite's backup API (it holds committed pages
+    # not yet in the main file). A WAL-mode header without a -wal file is a
+    # cleanly closed database: byte-copy it (opening it read-only would create
+    # -wal/-shm beside the installed file) and switch the copy to DELETE mode.
+    use_backup = before["wal_present"]
+    convert_journal_mode = before["wal_mode"] and not use_backup
     plan_base = {
-        "copy_method": "sqlite_backup" if use_backup else "byte_copy",
+        "copy_method": (
+            "sqlite_backup" if use_backup
+            else "byte_copy_then_delete_journal" if convert_journal_mode
+            else "byte_copy"
+        ),
         "legacy_sha256": before["sha256"],
         "legacy_size_bytes": before["size_bytes"],
         "wal_present": before["wal_present"],
@@ -207,13 +216,21 @@ def create_legacy_rollback_release(
         _backup_copy(legacy_database, partial)
     else:
         _byte_copy(legacy_database, partial)
+        if file_sha256(partial) != before["sha256"]:
+            raise LegacyConversionError("rollback byte copy does not match the legacy database")
+        if convert_journal_mode:
+            copy = sqlite3.connect(partial)
+            try:
+                if copy.execute("PRAGMA journal_mode = DELETE").fetchone()[0] != "delete":
+                    raise LegacyConversionError("rollback copy could not leave WAL mode")
+            finally:
+                copy.close()
+            fsync_file(partial)
     os.replace(partial, database)
     fsync_directory(release)
     for companion in _sidecar_paths(database).values():
         if companion.exists():
             raise LegacyConversionError("rollback copy left SQLite journal state behind")
-    if not use_backup and file_sha256(database) != before["sha256"]:
-        raise LegacyConversionError("rollback byte copy does not match the legacy database")
 
     sidecar = release / SIDECAR_NAME
     build_forms_index(database, sidecar)

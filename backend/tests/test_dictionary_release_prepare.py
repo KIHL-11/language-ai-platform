@@ -112,10 +112,20 @@ def test_wal_mode_header_without_wal_file_uses_backup(env):
     connection.execute("PRAGMA journal_mode=WAL")
     connection.close()  # clean close: no -wal file, header still says WAL
     assert not Path(f"{env.legacy}-wal").exists()
-    result = create_legacy_rollback_release(env.layout, env.legacy, now=NOW)
-    assert result["copy_method"] == "sqlite_backup"
+    layout = env.layout
+    before = sorted(path.name for path in env.storage.iterdir())
+    result = create_legacy_rollback_release(layout, env.legacy, now=NOW)
+    assert result["copy_method"] == "byte_copy_then_delete_journal"
     release = release_dir(env, result["build_id"])
     assert not Path(f"{release / 'dictionary.sqlite3'}-wal").exists()
+    # Nothing new appears beside the installed database (no -wal/-shm).
+    after = sorted(path.name for path in env.storage.iterdir())
+    assert after == before
+    copy = sqlite3.connect(f"file:{release / 'dictionary.sqlite3'}?mode=ro", uri=True)
+    try:
+        assert copy.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        copy.close()
     validate_rollback_release(env.layout.releases, result["build_id"])
 
 
