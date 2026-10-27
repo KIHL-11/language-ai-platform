@@ -9,6 +9,8 @@ Sidecar, writes manifest/quality/build reports, and writes READY last.
 
 import argparse
 import json
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,7 +52,8 @@ def main() -> int:
             projected_dictionary_bytes=arguments.projected_dictionary_bytes,
             projected_sidecar_bytes=arguments.projected_sidecar_bytes,
         )
-    except (PrepareError, ReleaseStoreError, OSError) as exc:
+    except (PrepareError, ReleaseStoreError, OSError, sqlite3.Error, RuntimeError,
+            ValueError, subprocess.CalledProcessError) as exc:
         print(f"Dictionary release was not prepared: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))

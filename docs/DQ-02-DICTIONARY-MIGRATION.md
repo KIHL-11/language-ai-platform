@@ -657,10 +657,14 @@ fixture tests prove an instrumented import produces a byte-identical
    running backend reports (`/api/dictionary/status` and smoke lookups).
    Automatic recovery must reproduce that observation exactly; this works for
    legacy setups whether or not they had a Sidecar.
-5. **First-cutover recovery** points `dictionary_current` at the verified
-   `legacy-<sha>` release (never at the failed candidate) and restores the
-   original plist byte-for-byte, so the backend again uses the untouched flat
-   file.
+5. **First-cutover recovery** removes the `dictionary_current` symlink that
+   run created (a symlink owns no data) and restores the original plist
+   byte-for-byte, so the backend again uses the untouched flat file and the
+   next attempt starts from the same legacy state. Recovery restores the link
+   even when `switch_current` fails after `os.replace`. A link that exists while
+   the plist does not use it is treated as inconsistent and refused, and
+   `install_personal_app_macos.sh` carries versioned paths over only when the
+   existing plist already uses `dictionary_current`.
 6. **Learning-store drift** blocks acceptance and triggers recovery; because the
    tool never writes learning data, drift is reported as needing investigation
    (exit code 2) with before/after hash snapshots preserved.
@@ -672,6 +676,20 @@ fixture tests prove an instrumented import produces a byte-identical
    (`docs/DICTIONARY-SOURCE-EVIDENCE-v1.example.json`) and re-verifies size,
    SHA-256, gzip trailer, and license per edition. A downloader with `.part`
    publication remains future work.
+9. **Interrupt safety.** From the LaunchAgent stop until success or recovery,
+   SIGINT/SIGTERM/SIGHUP are deferred and reported; any exception, including
+   `KeyboardInterrupt`, triggers recovery. Heavy validation (integrity checks,
+   hashes) runs before the stop; only stat-identity rechecks run while stopped.
+   The migration lock is taken before preflight.
+10. **Rollback targets** must be `legacy-*` or a release recorded as served by a
+    completed migration, and never a release with `build-failure.json`.
+11. **Legacy conversion** uses the SQLite backup API whenever the database is in
+    WAL mode (header bytes 18/19) or has a `-wal` file. An interrupted attempt
+    is preserved and the retry uses `legacy-<sha16>-r2` (up to `-r9`); the
+    service is restarted and health-checked on every path.
+12. **Start-up store creation.** Backend start-up creates missing empty learning
+    stores and `library_media/`; a store that was missing before and exists
+    afterwards is not drift. Any change to an existing store is.
 
 ### Cloud evidence (synthetic only)
 
@@ -688,6 +706,6 @@ production evidence.
 - that the restarted uvicorn process sees the plist environment;
 - APFS behaviour of `os.replace` on directory symlinks and directory `fsync`;
 - performance gates on the real 2.5 GB dictionary and Sidecar;
-- whether any backend start-up path writes learning stores (would trip the
-  drift guard);
+- that existing learning stores are not rewritten on start-up (missing ones are
+  created by design and tolerated);
 - a full rehearsal on a copy before the production cutover.

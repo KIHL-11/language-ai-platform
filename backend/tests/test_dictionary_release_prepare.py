@@ -94,15 +94,29 @@ def test_legacy_conversion_is_idempotent_and_reverifies(env):
     assert tree_state(env.storage) == before
 
 
-def test_incomplete_legacy_directory_is_preserved_not_reused(env):
+def test_incomplete_legacy_directory_is_preserved_and_retry_uses_new_name(env):
     plan = create_legacy_rollback_release(env.layout, env.legacy, dry_run=True)
     partial = release_dir(env, plan["build_id"])
     partial.mkdir()
     (partial / "dictionary.sqlite3").write_bytes(b"half-copied")
-    before = tree_state(env.storage)
-    with pytest.raises(LegacyConversionError, match="preserved"):
-        create_legacy_rollback_release(env.layout, env.legacy)
-    assert tree_state(env.storage) == before
+    result = create_legacy_rollback_release(env.layout, env.legacy, now=NOW)
+    assert result["build_id"] == plan["build_id"] + "-r2"
+    assert result["preserved_incomplete_attempts"] == [plan["build_id"]]
+    assert (partial / "dictionary.sqlite3").read_bytes() == b"half-copied"
+    again = create_legacy_rollback_release(env.layout, env.legacy, now=NOW)
+    assert again["action"] == "verified_existing" and again["build_id"] == result["build_id"]
+
+
+def test_wal_mode_header_without_wal_file_uses_backup(env):
+    connection = sqlite3.connect(env.legacy)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()  # clean close: no -wal file, header still says WAL
+    assert not Path(f"{env.legacy}-wal").exists()
+    result = create_legacy_rollback_release(env.layout, env.legacy, now=NOW)
+    assert result["copy_method"] == "sqlite_backup"
+    release = release_dir(env, result["build_id"])
+    assert not Path(f"{release / 'dictionary.sqlite3'}-wal").exists()
+    validate_rollback_release(env.layout.releases, result["build_id"])
 
 
 def test_legacy_wal_state_uses_sqlite_backup_and_never_touches_wal(env, tmp_path):

@@ -63,7 +63,8 @@ scripts/cutover_dictionary_macos.sh legacy-rollback
 
 Verify:
 
-- output `action: created`, `build_id: legacy-<16 hex>`; record it as `LEGACY_ID`;
+- output `action: created`, `build_id: legacy-<16 hex>` (or `-r2` if an earlier
+  attempt was interrupted and preserved); record it as `LEGACY_ID`;
 - `ls -l backend/storage/dictionary_releases/$LEGACY_ID` shows read-only files
   and `READY`;
 - `shasum -a 256 backend/storage/dictionary.sqlite3` equals
@@ -160,6 +161,9 @@ sentence, `komme`, `Entwicklung`, with inflections shown. Open Study Bank /
 Daily Review and confirm existing cards, due dates and historical Chinese
 meanings are unchanged.
 
+Pressing Ctrl-C while the service is stopped does not abort the run: the
+signal is deferred until the cutover finishes or rolls back, then reported.
+
 ## 8. Rollback rehearsal (recommended once)
 
 ```bash
@@ -195,8 +199,10 @@ with `status` that the reinstalled plist still points through
    ```
 
    The flat `backend/storage/dictionary.sqlite3` is never modified, so this is
-   always available. Leaving `dictionary_current` in place is harmless for the
-   flat configuration.
+   always available. If you return to the flat configuration by hand after a
+   first cutover, also remove the link so later runs see legacy mode again
+   (it is only a symlink; it owns no data): `rm backend/storage/dictionary_current`.
+   Never remove anything inside `dictionary_releases/`.
 
 ## Never
 

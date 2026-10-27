@@ -442,13 +442,29 @@ def prepare_release(
 
 
 def _record_failure(release: Path, build_id: str, stage: str, exc: BaseException) -> None:
-    """Leave diagnostic evidence. Cutover refuses any release containing it."""
+    """Leave diagnostic evidence. Cutover and rollback refuse any release containing it."""
+    payload = canonical_json({
+        "build_id": build_id,
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "message": str(exc)[:2000],
+    })
     try:
-        write_new_file_atomic(release, FAILURE_NAME, canonical_json({
-            "build_id": build_id,
-            "stage": stage,
-            "error_type": type(exc).__name__,
-            "message": str(exc)[:2000],
-        }))
+        write_new_file_atomic(release, FAILURE_NAME, payload)
+        return
+    except PermissionError:
+        pass
+    except (OSError, ReleaseStoreError):
+        return
+    # The directory was already sealed (failure after READY): unseal only long
+    # enough to record the failure, then seal it again.
+    try:
+        mode = release.stat().st_mode
+        release.chmod(mode | 0o200)
+        try:
+            write_new_file_atomic(release, FAILURE_NAME, payload)
+            (release / FAILURE_NAME).chmod(0o444)
+        finally:
+            release.chmod(mode)
     except (OSError, ReleaseStoreError):
         pass

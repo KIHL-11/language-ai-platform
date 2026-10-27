@@ -15,6 +15,7 @@ This tool never downloads, imports, or deletes data.
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -123,8 +124,14 @@ def main() -> int:
     except CutoverError as exc:
         print(f"Dictionary {arguments.command} did not complete: {exc}", file=sys.stderr)
         return 2 if exc.recovered is False else 1
+    except KeyboardInterrupt:
+        print(
+            f"Dictionary {arguments.command} was interrupted; run 'status' before retrying",
+            file=sys.stderr,
+        )
+        return 2
     except (LegacyConversionError, ManifestValidationError, ReleaseStoreError,
-            LaunchAgentError, OSError) as exc:
+            LaunchAgentError, OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         print(f"Dictionary {arguments.command} did not complete: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -59,6 +59,13 @@ def legacy_fingerprint(legacy_database: Path) -> dict:
         )
     wal = companions["-wal"]
     wal_present = wal.is_file() and wal.stat().st_size > 0
+    with legacy_database.open("rb") as handle:
+        header = handle.read(100)
+    if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
+        raise LegacyConversionError("legacy dictionary is not an SQLite database")
+    # Header bytes 18/19 == 2 mark a WAL-mode database even after a clean close
+    # (no -wal file). A byte copy of such a file would reopen in WAL mode.
+    wal_mode = header[18] == 2 or header[19] == 2
     stat_result = legacy_database.stat()
     database_sha = file_sha256(legacy_database)
     wal_sha = file_sha256(wal) if wal_present else None
@@ -68,13 +75,18 @@ def legacy_fingerprint(legacy_database: Path) -> dict:
         "size_bytes": stat_result.st_size,
         "mtime_ns": stat_result.st_mtime_ns,
         "wal_present": wal_present,
+        "wal_mode": wal_mode,
         "wal_sha256": wal_sha,
         "state_sha256": combined,
     }
 
 
-def legacy_build_id(fingerprint: dict) -> str:
-    return f"legacy-{fingerprint['state_sha256'][:16]}"
+_MAX_ATTEMPTS = 9
+
+
+def legacy_build_id(fingerprint: dict, attempt: int = 1) -> str:
+    base = f"legacy-{fingerprint['state_sha256'][:16]}"
+    return base if attempt == 1 else f"{base}-r{attempt}"
 
 
 def _byte_copy(source: Path, destination: Path) -> None:
@@ -150,24 +162,39 @@ def create_legacy_rollback_release(
     if legacy_database.resolve().is_relative_to(layout.releases.resolve()):
         raise LegacyConversionError("legacy dictionary must not live inside dictionary_releases")
     before = legacy_fingerprint(legacy_database)
-    build_id = legacy_build_id(before)
-    release = layout.release(build_id)
-    plan = {
-        "build_id": build_id,
-        "copy_method": "sqlite_backup" if before["wal_present"] else "byte_copy",
+    use_backup = before["wal_present"] or before["wal_mode"]
+    plan_base = {
+        "copy_method": "sqlite_backup" if use_backup else "byte_copy",
         "legacy_sha256": before["sha256"],
         "legacy_size_bytes": before["size_bytes"],
         "wal_present": before["wal_present"],
     }
-    if release.exists() or release.is_symlink():
+    # An earlier interrupted attempt leaves an incomplete directory without
+    # READY. It is preserved for inspection and skipped; never reused or deleted.
+    preserved_attempts = []
+    build_id = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        name = legacy_build_id(before, attempt)
+        candidate = layout.release(name)
+        if not (candidate.exists() or candidate.is_symlink()):
+            build_id = name
+            break
         try:
-            validate_rollback_release(layout.releases, build_id)
-        except (ManifestValidationError, OSError) as exc:
-            raise LegacyConversionError(
-                f"{build_id} exists but is not a valid rollback release; it was preserved "
-                "for inspection and was not modified"
-            ) from exc
-        return {**plan, "action": "verified_existing", "dry_run": dry_run}
+            validate_rollback_release(layout.releases, name)
+        except (ManifestValidationError, OSError):
+            preserved_attempts.append(name)
+            continue
+        provenance = read_legacy_provenance(candidate)
+        if provenance and provenance.get("legacy_database", {}).get("state_sha256") == before["state_sha256"]:
+            return {**plan_base, "build_id": name, "action": "verified_existing", "dry_run": dry_run,
+                    "preserved_incomplete_attempts": preserved_attempts}
+        preserved_attempts.append(name)
+    if build_id is None:
+        raise LegacyConversionError(
+            "too many incomplete legacy conversion attempts are preserved; inspect "
+            "dictionary_releases before retrying"
+        )
+    plan = {**plan_base, "build_id": build_id, "preserved_incomplete_attempts": preserved_attempts}
     if dry_run:
         return {**plan, "action": "would_create", "dry_run": True}
     if not layout.releases.is_dir():
@@ -176,7 +203,7 @@ def create_legacy_rollback_release(
     release = create_release_directory(layout, build_id)
     database = release / DICTIONARY_NAME
     partial = release / f".{DICTIONARY_NAME}.partial"
-    if before["wal_present"]:
+    if use_backup:
         _backup_copy(legacy_database, partial)
     else:
         _byte_copy(legacy_database, partial)
@@ -185,7 +212,7 @@ def create_legacy_rollback_release(
     for companion in _sidecar_paths(database).values():
         if companion.exists():
             raise LegacyConversionError("rollback copy left SQLite journal state behind")
-    if not before["wal_present"] and file_sha256(database) != before["sha256"]:
+    if not use_backup and file_sha256(database) != before["sha256"]:
         raise LegacyConversionError("rollback byte copy does not match the legacy database")
 
     sidecar = release / SIDECAR_NAME

@@ -504,6 +504,8 @@ def validate_rollback_release(releases_root: Path, build_id: str) -> Path:
     or a previously published candidate whose ``READY`` matches its manifest.
     """
     release = _contained_child(releases_root, build_id, "rollback.previous_build_id")
+    if (release / "build-failure.json").exists() or (release / "build-failure.json").is_symlink():
+        raise ManifestValidationError("rollback release recorded a build failure")
     verification_path = _direct_regular_file(release, "rollback-verification.json")
     if verification_path is None:
         _validate_published_candidate_as_rollback(release, build_id)

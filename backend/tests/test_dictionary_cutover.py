@@ -225,8 +225,9 @@ def test_post_stop_failures_roll_back_to_untouched_legacy_configuration(prepared
     assert backend.get_json("/api/dictionary/status")["release_id"] == "unversioned"
     assert env.legacy.read_bytes() == legacy_bytes
     assert learning_snapshot(env.storage) == learning
-    # The link never stays on the failed candidate.
-    assert current_build_id(env.layout) in {None, legacy}
+    # First-cutover recovery removes the link it created: back to pure legacy.
+    assert not (env.storage / "dictionary_current").exists()
+    assert not (env.storage / "dictionary_current").is_symlink()
     assert (release_dir(env, candidate) / "READY").exists()  # candidate preserved for diagnosis
     record, _ = _result(env)
     assert record["result"] == "rolled_back"
@@ -259,7 +260,7 @@ def test_rollback_failure_in_release_mode_restores_previous_release(prepared):
         if stage == "before_smoke":
             raise RuntimeError("smoke crashed")
 
-    with pytest.raises(CutoverError, match="restored") as raised:
+    with pytest.raises(CutoverError, match="rolled back") as raised:
         _rollback(env, legacy, controller, backend, _fault=fault)
     assert raised.value.recovered is True
     assert current_build_id(env.layout) == candidate
@@ -360,7 +361,9 @@ def test_unsafe_states_are_refused_before_stopping_the_service(prepared, damage,
         _cutover(env, build_id, controller, backend)
     assert raised.value.recovered is None
     assert controller.calls == []
-    assert tree_state(env.root) == before
+    after = tree_state(env.root)
+    after.pop("backend/storage/.dictionary-migration.lock", None)  # lock taken before preflight
+    assert after == before
     serialized = str(raised.value)
     assert "placeholder-not-a-secret" not in serialized
 
@@ -371,6 +374,15 @@ def test_rollback_requires_versioned_launch_agent(prepared):
     controller, backend = lifecycle(env)
     with pytest.raises(CutoverError, match="does not use dictionary_current"):
         _rollback(env, legacy, controller, backend)
+    assert controller.calls == []
+
+
+def test_link_without_versioned_launch_agent_is_inconsistent_and_refused(prepared):
+    env, legacy, candidate = prepared
+    switch_current(env.layout, legacy)
+    controller, backend = lifecycle(env)
+    with pytest.raises(CutoverError, match="does not use it"):
+        _cutover(env, candidate, controller, backend)
     assert controller.calls == []
 
 
@@ -478,3 +490,148 @@ def test_migrated_plist_changes_only_dictionary_variables(tmp_path):
     assert updated["EnvironmentVariables"] == {
         **before["EnvironmentVariables"], "DICTIONARY_DB_PATH": "/a", "DICTIONARY_FORMS_INDEX_PATH": "/b",
     }
+
+
+
+# ---------------------------------------------------- independent-review fixes
+
+def test_second_attempt_after_failed_first_cutover_recovers_cleanly(prepared):
+    env, legacy, candidate = prepared
+    controller, backend = lifecycle(env)
+    for _ in range(2):
+        controller.fail_start_times = 1
+        with pytest.raises(CutoverError, match="rolled back") as raised:
+            _cutover(env, candidate, controller, backend)
+        assert raised.value.recovered is True
+        assert not (env.storage / "dictionary_current").is_symlink()
+        assert env.plist.read_bytes() == env.original_plist
+    _cutover(env, candidate, controller, backend)
+    assert current_build_id(env.layout) == candidate
+
+
+def test_keyboard_interrupt_in_stopped_window_recovers(prepared):
+    env, _, candidate = prepared
+    controller, backend = lifecycle(env)
+
+    def fault(stage):
+        if stage == "before_smoke":
+            raise KeyboardInterrupt
+
+    with pytest.raises(CutoverError, match="rolled back") as raised:
+        _cutover(env, candidate, controller, backend, _fault=fault)
+    assert raised.value.recovered is True
+    assert controller.loaded and backend.healthy()
+    assert backend.get_json("/api/dictionary/status")["release_id"] == "unversioned"
+    assert not (env.storage / "dictionary_current").is_symlink()
+
+
+def test_real_sigint_during_stopped_window_is_deferred_until_complete(prepared):
+    import signal
+
+    env, _, candidate = prepared
+    controller, backend = lifecycle(env)
+
+    def fault(stage):
+        if stage == "after_switch":
+            os.kill(os.getpid(), signal.SIGINT)
+
+    result = _cutover(env, candidate, controller, backend, _fault=fault)
+    assert result["action"] == "cutover_complete"
+    assert result["deferred_signals"] == [signal.SIGINT]
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_switch_failing_after_replace_still_restores_link(prepared, monkeypatch):
+    from services.dictionary import release_store
+
+    env, _, candidate = prepared
+    controller, backend = lifecycle(env)
+    real = release_store.fsync_directory
+    calls = {"count": 0}
+
+    def flaky(path):
+        if Path(path) == env.layout.storage:
+            calls["count"] += 1
+            if calls["count"] == 2:  # the fsync right after os.replace
+                raise OSError("EIO")
+        return real(path)
+
+    monkeypatch.setattr(release_store, "fsync_directory", flaky)
+    with pytest.raises(CutoverError, match="rolled back") as raised:
+        _cutover(env, candidate, controller, backend)
+    assert raised.value.recovered is True
+    assert not (env.storage / "dictionary_current").is_symlink()
+    assert backend.get_json("/api/dictionary/status")["release_id"] == "unversioned"
+
+
+def test_rollback_refuses_failed_or_never_served_releases(prepared):
+    env, legacy, first = prepared
+    controller, backend = lifecycle(env)
+    _cutover(env, first, controller, backend)
+    never_served = env.prepare(first, now=NOW.replace(hour=13))["build_id"]
+    with pytest.raises(CutoverError, match="never been served"):
+        _rollback(env, never_served, controller, backend)
+    failed = release_dir(env, never_served)
+    make_writable(failed)
+    (failed / "build-failure.json").write_text("{}")
+    with pytest.raises(CutoverError, match="build failure"):
+        _rollback(env, never_served, controller, backend)
+    assert current_build_id(env.layout) == first
+
+
+def test_startup_created_learning_stores_are_not_drift(prepared):
+    env, _, candidate = prepared
+    (env.storage / "speaking_sessions.json").unlink()
+    controller, backend = lifecycle(env)
+    original_boot = backend.boot
+
+    def boot_creates_default(environment):
+        original_boot(environment)
+        path = env.storage / "speaking_sessions.json"
+        if not path.exists():
+            path.write_text('{"sessions":[]}', encoding="utf-8")
+    backend.boot = boot_creates_default
+    assert _cutover(env, candidate, controller, backend)["action"] == "cutover_complete"
+
+
+def test_concurrent_migration_is_refused_by_lock(prepared):
+    from services.dictionary.cutover import _migration_lock
+
+    env, _, candidate = prepared
+    controller, backend = lifecycle(env)
+    with _migration_lock(env.storage):
+        with pytest.raises(CutoverError, match="already running"):
+            _cutover(env, candidate, controller, backend)
+    assert controller.calls == []
+
+
+@pytest.mark.parametrize("failure", ["conversion", "stop_raises", "restart_unhealthy"])
+def test_legacy_conversion_failures_always_restart_and_report(env, monkeypatch, failure):
+    from services.dictionary import cutover as cutover_module
+
+    controller, backend = lifecycle(env)
+    if failure == "conversion":
+        def broken(*args, **kwargs):
+            if kwargs.get("dry_run"):
+                return real(*args, **kwargs)
+            raise RuntimeError("disk vanished")
+        real = cutover_module.create_legacy_rollback_release
+        monkeypatch.setattr(cutover_module, "create_legacy_rollback_release", broken)
+    elif failure == "stop_raises":
+        def stop():
+            controller.calls.append("stop")
+            raise LaunchAgentError("bootout failed")
+        controller.stop = stop
+    else:
+        controller.fail_start_times = 1
+    with pytest.raises(CutoverError) as raised:
+        run_legacy_conversion(layout=env.layout, legacy_database=env.legacy, controller=controller,
+                              client=backend, plist_path=env.plist, now=NOW,
+                              health_attempts=2, sleep=lambda s: None)
+    record, _ = _result(env)
+    if failure == "restart_unhealthy":
+        assert raised.value.recovered is False and record["result"] == "restart_failed"
+    else:
+        assert raised.value.recovered is True and record["result"] == "failed"
+        assert controller.loaded and backend.healthy()
+    assert env.plist.read_bytes() == env.original_plist

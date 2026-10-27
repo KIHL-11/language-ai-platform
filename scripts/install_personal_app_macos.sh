@@ -26,15 +26,20 @@ done
 "${SCRIPT_DIR}/build_personal_app.sh"
 mkdir -p "$(dirname "${PLIST_PATH}")" "${LOG_DIR}" "$(dirname "${APP_PATH}")"
 
+# Keep a completed dictionary cutover: only carry the versioned dictionary
+# paths over when the existing LaunchAgent already uses dictionary_current.
+# A bare symlink alone (e.g. left by an interrupted run) never redirects the
+# service; scripts/cutover_dictionary_macos.sh is the only way to switch.
+DICTIONARY_ARGUMENTS=()
+if [[ -L "${BACKEND}/storage/dictionary_current" && -f "${PLIST_PATH}" ]] \
+  && grep -q "storage/dictionary_current/dictionary.sqlite3" "${PLIST_PATH}"; then
+  DICTIONARY_ARGUMENTS=(--dictionary-current "${BACKEND}/storage/dictionary_current")
+fi
+
 if launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; then
   launchctl bootout "${DOMAIN}/${LABEL}"
 fi
 
-DICTIONARY_ARGUMENTS=()
-if [[ -L "${BACKEND}/storage/dictionary_current" ]]; then
-  # A versioned dictionary release is installed; keep the LaunchAgent on it.
-  DICTIONARY_ARGUMENTS=(--dictionary-current "${BACKEND}/storage/dictionary_current")
-fi
 "${PYTHON}" "${SCRIPT_DIR}/generate_launch_agent.py" \
   "${PLIST_PATH}" "${PYTHON}" "${BACKEND}" "${LOG_DIR}" "${DICTIONARY_ARGUMENTS[@]+"${DICTIONARY_ARGUMENTS[@]}"}"
 launchctl bootstrap "${DOMAIN}" "${PLIST_PATH}"

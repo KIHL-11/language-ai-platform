@@ -148,10 +148,36 @@ def test_generator_refuses_a_non_symlink_dictionary_current(tmp_path):
     assert not plist_path.exists()
 
 
-def test_installer_passes_dictionary_current_only_when_it_is_a_symlink():
+def _installer_dictionary_arguments(tmp_path, *, link: bool, plist_text: str | None):
+    """Execute the installer's real dictionary-argument block in isolation."""
     source = (SCRIPTS / "install_personal_app_macos.sh").read_text(encoding="utf-8")
-    assert '[[ -L "${BACKEND}/storage/dictionary_current" ]]' in source
-    assert "--dictionary-current" in source
+    start = source.index("DICTIONARY_ARGUMENTS=()")
+    end = source.index("fi\n", start) + 3
+    backend = tmp_path / "backend"
+    (backend / "storage" / "dictionary_releases" / "a").mkdir(parents=True)
+    if link:
+        (backend / "storage" / "dictionary_current").symlink_to("dictionary_releases/a")
+    plist = tmp_path / "agent.plist"
+    if plist_text is not None:
+        plist.write_text(plist_text, encoding="utf-8")
+    script = (
+        "set -euo pipefail\n"
+        f'BACKEND="{backend}"\nPLIST_PATH="{plist}"\n'
+        + source[start:end]
+        + 'echo "${#DICTIONARY_ARGUMENTS[@]} ${DICTIONARY_ARGUMENTS[*]+${DICTIONARY_ARGUMENTS[*]}}"\n'
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    return result.stdout
+
+
+def test_installer_keeps_versioned_paths_only_when_agent_already_uses_them(tmp_path):
+    versioned = "<string>/x/backend/storage/dictionary_current/dictionary.sqlite3</string>"
+    assert _installer_dictionary_arguments(
+        tmp_path / "a", link=True, plist_text=versioned).startswith("2 --dictionary-current ")
+    # A stray link (e.g. from an interrupted run) must not redirect the service.
+    assert _installer_dictionary_arguments(tmp_path / "b", link=True, plist_text="<plist/>").strip() == "0"
+    assert _installer_dictionary_arguments(tmp_path / "c", link=True, plist_text=None).strip() == "0"
+    assert _installer_dictionary_arguments(tmp_path / "d", link=False, plist_text=versioned).strip() == "0"
 
 
 def test_cutover_wrapper_refuses_non_macos_and_never_deletes():
