@@ -39,8 +39,8 @@
         "label": "CC BY-SA 4.0",
         "notice_url": "https://kaikki.org/dictionary/",
         "attribution": "English Wiktionary contributors; extracted by Wiktextract/Kaikki",
-        "verified_at": "2026-10-27T10:00:00Z",
-        "verification_required_before_real_build": true
+        "verified": false,
+        "verified_at": null
       },
       "artifact_name": "kaikki-en-UNVERIFIED-000000000000.jsonl.gz"
     },
@@ -70,8 +70,8 @@
         "label": "CC BY-SA 4.0",
         "notice_url": "https://kaikki.org/dewiktionary/",
         "attribution": "German Wiktionary contributors; extracted by Wiktextract/Kaikki",
-        "verified_at": "2026-10-27T10:00:00Z",
-        "verification_required_before_real_build": true
+        "verified": false,
+        "verified_at": null
       },
       "artifact_name": "kaikki-de-UNVERIFIED-000000000000.jsonl.gz"
     }
@@ -103,12 +103,31 @@
       "sense_percent": {"en": 0.0, "de": 0.0, "total": 0.0}
     },
     "alignment_telemetry": {
-      "instrumentation_status": "required_phase_7",
-      "sense_local_seen": null,
-      "sense_local_retained": null,
-      "entry_level_seen": null,
-      "entry_level_accepted": null,
-      "entry_level_rejected_by_reason": null
+      "instrumentation_status": "example",
+      "sense_local": {
+        "seen": 0,
+        "retained": 0,
+        "deduplicated": 0,
+        "truncated": 0
+      },
+      "entry_level": {
+        "seen": 0,
+        "accepted": {
+          "unique_multi_token": 0,
+          "reliable_single_token_head": 0,
+          "unscoped_single_sense": 0,
+          "total": 0
+        },
+        "rejected": {
+          "ambiguous_or_tied": 0,
+          "zero_evidence": 0,
+          "generic_stopword_or_lemma_only": 0,
+          "single_sense_mismatch": 0,
+          "unsupported_morphology": 0,
+          "over_limit": 0,
+          "total": 0
+        }
+      }
     }
   },
   "validation": {
@@ -117,7 +136,11 @@
     "required_query_plans": "passed",
     "gold_case_failures": 0,
     "forms_sidecar_status": "available",
-    "quality_report": "quality-report.json",
+    "quality_report": {
+      "path": "quality-report.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0
+    },
     "snapshot_comparison": {
       "same_source_hashes_as_baseline": false,
       "attribution": "confounded_by_source_snapshot"

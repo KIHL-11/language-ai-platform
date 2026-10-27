@@ -111,6 +111,32 @@ versioned rollback release from the existing database. It builds a fresh Sidecar
 against that rollback release path; copying an old Sidecar would fail identity
 validation.
 
+The one-time legacy conversion is explicitly non-destructive:
+
+1. Stop the LaunchAgent and save its exact plist plus loaded configuration.
+2. Hash the closed legacy database and learning stores; if WAL/journal state is
+   present, use SQLite backup rather than deleting or checkpointing user files.
+3. Create the final `legacy-<database-sha-prefix>` directory without moving the
+   installed database. Copy/backup into `dictionary.sqlite3`, validate it, and
+   rebuild `dictionary.forms.sqlite3` against that final new path.
+4. Write `rollback-verification.json` containing copied output hashes and
+   Sidecar identity, then write `READY` containing that verification file's hash.
+   Legacy source provenance may remain explicitly unverified; output integrity
+   and rollback usability may not.
+5. Generate a new plist whose dictionary variables point through
+   `dictionary_current`, preserve the old plist as rollback evidence, and verify
+   the serialized plist before loading it.
+6. If bootstrap, dictionary smoke, or learning hash checks fail, restore the old
+   plist and start the untouched flat-file configuration. Do not delete either
+   representation.
+
+`install_personal_app_macos.sh` regenerates and loads a plist, while
+`update_personal_app_macos.sh` can restart the existing agent. Phase 7 must update
+the generator and its tests so a reinstall preserves the versioned dictionary
+variables. The migration validator must compare the loaded `launchctl print`
+environment with the expected resolved paths; editing a plist on disk is not
+proof that the running service uses it.
+
 ## Data provenance manifest
 
 The machine-readable example is
@@ -142,6 +168,21 @@ Required rules:
    paths.
 8. Final dictionary and Sidecar hashes are calculated after all writes. The
    manifest is then written atomically and never edited in place.
+
+There are two deliberately separate validation levels:
+
+- **structure validation** accepts a well-typed example or build-in-progress
+  manifest. It checks complete fields, HTTPS URLs, timezone-aware dates, safe
+  filenames, count/rate types, and telemetry reconciliation;
+- **READY eligibility** is a read-only check against actual files. It rejects
+  `example_only=true`, placeholder hashes, zero-byte sources/outputs, unverified
+  licenses, incomplete telemetry, nonzero gold failures, mismatched database
+  statistics, unsafe/symlinked paths, invalid SQLite/Sidecar identity, and a
+  missing or unverified rollback release.
+
+`backend/scripts/validate_dictionary_release.py` implements the second level. It
+does not create `READY`; a future publisher may write `READY` only after this
+command succeeds and must write the final manifest SHA-256 as its contents.
 
 The manifest deliberately separates raw-source facts, build implementation,
 SQLite statistics, import telemetry, validation results, and output identity.

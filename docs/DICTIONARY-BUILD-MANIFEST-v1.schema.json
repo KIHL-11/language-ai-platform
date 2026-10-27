@@ -27,7 +27,7 @@
       "type": "object",
       "required": ["url", "importer_git_sha", "worktree_clean", "dictionary_schema_version", "forms_sidecar_schema_version", "python_version"],
       "properties": {
-        "url": {"type": "string", "format": "uri"},
+        "url": {"type": "string", "format": "uri", "pattern": "^https://"},
         "importer_git_sha": {"$ref": "#/$defs/sha1"},
         "worktree_clean": {"const": true},
         "dictionary_schema_version": {"type": "integer", "minimum": 1},
@@ -50,8 +50,8 @@
         "properties": {
           "edition": {"type": "string", "minLength": 1},
           "entry_language": {"enum": ["en", "de"]},
-          "acquisition_url": {"type": "string", "format": "uri"},
-          "resolved_url": {"type": "string", "format": "uri"},
+          "acquisition_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+          "resolved_url": {"type": "string", "format": "uri", "pattern": "^https://"},
           "rolling_url": {"type": "boolean"},
           "snapshot_identity": {
             "type": "object",
@@ -86,23 +86,69 @@
           },
           "license": {
             "type": "object",
-            "required": ["label", "notice_url", "attribution", "verified_at", "verification_required_before_real_build"],
+            "required": ["label", "notice_url", "attribution", "verified", "verified_at"],
             "properties": {
               "label": {"type": "string", "minLength": 1},
-              "notice_url": {"type": "string", "format": "uri"},
+              "notice_url": {"type": "string", "format": "uri", "pattern": "^https://"},
               "attribution": {"type": "string", "minLength": 1},
-              "verified_at": {"type": "string", "format": "date-time"},
-              "verification_required_before_real_build": {"type": "boolean"}
+              "verified": {"type": "boolean"},
+              "verified_at": {"type": ["string", "null"], "format": "date-time"}
             },
             "additionalProperties": false
           },
-          "artifact_name": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"}
+          "artifact_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.jsonl\\.gz$"}
         },
         "additionalProperties": false
       }
     },
-    "import": {"type": "object", "required": ["command", "arguments", "started_at", "completed_at", "elapsed_seconds", "peak_rss_bytes"]},
-    "statistics": {"type": "object", "required": ["entries", "senses", "forms", "pronunciations", "chinese_coverage", "alignment_telemetry"]},
+    "import": {
+      "type": "object",
+      "required": ["command", "arguments", "started_at", "completed_at", "elapsed_seconds", "peak_rss_bytes"],
+      "properties": {
+        "command": {"const": "backend/scripts/import_kaikki_dictionary.py"},
+        "arguments": {
+          "type": "object",
+          "required": ["database", "content_license", "english_input", "english_source_url", "german_input", "german_source_url"],
+          "properties": {
+            "database": {"const": "dictionary.sqlite3"},
+            "content_license": {"type": "string", "minLength": 1},
+            "english_input": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.jsonl\\.gz$"},
+            "english_source_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+            "german_input": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.jsonl\\.gz$"},
+            "german_source_url": {"type": "string", "format": "uri", "pattern": "^https://"}
+          },
+          "additionalProperties": false
+        },
+        "started_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "elapsed_seconds": {"type": "number", "minimum": 0},
+        "peak_rss_bytes": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["entries", "senses", "forms", "pronunciations", "chinese_coverage", "alignment_telemetry"],
+      "properties": {
+        "entries": {"$ref": "#/$defs/counts"},
+        "senses": {"$ref": "#/$defs/counts"},
+        "forms": {"$ref": "#/$defs/counts"},
+        "pronunciations": {"$ref": "#/$defs/counts"},
+        "chinese_coverage": {
+          "type": "object",
+          "required": ["entries_with_chinese", "entry_percent", "senses_with_chinese", "sense_percent"],
+          "properties": {
+            "entries_with_chinese": {"$ref": "#/$defs/counts"},
+            "entry_percent": {"$ref": "#/$defs/rates"},
+            "senses_with_chinese": {"$ref": "#/$defs/counts"},
+            "sense_percent": {"$ref": "#/$defs/rates"}
+          },
+          "additionalProperties": false
+        },
+        "alignment_telemetry": {"$ref": "#/$defs/telemetry"}
+      },
+      "additionalProperties": false
+    },
     "validation": {
       "type": "object",
       "required": ["integrity_check", "foreign_key_error_count", "required_query_plans", "gold_case_failures", "forms_sidecar_status", "quality_report", "snapshot_comparison"],
@@ -112,9 +158,18 @@
         "required_query_plans": {"const": "passed"},
         "gold_case_failures": {"type": "integer", "minimum": 0},
         "forms_sidecar_status": {"const": "available"},
-        "quality_report": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
-        "snapshot_comparison": {"type": "object", "required": ["same_source_hashes_as_baseline", "attribution"]}
-      }
+        "quality_report": {"$ref": "#/$defs/output"},
+        "snapshot_comparison": {
+          "type": "object",
+          "required": ["same_source_hashes_as_baseline", "attribution"],
+          "properties": {
+            "same_source_hashes_as_baseline": {"type": "boolean"},
+            "attribution": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "outputs": {
       "type": "object",
@@ -124,7 +179,7 @@
         "forms_sidecar": {
           "allOf": [
             {"$ref": "#/$defs/output"},
-            {"type": "object", "required": ["source_identity_verified"], "properties": {"source_identity_verified": {"const": true}}}
+            {"type": "object", "required": ["source_identity_verified"], "properties": {"source_identity_verified": {"type": "boolean"}}}
           ]
         }
       },
@@ -135,8 +190,8 @@
       "required": ["required", "previous_build_id", "validated"],
       "properties": {
         "required": {"const": true},
-        "previous_build_id": {"type": "string", "minLength": 1},
-        "validated": {"const": true}
+        "previous_build_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"},
+        "validated": {"type": "boolean"}
       },
       "additionalProperties": false
     }
@@ -148,10 +203,82 @@
       "type": "object",
       "required": ["path", "sha256", "size_bytes"],
       "properties": {
-        "path": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+        "path": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"},
         "sha256": {"$ref": "#/$defs/sha256"},
         "size_bytes": {"type": "integer", "minimum": 0},
         "source_identity_verified": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "required": ["en", "de", "total"],
+      "properties": {
+        "en": {"type": "integer", "minimum": 0},
+        "de": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "rates": {
+      "type": "object",
+      "required": ["en", "de", "total"],
+      "properties": {
+        "en": {"type": "number", "minimum": 0, "maximum": 100},
+        "de": {"type": "number", "minimum": 0, "maximum": 100},
+        "total": {"type": "number", "minimum": 0, "maximum": 100}
+      },
+      "additionalProperties": false
+    },
+    "telemetry": {
+      "type": "object",
+      "required": ["instrumentation_status", "sense_local", "entry_level"],
+      "properties": {
+        "instrumentation_status": {"enum": ["example", "complete"]},
+        "sense_local": {
+          "type": "object",
+          "required": ["seen", "retained", "deduplicated", "truncated"],
+          "properties": {
+            "seen": {"type": "integer", "minimum": 0},
+            "retained": {"type": "integer", "minimum": 0},
+            "deduplicated": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "entry_level": {
+          "type": "object",
+          "required": ["seen", "accepted", "rejected"],
+          "properties": {
+            "seen": {"type": "integer", "minimum": 0},
+            "accepted": {
+              "type": "object",
+              "required": ["unique_multi_token", "reliable_single_token_head", "unscoped_single_sense", "total"],
+              "properties": {
+                "unique_multi_token": {"type": "integer", "minimum": 0},
+                "reliable_single_token_head": {"type": "integer", "minimum": 0},
+                "unscoped_single_sense": {"type": "integer", "minimum": 0},
+                "total": {"type": "integer", "minimum": 0}
+              },
+              "additionalProperties": false
+            },
+            "rejected": {
+              "type": "object",
+              "required": ["ambiguous_or_tied", "zero_evidence", "generic_stopword_or_lemma_only", "single_sense_mismatch", "unsupported_morphology", "over_limit", "total"],
+              "properties": {
+                "ambiguous_or_tied": {"type": "integer", "minimum": 0},
+                "zero_evidence": {"type": "integer", "minimum": 0},
+                "generic_stopword_or_lemma_only": {"type": "integer", "minimum": 0},
+                "single_sense_mismatch": {"type": "integer", "minimum": 0},
+                "unsupported_morphology": {"type": "integer", "minimum": 0},
+                "over_limit": {"type": "integer", "minimum": 0},
+                "total": {"type": "integer", "minimum": 0}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     }
