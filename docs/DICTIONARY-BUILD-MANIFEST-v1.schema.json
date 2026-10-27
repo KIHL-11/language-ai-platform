@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://language-ai.local/schemas/dictionary-build-manifest-v1.json",
+  "title": "Language AI Dictionary Build Manifest v1",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "example_only",
+    "status",
+    "build_id",
+    "created_at",
+    "repository",
+    "sources",
+    "import",
+    "statistics",
+    "validation",
+    "outputs",
+    "rollback"
+  ],
+  "properties": {
+    "manifest_version": {"const": 1},
+    "example_only": {"type": "boolean"},
+    "status": {"enum": ["building", "candidate_validated", "failed"]},
+    "build_id": {"type": "string", "minLength": 12, "maxLength": 120, "pattern": "^[A-Za-z0-9._-]+$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "repository": {
+      "type": "object",
+      "required": ["url", "importer_git_sha", "worktree_clean", "dictionary_schema_version", "forms_sidecar_schema_version", "python_version"],
+      "properties": {
+        "url": {"type": "string", "format": "uri"},
+        "importer_git_sha": {"$ref": "#/$defs/sha1"},
+        "worktree_clean": {"const": true},
+        "dictionary_schema_version": {"type": "integer", "minimum": 1},
+        "forms_sidecar_schema_version": {"type": "integer", "minimum": 1},
+        "python_version": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "allOf": [
+        {"contains": {"type": "object", "properties": {"entry_language": {"const": "en"}}, "required": ["entry_language"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"type": "object", "properties": {"entry_language": {"const": "de"}}, "required": ["entry_language"]}, "minContains": 1, "maxContains": 1}
+      ],
+      "items": {
+        "type": "object",
+        "required": ["edition", "entry_language", "acquisition_url", "resolved_url", "rolling_url", "snapshot_identity", "dates", "http_evidence", "license", "artifact_name"],
+        "properties": {
+          "edition": {"type": "string", "minLength": 1},
+          "entry_language": {"enum": ["en", "de"]},
+          "acquisition_url": {"type": "string", "format": "uri"},
+          "resolved_url": {"type": "string", "format": "uri"},
+          "rolling_url": {"type": "boolean"},
+          "snapshot_identity": {
+            "type": "object",
+            "required": ["sha256", "size_bytes"],
+            "properties": {
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "size_bytes": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": false
+          },
+          "dates": {
+            "type": "object",
+            "required": ["dump_date", "dump_date_status", "extraction_date", "extraction_date_status", "retrieved_at"],
+            "properties": {
+              "dump_date": {"type": ["string", "null"], "format": "date"},
+              "dump_date_status": {"enum": ["verified", "unverified"]},
+              "extraction_date": {"type": ["string", "null"], "format": "date"},
+              "extraction_date_status": {"enum": ["verified", "unverified"]},
+              "retrieved_at": {"type": "string", "format": "date-time"}
+            },
+            "additionalProperties": false
+          },
+          "http_evidence": {
+            "type": "object",
+            "required": ["etag", "last_modified", "content_length"],
+            "properties": {
+              "etag": {"type": ["string", "null"]},
+              "last_modified": {"type": ["string", "null"]},
+              "content_length": {"type": ["integer", "null"], "minimum": 0}
+            },
+            "additionalProperties": false
+          },
+          "license": {
+            "type": "object",
+            "required": ["label", "notice_url", "attribution", "verified_at", "verification_required_before_real_build"],
+            "properties": {
+              "label": {"type": "string", "minLength": 1},
+              "notice_url": {"type": "string", "format": "uri"},
+              "attribution": {"type": "string", "minLength": 1},
+              "verified_at": {"type": "string", "format": "date-time"},
+              "verification_required_before_real_build": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          },
+          "artifact_name": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "import": {"type": "object", "required": ["command", "arguments", "started_at", "completed_at", "elapsed_seconds", "peak_rss_bytes"]},
+    "statistics": {"type": "object", "required": ["entries", "senses", "forms", "pronunciations", "chinese_coverage", "alignment_telemetry"]},
+    "validation": {
+      "type": "object",
+      "required": ["integrity_check", "foreign_key_error_count", "required_query_plans", "gold_case_failures", "forms_sidecar_status", "quality_report", "snapshot_comparison"],
+      "properties": {
+        "integrity_check": {"const": "ok"},
+        "foreign_key_error_count": {"const": 0},
+        "required_query_plans": {"const": "passed"},
+        "gold_case_failures": {"type": "integer", "minimum": 0},
+        "forms_sidecar_status": {"const": "available"},
+        "quality_report": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+        "snapshot_comparison": {"type": "object", "required": ["same_source_hashes_as_baseline", "attribution"]}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "required": ["dictionary", "forms_sidecar"],
+      "properties": {
+        "dictionary": {"$ref": "#/$defs/output"},
+        "forms_sidecar": {
+          "allOf": [
+            {"$ref": "#/$defs/output"},
+            {"type": "object", "required": ["source_identity_verified"], "properties": {"source_identity_verified": {"const": true}}}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "rollback": {
+      "type": "object",
+      "required": ["required", "previous_build_id", "validated"],
+      "properties": {
+        "required": {"const": true},
+        "previous_build_id": {"type": "string", "minLength": 1},
+        "validated": {"const": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "output": {
+      "type": "object",
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "source_identity_verified": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
