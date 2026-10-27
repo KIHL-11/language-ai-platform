@@ -174,6 +174,7 @@ def test_complete_candidate_is_ready_eligible(prepared_release):
     release, releases, sources, manifest = prepared_release
     assert validate_manifest_structure(manifest) is manifest
     assert validate_ready_eligibility(release, releases, sources)["build_id"] == release.name
+    assert not (release / "READY").exists()
 
 
 def test_example_manifest_is_structural_but_not_ready_eligible(prepared_release):
