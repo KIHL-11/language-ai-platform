@@ -230,7 +230,11 @@ def _aligned_entry_translations(
         | _SENSE_ALIGNMENT_GENERIC_TOKENS
         | set(lexical_tokens(lemma))
     )
-    definition_tokens = [set(lexical_tokens(value)) - ignored for value in definitions]
+    definition_token_lists = [
+        [token for token in lexical_tokens(value) if token not in ignored]
+        for value in definitions
+    ]
+    definition_tokens = [set(tokens) for tokens in definition_token_lists]
 
     for code, word, hint in records:
         raw_hint_tokens = set(lexical_tokens(hint))
@@ -246,7 +250,17 @@ def _aligned_entry_translations(
         best_score = max(scores)
         if best_score == 0 or scores.count(best_score) != 1:
             continue
-        aligned[scores.index(best_score)].append((code, word))
+        winner = scores.index(best_score)
+        if best_score == 1:
+            # A lone token is reliable only when the source hint itself has one
+            # content token and that token is the definition's lexical head.
+            # This retains labels such as "understand" -> "To understand..."
+            # without accepting an incidental word later in a long definition.
+            if len(hint_tokens) != 1 or not definition_token_lists[winner]:
+                continue
+            if next(iter(hint_tokens)) != definition_token_lists[winner][0]:
+                continue
+        aligned[winner].append((code, word))
 
     return aligned
 

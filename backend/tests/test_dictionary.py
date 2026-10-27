@@ -941,6 +941,39 @@ def test_importer_assigns_entry_translation_to_one_unique_best_sense(tmp_path):
     assert stored == [["银行"], []]
 
 
+def test_importer_rejects_unique_but_incidental_single_token_match(tmp_path):
+    source = tmp_path / "incidental-single-token.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(source, [{
+        "word": "bank",
+        "lang_code": "en",
+        "pos": "noun",
+        "translations": [
+            {"code": "zh", "word": "错误地点译文", "sense": "place"},
+        ],
+        "senses": [
+            {"glosses": ["A financial institution in a public place."]},
+            {"glosses": ["Land alongside a river."]},
+        ],
+    }])
+
+    import_kaikki_sources(
+        [(source, "en", "https://kaikki.org/dictionary/")],
+        database,
+        content_license=TEST_CONTENT_LICENSE,
+    )
+
+    with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
+        stored = [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT translations_json FROM senses ORDER BY sense_index"
+            )
+        ]
+
+    assert stored == [{}, {}]
+
+
 def test_importer_validates_explicit_hint_for_single_sense(tmp_path):
     source = tmp_path / "single-sense-hints.jsonl.gz"
     database = tmp_path / "dictionary.sqlite3"
