@@ -235,9 +235,25 @@ Sense selection is deterministic and source-grounded. It compares lexical
 overlap between the current sentence and source definitions/examples. A unique
 positive match is prioritized. Otherwise source ordering is used and multiple
 senses are marked ambiguous under **More meanings**. It is not semantic AI
-ranking. For multi-sense entries, a translation is associated only when its
-source sense label can be linked to that definition; uncertain translations
-remain unavailable rather than being shown for the wrong sense.
+ranking. Entry-level translations are compared against every valid sense in the
+entry and are associated only when their source sense label has one unique best
+lexical match. Ties, zero-evidence matches, and labels containing only the entry
+lemma, generic placeholders, usage labels, or language-specific English/German
+function words are rejected. A unique match normally requires two content tokens;
+a one-token source label is accepted only when it matches the definition's first
+content token, preventing an incidental word later in a definition from becoming
+sense evidence. A translation nested directly under a source sense is retained
+without this heuristic and takes priority over aligned entry-level translations.
+A genuinely unscoped entry-level translation remains valid for a single-sense
+entry, but an explicit label on a single-sense entry must still match. Uncertain
+translations remain unavailable rather than being shown for the wrong sense. The
+importer does not guess derivational morphology or German compound boundaries;
+without exact or source-structured evidence those translations are conservatively
+omitted.
+
+This rule is applied while building SQLite. Updating the importer does not repair
+an already-built dictionary: changing existing data requires a separately
+approved backup, rebuild, validation, and atomic replacement workflow.
 
 ## Three-level explanation contract
 
