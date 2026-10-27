@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from services.dictionary.forms_sidecar import FORMS_INDEX_SCHEMA_VERSION, lookup_forms
+from services.dictionary.import_telemetry import ENTRY_REJECTED as _REJECTION_KEYS
 from services.dictionary.provider import SCHEMA_VERSION
 
 
@@ -19,14 +20,6 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _LANGUAGES = ("en", "de")
 _COUNT_KEYS = (*_LANGUAGES, "total")
-_REJECTION_KEYS = (
-    "ambiguous_or_tied",
-    "zero_evidence",
-    "generic_stopword_or_lemma_only",
-    "single_sense_mismatch",
-    "unsupported_morphology",
-    "over_limit",
-)
 
 
 class ManifestValidationError(ValueError):
@@ -133,34 +126,8 @@ def _rates(value, field: str) -> dict[str, float]:
     }
 
 
-def validate_manifest_structure(payload: object) -> dict:
-    """Validate exchange structure; examples are intentionally allowed here."""
-    manifest = _object(payload, "manifest")
-    required = {
-        "manifest_version", "example_only", "status", "build_id", "created_at",
-        "repository", "sources", "import", "statistics", "validation", "outputs",
-        "rollback",
-    }
-    _exact_keys(manifest, required, "manifest")
-    if manifest["manifest_version"] != 1 or type(manifest["example_only"]) is not bool:
-        raise ManifestValidationError("manifest version/example flag is invalid")
-    if manifest["status"] not in {"building", "candidate_validated", "failed"}:
-        raise ManifestValidationError("manifest status is invalid")
-    _safe_name(manifest["build_id"], "build_id")
-    _timestamp(manifest["created_at"], "created_at")
-
-    repository = _object(manifest["repository"], "repository")
-    _exact_keys(repository, {"url", "importer_git_sha", "worktree_clean", "dictionary_schema_version", "forms_sidecar_schema_version", "python_version"}, "repository")
-    _https_uri(repository["url"], "repository.url")
-    _hash(repository["importer_git_sha"], "repository.importer_git_sha", _SHA1)
-    if repository["worktree_clean"] is not True:
-        raise ManifestValidationError("repository.worktree_clean must be true")
-    _integer(repository["dictionary_schema_version"], "repository.dictionary_schema_version", minimum=1)
-    _integer(repository["forms_sidecar_schema_version"], "repository.forms_sidecar_schema_version", minimum=1)
-    if not isinstance(repository["python_version"], str) or not repository["python_version"]:
-        raise ManifestValidationError("repository.python_version is required")
-
-    sources = manifest["sources"]
+def validate_source_records(sources: object) -> dict[str, dict]:
+    """Structure-check the English and German source records; return them by language."""
     if not isinstance(sources, list) or len(sources) != 2:
         raise ManifestValidationError("sources must contain English and German")
     languages = []
@@ -219,6 +186,37 @@ def validate_manifest_structure(payload: object) -> dict:
         raise ManifestValidationError("sources must contain one en and one de artifact")
     if len(artifact_names) != len(_LANGUAGES):
         raise ManifestValidationError("source artifact names must be distinct")
+    return source_by_language
+
+
+def validate_manifest_structure(payload: object) -> dict:
+    """Validate exchange structure; examples are intentionally allowed here."""
+    manifest = _object(payload, "manifest")
+    required = {
+        "manifest_version", "example_only", "status", "build_id", "created_at",
+        "repository", "sources", "import", "statistics", "validation", "outputs",
+        "rollback",
+    }
+    _exact_keys(manifest, required, "manifest")
+    if manifest["manifest_version"] != 1 or type(manifest["example_only"]) is not bool:
+        raise ManifestValidationError("manifest version/example flag is invalid")
+    if manifest["status"] not in {"building", "candidate_validated", "failed"}:
+        raise ManifestValidationError("manifest status is invalid")
+    _safe_name(manifest["build_id"], "build_id")
+    _timestamp(manifest["created_at"], "created_at")
+
+    repository = _object(manifest["repository"], "repository")
+    _exact_keys(repository, {"url", "importer_git_sha", "worktree_clean", "dictionary_schema_version", "forms_sidecar_schema_version", "python_version"}, "repository")
+    _https_uri(repository["url"], "repository.url")
+    _hash(repository["importer_git_sha"], "repository.importer_git_sha", _SHA1)
+    if repository["worktree_clean"] is not True:
+        raise ManifestValidationError("repository.worktree_clean must be true")
+    _integer(repository["dictionary_schema_version"], "repository.dictionary_schema_version", minimum=1)
+    _integer(repository["forms_sidecar_schema_version"], "repository.forms_sidecar_schema_version", minimum=1)
+    if not isinstance(repository["python_version"], str) or not repository["python_version"]:
+        raise ManifestValidationError("repository.python_version is required")
+
+    source_by_language = validate_source_records(manifest["sources"])
 
     import_value = _object(manifest["import"], "import")
     _exact_keys(import_value, {"command", "arguments", "started_at", "completed_at", "elapsed_seconds", "peak_rss_bytes"}, "import")
@@ -452,24 +450,68 @@ def _sqlite_health(database: Path, sidecar: Path) -> None:
         raise ManifestValidationError("forms Sidecar source identity is invalid")
 
 
-def _validate_rollback(releases_root: Path, build_id: str) -> None:
-    release = _contained_child(releases_root, build_id, "rollback.previous_build_id")
-    verification_path = release / "rollback-verification.json"
+def _direct_regular_file(release: Path, name: str) -> Path | None:
+    path = release / name
+    if path.is_symlink():
+        raise ManifestValidationError(f"{name} must not be a symlink")
+    if not path.exists():
+        return None
+    if not path.is_file() or path.resolve().parent != release.resolve():
+        raise ManifestValidationError(f"{name} escapes its release directory")
+    return path
+
+
+def _ready_matches(release: Path, raw: bytes, field: str) -> None:
     ready_path = release / "READY"
     if (
-        verification_path.is_symlink()
-        or ready_path.is_symlink()
-        or not verification_path.is_file()
+        ready_path.is_symlink()
         or not ready_path.is_file()
-        or verification_path.resolve().parent != release.resolve()
         or ready_path.resolve().parent != release.resolve()
     ):
+        raise ManifestValidationError(f"{field} is missing verification or READY")
+    if ready_path.stat().st_size > 128:
+        raise ManifestValidationError(f"{field} READY marker is unreasonably large")
+    if ready_path.read_text(encoding="utf-8").strip() != hashlib.sha256(raw).hexdigest():
+        raise ManifestValidationError(f"{field} READY does not match its verification record")
+
+
+def _validate_published_candidate_as_rollback(release: Path, build_id: str) -> None:
+    manifest_path = _direct_regular_file(release, "manifest.json")
+    if manifest_path is None or manifest_path.stat().st_size > 1024 * 1024:
         raise ManifestValidationError("rollback release is missing verification or READY")
-    if verification_path.stat().st_size > 1024 * 1024 or ready_path.stat().st_size > 128:
+    raw = manifest_path.read_bytes()
+    _ready_matches(release, raw, "rollback release")
+    try:
+        manifest = validate_manifest_structure(json.loads(raw))
+    except json.JSONDecodeError as exc:
+        raise ManifestValidationError("rollback manifest is malformed") from exc
+    if (
+        manifest["build_id"] != build_id
+        or manifest["example_only"] is not False
+        or manifest["status"] != "candidate_validated"
+        or manifest["outputs"]["forms_sidecar"]["source_identity_verified"] is not True
+    ):
+        raise ManifestValidationError("rollback release is not validated")
+    database = _verified_file(release, manifest["outputs"]["dictionary"], "rollback.dictionary")
+    sidecar = _verified_file(release, manifest["outputs"]["forms_sidecar"], "rollback.forms_sidecar")
+    _sqlite_health(database, sidecar)
+
+
+def validate_rollback_release(releases_root: Path, build_id: str) -> Path:
+    """Read-only proof that a release can be switched back to and served.
+
+    A rollback is either a legacy conversion with ``rollback-verification.json``
+    or a previously published candidate whose ``READY`` matches its manifest.
+    """
+    release = _contained_child(releases_root, build_id, "rollback.previous_build_id")
+    verification_path = _direct_regular_file(release, "rollback-verification.json")
+    if verification_path is None:
+        _validate_published_candidate_as_rollback(release, build_id)
+        return release
+    if verification_path.stat().st_size > 1024 * 1024:
         raise ManifestValidationError("rollback verification metadata is unreasonably large")
     raw = verification_path.read_bytes()
-    if ready_path.read_text(encoding="utf-8").strip() != hashlib.sha256(raw).hexdigest():
-        raise ManifestValidationError("rollback READY does not match verification manifest")
+    _ready_matches(release, raw, "rollback release")
     try:
         record = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -485,6 +527,38 @@ def _validate_rollback(releases_root: Path, build_id: str) -> None:
     database = _verified_file(release, dictionary_record, "rollback.dictionary")
     sidecar = _verified_file(release, sidecar_record, "rollback.forms_sidecar")
     _sqlite_health(database, sidecar)
+    return release
+
+
+def verified_content_license(sources: list[dict]) -> str:
+    """The single verified license label the v1 importer can record."""
+    labels = {source["license"]["label"] for source in sources}
+    if len(labels) != 1:
+        raise ManifestValidationError(
+            "source licenses are incompatible with the single-license importer; "
+            "an Owner schema/importer decision is required"
+        )
+    return labels.pop()
+
+
+def verify_source_artifacts(sources: list[dict], source_root: Path) -> dict[str, Path]:
+    """Read-only: verify license, placeholder, size, SHA-256 and gzip trailer per source."""
+    source_root = source_root.resolve(strict=True)
+    artifacts = {}
+    for source in sources:
+        identity = source["snapshot_identity"]
+        if identity["size_bytes"] <= 0 or identity["sha256"] == "0" * 64:
+            raise ManifestValidationError("source artifact identity is a placeholder")
+        if source["license"]["verified"] is not True:
+            raise ManifestValidationError("source license is not verified")
+        artifact = _verified_file(
+            source_root,
+            {"path": source["artifact_name"], **identity},
+            f"source artifact {source['entry_language']}",
+        )
+        _verify_gzip_complete(artifact, f"source artifact {source['entry_language']}")
+        artifacts[source["entry_language"]] = artifact
+    return artifacts
 
 
 def validate_ready_eligibility(release_dir: Path, releases_root: Path, source_root: Path) -> dict:
@@ -518,8 +592,12 @@ def validate_ready_eligibility(release_dir: Path, releases_root: Path, source_ro
         raise ManifestValidationError("importer Git SHA is a placeholder")
     if manifest["validation"]["foreign_key_error_count"] != 0:
         raise ManifestValidationError("foreign key failures block READY publication")
-    if manifest["statistics"]["alignment_telemetry"]["instrumentation_status"] != "complete":
+    telemetry = manifest["statistics"]["alignment_telemetry"]
+    if telemetry["instrumentation_status"] != "complete":
         raise ManifestValidationError("complete alignment telemetry is required")
+    sense_local = telemetry["sense_local"]
+    if sense_local["seen"] != sense_local["retained"] + sense_local["deduplicated"] + sense_local["truncated"]:
+        raise ManifestValidationError("sense-local telemetry does not account for every translation")
     if any(
         manifest["statistics"][group][language] <= 0
         for group in ("entries", "senses")
@@ -529,18 +607,7 @@ def validate_ready_eligibility(release_dir: Path, releases_root: Path, source_ro
     license_labels = {source["license"]["label"] for source in manifest["sources"]}
     if len(license_labels) != 1 or manifest["import"]["arguments"]["content_license"] not in license_labels:
         raise ManifestValidationError("source licenses are incompatible with the importer metadata")
-    for source in manifest["sources"]:
-        identity = source["snapshot_identity"]
-        if identity["size_bytes"] <= 0 or identity["sha256"] == "0" * 64:
-            raise ManifestValidationError("source artifact identity is a placeholder")
-        if source["license"]["verified"] is not True:
-            raise ManifestValidationError("source license is not verified")
-        artifact = _verified_file(
-            source_root,
-            {"path": source["artifact_name"], **identity},
-            f"source artifact {source['entry_language']}",
-        )
-        _verify_gzip_complete(artifact, f"source artifact {source['entry_language']}")
+    verify_source_artifacts(manifest["sources"], source_root)
     database = _verified_file(release_dir, manifest["outputs"]["dictionary"], "outputs.dictionary")
     sidecar = _verified_file(release_dir, manifest["outputs"]["forms_sidecar"], "outputs.forms_sidecar")
     quality = _verified_file(release_dir, manifest["validation"]["quality_report"], "validation.quality_report")
@@ -565,5 +632,12 @@ def validate_ready_eligibility(release_dir: Path, releases_root: Path, source_ro
         raise ManifestValidationError("rollback release is not declared validated")
     if manifest["rollback"]["previous_build_id"] == manifest["build_id"]:
         raise ManifestValidationError("candidate cannot be its own rollback")
-    _validate_rollback(releases_root, manifest["rollback"]["previous_build_id"])
+    validate_rollback_release(releases_root, manifest["rollback"]["previous_build_id"])
+    return manifest
+
+
+def validate_published_release(release_dir: Path, releases_root: Path, source_root: Path) -> dict:
+    """READY eligibility plus proof that READY was written for this manifest."""
+    manifest = validate_ready_eligibility(release_dir, releases_root, source_root)
+    _ready_matches(release_dir, (release_dir / "manifest.json").read_bytes(), "candidate release")
     return manifest

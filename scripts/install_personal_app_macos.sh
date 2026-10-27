@@ -30,8 +30,13 @@ if launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; then
   launchctl bootout "${DOMAIN}/${LABEL}"
 fi
 
+DICTIONARY_ARGUMENTS=()
+if [[ -L "${BACKEND}/storage/dictionary_current" ]]; then
+  # A versioned dictionary release is installed; keep the LaunchAgent on it.
+  DICTIONARY_ARGUMENTS=(--dictionary-current "${BACKEND}/storage/dictionary_current")
+fi
 "${PYTHON}" "${SCRIPT_DIR}/generate_launch_agent.py" \
-  "${PLIST_PATH}" "${PYTHON}" "${BACKEND}" "${LOG_DIR}"
+  "${PLIST_PATH}" "${PYTHON}" "${BACKEND}" "${LOG_DIR}" "${DICTIONARY_ARGUMENTS[@]+"${DICTIONARY_ARGUMENTS[@]}"}"
 launchctl bootstrap "${DOMAIN}" "${PLIST_PATH}"
 launchctl enable "${DOMAIN}/${LABEL}"
 launchctl kickstart -k "${DOMAIN}/${LABEL}"

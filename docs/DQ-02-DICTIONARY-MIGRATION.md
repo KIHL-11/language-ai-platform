@@ -582,3 +582,112 @@ cloud fixture results cannot mark the production migration complete.
   durability before a release is marked ready, or Phase 7 may harden the importer.
 - macOS symlink/LaunchAgent automation and power-loss behavior require real-Mac
   failure-injection validation before production use.
+
+## Phase 7A — migration automation (cloud-tested, not Mac-verified)
+
+Status: **implemented and cloud-tested on synthetic fixtures with a mocked
+macOS lifecycle. Not real-Mac verified. No production cutover performed.**
+
+Baseline: `234f0587b0f1321a7b8af636e259ebf2f017d3ad` (merged PR #48).
+Operator procedure: [`DQ-02-PHASE7A-MIGRATION-RUNBOOK.md`](DQ-02-PHASE7A-MIGRATION-RUNBOOK.md).
+
+### Components
+
+| Component | Location | Mutates |
+|---|---|---|
+| Importer telemetry | `services/dictionary/import_telemetry.py`, hooks in `provider.import_kaikki_sources(telemetry=...)` | nothing (observes only) |
+| Durable importer publication | `provider.import_kaikki_sources` fsyncs the finished file before `replace` and the directory after | the requested candidate path only |
+| Release store / atomic switch | `services/dictionary/release_store.py` | new release dirs, `dictionary_current` symlink |
+| Legacy rollback conversion | `services/dictionary/legacy_release.py` | creates `dictionary_releases/legacy-<sha16>` only |
+| Candidate gates | `services/dictionary/release_quality.py` | nothing (read-only) |
+| Candidate preparation | `services/dictionary/release_prepare.py`, `backend/scripts/prepare_dictionary_release.py` | creates one new release dir |
+| LaunchAgent control | `services/dictionary/launch_agent.py` | LaunchAgent plist (atomic, backed up) |
+| Cutover / rollback | `services/dictionary/cutover.py`, `backend/scripts/dictionary_cutover.py`, `scripts/cutover_dictionary_macos.sh` | symlink, plist, service state, `dictionary_migrations/` evidence |
+| Dictionary-aware health | `GET /api/dictionary/status` | nothing; returns `configured`, `release_id`, `forms_index_status`, never paths |
+| Reinstall preservation | `generate_launch_agent.py --dictionary-current`, `install_personal_app_macos.sh` | plist generation only |
+
+### Telemetry definitions
+
+Counters are keyed by source edition and translation target language
+(`en`, `de`, `zh-CN`) in `build-report.json`; the manifest stores totals.
+
+- **Sense-local**: `seen = retained + deduplicated + truncated` exactly
+  (READY requires equality). Translations nested under a sense with no usable
+  gloss are reported separately as `discarded_with_invalid_sense`, because that
+  sense is never imported.
+- **Entry-level**: `seen = accepted.total + rejected.total` exactly. Accepted:
+  `unique_multi_token`, `reliable_single_token_head`, `unscoped_single_sense`.
+  Rejected:
+  - `ambiguous_or_tied` — tied best score, or an unscoped translation on a
+    multi-sense entry;
+  - `zero_evidence` — no exact content-token overlap (or no valid senses);
+  - `generic_stopword_or_lemma_only` — the hint contains only stopwords, usage
+    labels, or the lemma itself;
+  - `single_sense_mismatch` — a scoped hint that does not match the only sense;
+  - `unsupported_morphology` — no exact overlap, but a stem/compound
+    substring relation exists (the importer deliberately does not guess these);
+  - `weak_single_token_evidence` — a unique one-token match that is not the
+    hint's only content token or not the definition's lexical head
+    (PR #47 "incidental" rule). This key was added to manifest v1 in Phase 7A;
+    no v1 manifest had been published before;
+  - `over_limit` — aligned, but the sense already held 10 values in that
+    language.
+  An aligned value that already existed on the sense counts as accepted and is
+  additionally reported as `accepted_duplicate_of_existing`.
+
+Morphology classification is telemetry-only and never changes alignment. The
+fixture tests prove an instrumented import produces a byte-identical
+`iterdump()` to an uninstrumented one.
+
+### Additional decisions made in Phase 7A
+
+1. **Rollback identity.** A rollback is either a legacy conversion
+   (`rollback-verification.json` + `READY`) or a previously published candidate
+   (`READY` = SHA-256 of `manifest.json`). This lets each successful candidate
+   become the next migration's rollback without rewriting it.
+2. **Gold set gating.** Prepare accepts only `scope=production`, `approved=true`
+   gold sets. `docs/DICTIONARY-GOLD-CASES-v1.draft.json` is a proposal with
+   `approved=false`; a real build fails until the Owner reviews and approves it.
+   Synthetic fixture gold sets are accepted only through the test-only
+   `allow_fixture_gold` parameter (not exposed by the CLI).
+3. **Failure evidence.** A failed build leaves its directory without `READY`
+   and with `build-failure.json`; cutover refuses any release containing that
+   file. Nothing is auto-deleted.
+4. **Recovery baseline.** Before stopping the service, cutover records what the
+   running backend reports (`/api/dictionary/status` and smoke lookups).
+   Automatic recovery must reproduce that observation exactly; this works for
+   legacy setups whether or not they had a Sidecar.
+5. **First-cutover recovery** points `dictionary_current` at the verified
+   `legacy-<sha>` release (never at the failed candidate) and restores the
+   original plist byte-for-byte, so the backend again uses the untouched flat
+   file.
+6. **Learning-store drift** blocks acceptance and triggers recovery; because the
+   tool never writes learning data, drift is reported as needing investigation
+   (exit code 2) with before/after hash snapshots preserved.
+7. **LaunchAgent credential guard.** Migration refuses a plist with
+   credential-like environment variable names, a non-loopback `--host`, a
+   different `Label`, or a symlinked plist. Error messages never echo values.
+8. **Source acquisition is out of scope for 7A.** Prepare consumes already
+   downloaded artifacts plus a source-evidence JSON
+   (`docs/DICTIONARY-SOURCE-EVIDENCE-v1.example.json`) and re-verifies size,
+   SHA-256, gzip trailer, and license per edition. A downloader with `.part`
+   publication remains future work.
+
+### Cloud evidence (synthetic only)
+
+All migration tests use `tmp_path` stores, gzip fixtures of a few entries, and a
+mocked LaunchAgent/backend (`backend/tests/migration_support.py`). They cover
+the fault-case table above except for real power loss and real `launchd`
+semantics. Cloud results are functional evidence only, not performance or
+production evidence.
+
+### Still requires real-Mac validation
+
+- `launchctl print` environment block format and `bootout` timing on the
+  Owner's macOS version;
+- that the restarted uvicorn process sees the plist environment;
+- APFS behaviour of `os.replace` on directory symlinks and directory `fsync`;
+- performance gates on the real 2.5 GB dictionary and Sidecar;
+- whether any backend start-up path writes learning stores (would trip the
+  drift guard);
+- a full rehearsal on a copy before the production cutover.

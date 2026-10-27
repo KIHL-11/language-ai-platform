@@ -1,4 +1,5 @@
 import plistlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ SHELL_SCRIPTS = [
     SCRIPTS / "update_personal_app_macos.sh",
     SCRIPTS / "status_personal_app_macos.sh",
     SCRIPTS / "uninstall_personal_app_macos.sh",
+    SCRIPTS / "cutover_dictionary_macos.sh",
 ]
 
 
@@ -29,7 +31,12 @@ def test_personal_app_shell_scripts_have_valid_bash_syntax():
 def test_scripts_do_not_hard_code_owner_home_or_secret_material():
     sources = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in [*SHELL_SCRIPTS, SCRIPTS / "generate_launch_agent.py"]
+        for path in [
+            *SHELL_SCRIPTS,
+            SCRIPTS / "generate_launch_agent.py",
+            REPOSITORY / "backend" / "scripts" / "dictionary_cutover.py",
+            REPOSITORY / "backend" / "scripts" / "prepare_dictionary_release.py",
+        ]
     )
     assert "/Users/lin" not in sources
     assert "OPENAI_API_KEY" not in sources
@@ -87,3 +94,105 @@ def test_uninstall_only_targets_generated_service_and_application():
     assert "backend/.env" not in source
     assert "backend/media" not in source
     assert "backend/.venv" not in source
+
+
+def _generate(tmp_path, *extra):
+    plist_path = tmp_path / "com.language-ai-platform.plist"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "generate_launch_agent.py"),
+            str(plist_path),
+            "/example/backend/.venv/bin/python",
+            "/example/backend",
+            "/example/logs",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, plist_path
+
+
+def test_generated_launch_agent_without_release_keeps_backend_dictionary_defaults(tmp_path):
+    result, plist_path = _generate(tmp_path)
+    assert result.returncode == 0
+    environment = plistlib.loads(plist_path.read_bytes())["EnvironmentVariables"]
+    assert "DICTIONARY_DB_PATH" not in environment
+    assert "DICTIONARY_FORMS_INDEX_PATH" not in environment
+
+
+def test_generated_launch_agent_preserves_versioned_dictionary_paths(tmp_path):
+    storage = tmp_path / "storage"
+    (storage / "dictionary_releases" / "release-a").mkdir(parents=True)
+    current = storage / "dictionary_current"
+    current.symlink_to("dictionary_releases/release-a", target_is_directory=True)
+    result, plist_path = _generate(tmp_path, "--dictionary-current", str(current))
+    assert result.returncode == 0, result.stderr
+    environment = plistlib.loads(plist_path.read_bytes())["EnvironmentVariables"]
+    resolved_storage = storage.resolve()
+    # Paths go through the stable symlink, never the release it currently names.
+    assert environment["DICTIONARY_DB_PATH"] == str(resolved_storage / "dictionary_current" / "dictionary.sqlite3")
+    assert environment["DICTIONARY_FORMS_INDEX_PATH"] == str(
+        resolved_storage / "dictionary_current" / "dictionary.forms.sqlite3"
+    )
+    assert "release-a" not in plist_path.read_text()
+
+
+def test_generator_refuses_a_non_symlink_dictionary_current(tmp_path):
+    real = tmp_path / "dictionary_current"
+    real.mkdir()
+    result, plist_path = _generate(tmp_path, "--dictionary-current", str(real))
+    assert result.returncode != 0
+    assert not plist_path.exists()
+
+
+def test_installer_passes_dictionary_current_only_when_it_is_a_symlink():
+    source = (SCRIPTS / "install_personal_app_macos.sh").read_text(encoding="utf-8")
+    assert '[[ -L "${BACKEND}/storage/dictionary_current" ]]' in source
+    assert "--dictionary-current" in source
+
+
+def test_cutover_wrapper_refuses_non_macos_and_never_deletes():
+    wrapper = SCRIPTS / "cutover_dictionary_macos.sh"
+    source = wrapper.read_text(encoding="utf-8")
+    assert not re.search(r"(^|[\s;&|(])(rm|rmdir|unlink)\s", source)
+    assert "curl" not in source and "wget" not in source
+    if sys.platform != "darwin":
+        result = subprocess.run(["bash", str(wrapper), "status"], capture_output=True, text=True, check=False)
+        assert result.returncode == 1
+        assert "only supported on macOS" in result.stderr
+
+
+def test_dictionary_migration_clis_parse_without_side_effects():
+    for name in ("dictionary_cutover.py", "prepare_dictionary_release.py"):
+        result = subprocess.run(
+            [sys.executable, str(REPOSITORY / "backend" / "scripts" / name), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "--dry-run" in result.stdout or "dry-run" in result.stdout
+
+
+def test_dictionary_cutover_status_on_non_macos_fails_cleanly(tmp_path):
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY / "backend" / "scripts" / "dictionary_cutover.py"),
+            "--storage-root", str(storage),
+            "--plist", str(tmp_path / "missing.plist"),
+            "status",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if sys.platform != "darwin":
+        assert result.returncode == 1
+        assert "requires macOS" in result.stderr
+    assert list(storage.iterdir()) == []
