@@ -140,25 +140,51 @@ def snapshot_digest(snapshot: dict) -> str:
 
 # -------------------------------------------------------------- smoke checks
 
+_SAMPLE_SCAN_LIMIT = 5_000
+
+
 def release_samples(database: Path) -> dict[str, dict]:
-    """Pick one entry per language with forms, preferring one with a Chinese value."""
+    """Pick one entry per language with forms, preferring one with a Chinese value.
+
+    Scans at most ``_SAMPLE_SCAN_LIMIT`` entries per language in id order and
+    uses primary-key/index lookups only, so it stays fast on the full dictionary.
+    """
     connection = sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)
     try:
         samples = {}
         for language in ("en", "de"):
-            row = connection.execute(
-                """SELECT entries.lemma, senses.translations_json LIKE '%"zh-CN"%' AS chinese
-                   FROM entries
-                   JOIN forms ON forms.entry_id = entries.id
-                   JOIN senses ON senses.entry_id = entries.id
+            fallback = None
+            chosen = None
+            seen: set[int] = set()
+            # forms has no entry_id index: walk it in rowid order (entries were
+            # imported in order) with primary-key joins, and stop early.
+            rows = connection.execute(
+                """SELECT forms.entry_id, entries.lemma FROM forms
+                   JOIN entries ON entries.id = forms.entry_id
                    WHERE entries.language = ?
-                   ORDER BY chinese DESC, entries.id
-                   LIMIT 1""",
-                (language,),
-            ).fetchone()
-            if row is None:
+                   ORDER BY forms.id LIMIT ?""",
+                (language, _SAMPLE_SCAN_LIMIT * 10),
+            )
+            for entry_id, lemma in rows:
+                if entry_id in seen:
+                    continue
+                seen.add(entry_id)
+                if len(seen) > _SAMPLE_SCAN_LIMIT:
+                    break
+                senses = connection.execute(
+                    "SELECT translations_json FROM senses WHERE entry_id = ? ORDER BY sense_index LIMIT 100",
+                    (entry_id,),
+                ).fetchall()
+                if not senses:
+                    continue
+                if fallback is None:
+                    fallback = str(lemma)
+                if any('"zh-CN"' in value for (value,) in senses):
+                    chosen = str(lemma)
+                    break
+            if chosen is None and fallback is None:
                 raise CutoverError(f"release has no {language} entry suitable for smoke checks")
-            samples[language] = {"word": str(row[0]), "expects_chinese": bool(row[1])}
+            samples[language] = {"word": chosen or fallback, "expects_chinese": chosen is not None}
         return samples
     finally:
         connection.close()
