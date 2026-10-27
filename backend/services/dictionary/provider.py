@@ -24,17 +24,26 @@ _ENTRY_MATCH_LIMIT = 20
 _SEPARATED_FORM_SCAN_LIMIT = 100
 _SENSE_LIMIT = 100
 _PRONUNCIATION_LIMIT = 20
-_SENSE_ALIGNMENT_IGNORED_TOKENS = frozenset({
-    # English and German function words cannot distinguish dictionary senses.
-    "a", "an", "and", "are", "as", "at", "be", "being", "by", "das", "der",
-    "die", "ein", "eine", "einem", "einen", "einer", "eines",
-    "er", "es", "for", "from", "für", "im", "in", "is", "ist", "mit", "of",
-    "on", "oder", "or", "the", "to", "und", "vom", "von", "was", "were", "with",
-    "zu", "zum", "zur",
+_SENSE_ALIGNMENT_STOPWORDS = {
+    "en": frozenset({
+        "a", "an", "and", "are", "as", "at", "be", "being", "by", "for",
+        "from", "in", "is", "it", "of", "on", "or", "the", "to", "was",
+        "were", "with",
+    }),
+    "de": frozenset({
+        "das", "der", "die", "ein", "eine", "einem", "einen", "einer",
+        "eines", "er", "es", "für", "im", "in", "ist", "mit", "oder",
+        "und", "vom", "von", "was", "zu", "zum", "zur",
+    }),
+}
+_SENSE_ALIGNMENT_GENERIC_TOKENS = frozenset({
     # Source labels and generic placeholders describe usage, not lexical meaning.
-    "archaic", "colloquial", "etwas", "figurative", "general", "idiomatic",
-    "intransitive", "jemand", "literal", "meaning", "obsolete", "one", "person",
-    "sense", "slang", "something", "term", "thing", "transitive", "usage", "word",
+    "action", "act", "archaic", "colloquial", "condition", "entity", "etwas",
+    "event", "figurative", "form", "general", "idiomatic", "intransitive",
+    "jemand", "kind", "literal", "manner", "meaning", "object", "obsolete",
+    "one", "occurrence", "person", "process", "quality", "sense", "slang",
+    "something", "state", "term", "thing", "transitive", "type", "usage", "way",
+    "word",
 })
 
 
@@ -179,13 +188,9 @@ def _translation_code(value: object) -> str | None:
     return None
 
 
-def _sense_translation_values(
-    entry_records: list[tuple[str, str, str]],
+def _translation_values(
+    aligned_entry_records: list[tuple[str, str]],
     sense_records: list[tuple[str, str]],
-    definition: str,
-    *,
-    lemma: str,
-    sense_count: int,
 ) -> dict[str, list[str]]:
     output: dict[str, list[str]] = {}
 
@@ -198,16 +203,52 @@ def _sense_translation_values(
     for code, word in sense_records:
         append(code, word)
 
-    lemma_tokens = set(lexical_tokens(lemma))
-    ignored = _SENSE_ALIGNMENT_IGNORED_TOKENS | lemma_tokens
-    definition_tokens = set(lexical_tokens(definition)) - ignored
-    for code, word, hint in entry_records:
-        if sense_count > 1:
-            hint_tokens = set(lexical_tokens(hint)) - ignored
-            if not hint_tokens or not definition_tokens.intersection(hint_tokens):
-                continue
+    for code, word in aligned_entry_records:
         append(code, word)
     return output
+
+
+def _aligned_entry_translations(
+    records: list[tuple[str, str, str]],
+    definitions: list[str],
+    *,
+    language: str,
+    lemma: str,
+) -> list[list[tuple[str, str]]]:
+    """Assign each entry translation to at most one source sense.
+
+    Unscoped translations remain usable only when there is exactly one valid
+    sense. Scoped translations require a unique best lexical match across the
+    complete entry. Ties and unsupported morphological guesses are omitted.
+    """
+    aligned: list[list[tuple[str, str]]] = [[] for _ in definitions]
+    if not definitions:
+        return aligned
+
+    ignored = (
+        _SENSE_ALIGNMENT_STOPWORDS[language]
+        | _SENSE_ALIGNMENT_GENERIC_TOKENS
+        | set(lexical_tokens(lemma))
+    )
+    definition_tokens = [set(lexical_tokens(value)) - ignored for value in definitions]
+
+    for code, word, hint in records:
+        raw_hint_tokens = set(lexical_tokens(hint))
+        if not raw_hint_tokens:
+            if len(definitions) == 1:
+                aligned[0].append((code, word))
+            continue
+
+        hint_tokens = raw_hint_tokens - ignored
+        if not hint_tokens:
+            continue
+        scores = [len(hint_tokens & tokens) for tokens in definition_tokens]
+        best_score = max(scores)
+        if best_score == 0 or scores.count(best_score) != 1:
+            continue
+        aligned[scores.index(best_score)].append((code, word))
+
+    return aligned
 
 
 def _strings(values: object, *, limit: int, max_length: int) -> list[str]:
@@ -310,17 +351,21 @@ def import_kaikki_sources(
                                 ))
 
                         senses = value.get("senses") if isinstance(value.get("senses"), list) else []
-                        valid_sense_count = sum(
-                            bool(_strings(sense.get("glosses"), limit=1, max_length=2_000))
-                            for sense in senses if isinstance(sense, dict)
-                        )
-                        sense_index = 0
+                        valid_senses: list[tuple[dict, list[str]]] = []
                         for sense in senses:
-                            if not isinstance(sense, dict):
-                                continue
-                            definitions = _strings(sense.get("glosses"), limit=3, max_length=2_000)
-                            if not definitions:
-                                continue
+                            if isinstance(sense, dict):
+                                definitions = _strings(
+                                    sense.get("glosses"), limit=3, max_length=2_000
+                                )
+                                if definitions:
+                                    valid_senses.append((sense, definitions))
+                        aligned_entry_translations = _aligned_entry_translations(
+                            translation_records,
+                            [definitions[0] for _, definitions in valid_senses],
+                            language=language,
+                            lemma=lemma,
+                        )
+                        for sense_index, (sense, definitions) in enumerate(valid_senses):
                             sense_translation_records: list[tuple[str, str]] = []
                             for translation in sense.get("translations", []):
                                 if not isinstance(translation, dict):
@@ -333,12 +378,9 @@ def import_kaikki_sources(
                                 word = translation.get("word")
                                 if code and isinstance(word, str) and word.strip():
                                     sense_translation_records.append((code, word.strip()))
-                            translations = _sense_translation_values(
-                                translation_records,
+                            translations = _translation_values(
+                                aligned_entry_translations[sense_index],
                                 sense_translation_records,
-                                definitions[0],
-                                lemma=lemma,
-                                sense_count=valid_sense_count,
                             )
                             examples: list[str] = []
                             for example in sense.get("examples", []):
@@ -358,7 +400,6 @@ def import_kaikki_sources(
                                     json.dumps(translations, ensure_ascii=False),
                                 ),
                             )
-                            sense_index += 1
 
                         forms_seen: set[str] = set()
                         for form in value.get("forms", []):
