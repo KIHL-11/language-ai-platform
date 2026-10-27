@@ -1,0 +1,167 @@
+{
+  "manifest_version": 1,
+  "example_only": true,
+  "status": "candidate_validated",
+  "build_id": "20261027T120000Z-0123456789ab",
+  "created_at": "2026-10-27T12:00:00Z",
+  "repository": {
+    "url": "https://github.com/KIHL-11/language-ai-platform.git",
+    "importer_git_sha": "b2f9323d0affd857f4a75903901e0765c54bc0f1",
+    "worktree_clean": true,
+    "dictionary_schema_version": 1,
+    "forms_sidecar_schema_version": 1,
+    "python_version": "3.12.x"
+  },
+  "sources": [
+    {
+      "edition": "English Wiktionary",
+      "entry_language": "en",
+      "acquisition_url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "resolved_url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "rolling_url": true,
+      "snapshot_identity": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0
+      },
+      "dates": {
+        "dump_date": null,
+        "dump_date_status": "unverified",
+        "extraction_date": null,
+        "extraction_date_status": "unverified",
+        "retrieved_at": "2026-10-27T10:00:00Z"
+      },
+      "http_evidence": {
+        "etag": null,
+        "last_modified": null,
+        "content_length": null
+      },
+      "license": {
+        "label": "CC BY-SA 4.0",
+        "notice_url": "https://kaikki.org/dictionary/",
+        "attribution": "English Wiktionary contributors; extracted by Wiktextract/Kaikki",
+        "verified": false,
+        "verified_at": null
+      },
+      "artifact_name": "kaikki-en-UNVERIFIED-000000000000.jsonl.gz"
+    },
+    {
+      "edition": "German Wiktionary",
+      "entry_language": "de",
+      "acquisition_url": "https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz",
+      "resolved_url": "https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz",
+      "rolling_url": true,
+      "snapshot_identity": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0
+      },
+      "dates": {
+        "dump_date": null,
+        "dump_date_status": "unverified",
+        "extraction_date": null,
+        "extraction_date_status": "unverified",
+        "retrieved_at": "2026-10-27T10:00:00Z"
+      },
+      "http_evidence": {
+        "etag": null,
+        "last_modified": null,
+        "content_length": null
+      },
+      "license": {
+        "label": "CC BY-SA 4.0",
+        "notice_url": "https://kaikki.org/dewiktionary/",
+        "attribution": "German Wiktionary contributors; extracted by Wiktextract/Kaikki",
+        "verified": false,
+        "verified_at": null
+      },
+      "artifact_name": "kaikki-de-UNVERIFIED-000000000000.jsonl.gz"
+    }
+  ],
+  "import": {
+    "command": "backend/scripts/import_kaikki_dictionary.py",
+    "arguments": {
+      "database": "dictionary.sqlite3",
+      "content_license": "CC BY-SA 4.0",
+      "english_input": "kaikki-en-UNVERIFIED-000000000000.jsonl.gz",
+      "english_source_url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "german_input": "kaikki-de-UNVERIFIED-000000000000.jsonl.gz",
+      "german_source_url": "https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz"
+    },
+    "started_at": "2026-10-27T10:10:00Z",
+    "completed_at": "2026-10-27T11:10:00Z",
+    "elapsed_seconds": 3600.0,
+    "peak_rss_bytes": null
+  },
+  "statistics": {
+    "entries": {"en": 0, "de": 0, "total": 0},
+    "senses": {"en": 0, "de": 0, "total": 0},
+    "forms": {"en": 0, "de": 0, "total": 0},
+    "pronunciations": {"en": 0, "de": 0, "total": 0},
+    "chinese_coverage": {
+      "entries_with_chinese": {"en": 0, "de": 0, "total": 0},
+      "entry_percent": {"en": 0.0, "de": 0.0, "total": 0.0},
+      "senses_with_chinese": {"en": 0, "de": 0, "total": 0},
+      "sense_percent": {"en": 0.0, "de": 0.0, "total": 0.0}
+    },
+    "alignment_telemetry": {
+      "instrumentation_status": "example",
+      "sense_local": {
+        "seen": 0,
+        "retained": 0,
+        "deduplicated": 0,
+        "truncated": 0
+      },
+      "entry_level": {
+        "seen": 0,
+        "accepted": {
+          "unique_multi_token": 0,
+          "reliable_single_token_head": 0,
+          "unscoped_single_sense": 0,
+          "total": 0
+        },
+        "rejected": {
+          "ambiguous_or_tied": 0,
+          "zero_evidence": 0,
+          "generic_stopword_or_lemma_only": 0,
+          "single_sense_mismatch": 0,
+          "unsupported_morphology": 0,
+          "over_limit": 0,
+          "total": 0
+        }
+      }
+    }
+  },
+  "validation": {
+    "integrity_check": "ok",
+    "foreign_key_error_count": 0,
+    "required_query_plans": "passed",
+    "gold_case_failures": 0,
+    "forms_sidecar_status": "available",
+    "quality_report": {
+      "path": "quality-report.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0
+    },
+    "snapshot_comparison": {
+      "same_source_hashes_as_baseline": false,
+      "attribution": "confounded_by_source_snapshot"
+    }
+  },
+  "outputs": {
+    "dictionary": {
+      "path": "dictionary.sqlite3",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0
+    },
+    "forms_sidecar": {
+      "path": "dictionary.forms.sqlite3",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0,
+      "source_identity_verified": true
+    }
+  },
+  "rollback": {
+    "required": true,
+    "previous_build_id": "legacy-REPLACE-WITH-VERIFIED-HASH",
+    "validated": true
+  }
+}
