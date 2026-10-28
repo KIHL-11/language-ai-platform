@@ -9,7 +9,6 @@ Selection gold set in ``release_quality``).
 """
 
 import json
-import re
 import sqlite3
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from services.dictionary.provider import normalize_lexical
 
 DATA_QUALITY_VERSION = 1
 _LANGUAGES = ("en", "de")
-_HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+from services.dictionary.recovery import HAN_PATTERN as _HAN  # noqa: E402  shared Han ranges
 
 
 class DataQualityError(RuntimeError):

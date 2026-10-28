@@ -17,11 +17,12 @@ from services.dictionary.forms_sidecar import (
     lookup_forms,
 )
 from services.dictionary.import_telemetry import ImportTelemetry
+from services.dictionary.recovery import SINGLE_SENSE_RECOVERABLE, SINGLE_TABLE_RECOVERABLE
 from services.dictionary.recovery import (
     chinese_script_rejection,
     equivalence_groups,
-    single_sense_entry_is_safe,
-    single_translation_table,
+    raw_translation_hints,
+    single_sense_fallback_allowed,
 )
 
 
@@ -275,17 +276,15 @@ def _aligned_entry_translations(
       (``recovery.equivalence_groups``). A tie whose winners all share one
       group, or an unscoped translation on an entry that is one group, is
       assigned to the representative with outcome ``equivalent_group``.
-    * ``single_sense_fallback`` attaches a recoverable rejection on a safe
-      single-sense entry to that sense with outcome ``single_sense_fallback``;
-      ``single_table`` additionally allows ``single_sense_mismatch`` when every
-      record of the entry shares one hint.
+    * ``single_sense_fallback`` attaches a recoverable rejection on an eligible
+      single-sense entry (``recovery.single_sense_fallback_allowed``) to that
+      sense with outcome ``single_sense_fallback``; ``single_table`` (the
+      helper's ``mismatch_allowed``) additionally allows ``single_sense_mismatch``.
 
     When ``decisions`` is supplied it receives one ``(outcome, winner)`` pair per
     record; ``recovered_from`` receives the strict rejection reason that a
     recovery overrode (else ``None``). Recording never changes alignment.
     """
-    from services.dictionary.recovery import SINGLE_SENSE_RECOVERABLE, SINGLE_TABLE_RECOVERABLE
-
     recoverable = SINGLE_SENSE_RECOVERABLE | (SINGLE_TABLE_RECOVERABLE if single_table else frozenset())
 
     aligned: list[list[tuple[str, str]]] = [[] for _ in definitions]
@@ -482,31 +481,14 @@ def import_kaikki_sources(
                         )
                         entry_id = int(cursor.lastrowid)
 
-                        translation_records: list[tuple[str, str, str]] = []
-                        for translation in value.get("translations", []):
-                            if not isinstance(translation, dict):
-                                continue
-                            code = _translation_code(
-                                translation.get("code")
-                                or translation.get("lang_code")
-                                or translation.get("lang")
-                            )
-                            word = translation.get("word")
-                            if code and isinstance(word, str) and 0 < len(word.strip()) <= 500:
-                                if recovery:
-                                    script_reason = chinese_script_rejection(
-                                        code, word.strip(), translation.get("tags")
-                                    )
-                                    if script_reason is not None:
-                                        if telemetry is not None:
-                                            telemetry.script_rejected(edition_language, "entry_level", script_reason)
-                                        continue
-                                hint = translation.get("sense")
-                                translation_records.append((
-                                    code,
-                                    word.strip(),
-                                    hint.strip() if isinstance(hint, str) else "",
-                                ))
+                        translation_records = entry_translation_records(
+                            value,
+                            script_filter=recovery,
+                            on_reject=(
+                                (lambda reason: telemetry.script_rejected(edition_language, "entry_level", reason))
+                                if telemetry is not None else None
+                            ),
+                        )
 
                         senses = value.get("senses") if isinstance(value.get("senses"), list) else []
                         valid_senses: list[tuple[dict, list[str]]] = []
@@ -519,7 +501,13 @@ def import_kaikki_sources(
                                     valid_senses.append((sense, definitions))
                                 elif telemetry is not None:
                                     telemetry.record(edition_language, "senses_without_definition")
-                                    for code, _ in _sense_translation_records(sense, script_filter=recovery):
+                                    for code, _ in _sense_translation_records(
+                                        sense,
+                                        script_filter=recovery,
+                                        on_reject=lambda reason: telemetry.script_rejected(
+                                            edition_language, "sense_local", reason
+                                        ),
+                                    ):
                                         telemetry.sense_local_discarded_with_invalid_sense(
                                             edition_language, code
                                         )
@@ -527,6 +515,13 @@ def import_kaikki_sources(
                                 telemetry.record(edition_language, "senses_without_definition")
                         decisions: list[tuple[str, int | None]] = []
                         recovered_from: list[str | None] = []
+                        fallback_allowed, mismatch_allowed = single_sense_fallback_allowed(
+                            senses,
+                            len(valid_senses),
+                            raw_translation_hints(value),
+                            language=language,
+                            part_of_speech=pos,
+                        )
                         aligned_entry_translations = _aligned_entry_translations(
                             translation_records,
                             [definitions[0] for _, definitions in valid_senses],
@@ -537,12 +532,8 @@ def import_kaikki_sources(
                                 equivalence_groups([definitions for _, definitions in valid_senses])
                                 if recovery else None
                             ),
-                            single_sense_fallback=(
-                                recovery and single_sense_entry_is_safe(senses, len(valid_senses))
-                            ),
-                            single_table=single_translation_table(
-                                [hint for _, _, hint in translation_records]
-                            ),
+                            single_sense_fallback=recovery and fallback_allowed,
+                            single_table=recovery and mismatch_allowed,
                             recovered_from=recovered_from,
                         )
                         # Per sense, the provenance of each aligned record, in order.
@@ -659,10 +650,8 @@ def import_kaikki_sources(
                                 translation_records,
                                 decisions,
                                 entry_statuses_by_sense,
+                                recovered_from,
                             )
-                            for (outcome, _), recovered in zip(decisions, recovered_from):
-                                if recovered is not None:
-                                    telemetry.recovered(edition_language, outcome, recovered)
                             telemetry.record(edition_language, "entries_imported")
                         count += 1
             except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
@@ -694,6 +683,35 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def entry_translation_records(
+    value: dict,
+    *,
+    script_filter: bool = False,
+    on_reject=None,
+) -> list[tuple[str, str, str]]:
+    """Entry-level (code, word, hint) records exactly as the importer aligns them."""
+    records: list[tuple[str, str, str]] = []
+    for translation in value.get("translations", []):
+        if not isinstance(translation, dict):
+            continue
+        code = _translation_code(
+            translation.get("code")
+            or translation.get("lang_code")
+            or translation.get("lang")
+        )
+        word = translation.get("word")
+        if code and isinstance(word, str) and 0 < len(word.strip()) <= 500:
+            if script_filter:
+                reason = chinese_script_rejection(code, word.strip(), translation.get("tags"))
+                if reason is not None:
+                    if on_reject is not None:
+                        on_reject(reason)
+                    continue
+            hint = translation.get("sense")
+            records.append((code, word.strip(), hint.strip() if isinstance(hint, str) else ""))
+    return records
 
 
 def _sense_translation_records(
@@ -729,12 +747,14 @@ def _record_entry_decisions(
     records: list[tuple[str, str, str]],
     decisions: list[tuple[str, int | None]],
     entry_statuses_by_sense: list[list[str]],
+    recovered_from: list[str | None] | None = None,
 ) -> None:
     """Reconcile alignment decisions with what each sense actually stored."""
     if len(decisions) != len(records):
         raise RuntimeError("alignment telemetry lost a translation record")
+    recovered_from = recovered_from or [None] * len(decisions)
     positions = [0 for _ in entry_statuses_by_sense]
-    for (code, _, _), (outcome, winner) in zip(records, decisions):
+    for (code, _, _), (outcome, winner), recovered in zip(records, decisions, recovered_from):
         if winner is None:
             telemetry.entry_level(edition, code, outcome)
             continue
@@ -744,6 +764,9 @@ def _record_entry_decisions(
             telemetry.entry_level(edition, code, "over_limit")
             continue
         telemetry.entry_level(edition, code, outcome)
+        if recovered is not None:
+            # Count only recoveries that reached storage (or were duplicates).
+            telemetry.recovered(edition, outcome, recovered)
         if status == "duplicate":
             telemetry.entry_level_duplicate(edition, code)
     if any(position != len(statuses) for position, statuses in zip(positions, entry_statuses_by_sense)):

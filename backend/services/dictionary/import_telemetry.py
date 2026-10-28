@@ -15,7 +15,7 @@ ENTRY_ACCEPTED = (
     "equivalent_group",
     "single_sense_fallback",
 )
-SCRIPT_REJECTION_REASONS = ("dungan_cyrillic", "non_han_script")
+SCRIPT_REJECTION_REASONS = ("dungan_cyrillic",)
 ENTRY_REJECTED = (
     "ambiguous_or_tied",
     "zero_evidence",

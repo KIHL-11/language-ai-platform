@@ -74,7 +74,9 @@ def test_equivalence_groups_require_explicit_nesting(glosses, expected):
 def test_script_rejection_rules():
     assert chinese_script_rejection("zh-CN", "щён") == "dungan_cyrillic"
     assert chinese_script_rejection("zh-CN", "shjon", ["Dungan"]) == "dungan_cyrillic"
-    assert chinese_script_rejection("zh-CN", "yínháng") == "non_han_script"
+    assert chinese_script_rejection("zh-CN", "yínháng") is None  # approved scope: Dungan only
+    assert chinese_script_rejection("zh-CN", "DNA") is None
+    assert chinese_script_rejection("zh-CN", "〇") is None and chinese_script_rejection("zh-CN", "\U00030EDE") is None
     assert chinese_script_rejection("zh-CN", "銀行 /银行") is None
     assert chinese_script_rejection("zh-CN", "щён 欲") is None  # contains Han: kept
     assert chinese_script_rejection("de", "щён") is None  # only zh-CN is filtered
@@ -185,7 +187,89 @@ def test_single_sense_mismatch_with_several_tables_is_not_recovered(tmp_path):
     assert _senses(_import(tmp_path, [row]))[0][3] == ["银行"]
 
 
-def test_single_sense_over_limit_is_never_recovered(tmp_path):
+@pytest.mark.parametrize(
+    "other_table",
+    [
+        # a second table with no zh/de/en records still proves a second meaning (review H1)
+        {"code": "es", "word": "banco", "sense": "financial establishment"},
+        # ...as does a table whose only Chinese value is filtered Dungan (review H1)
+        {"code": "zh", "word": "щён", "sense": "financial establishment"},
+    ],
+)
+def test_hidden_second_tables_block_mismatch_recovery(tmp_path, other_table):
+    row = {
+        "word": "bank", "lang_code": "en", "pos": "noun",
+        "senses": [{"glosses": ["An institution where one can deposit money."]}],
+        "translations": [{"code": "zh", "word": "河岸", "sense": "edge of a river"}, other_table],
+    }
+    assert _senses(_import(tmp_path, [row]))[0][3] == []
+    # Control: with only the zh table the same entry is a single table and recovers.
+    (tmp_path / "control").mkdir()
+    control = dict(row, translations=row["translations"][:1])
+    assert _senses(_import(tmp_path / "control", [control]))[0][3] == ["河岸"]
+
+
+@pytest.mark.parametrize(
+    ("hints", "definition"),
+    [
+        (["literal", "figurative"], "A large wild cat."),  # generic-label-only hints (review M1)
+        (["edge of a river", "money"], "A place for money near the river."),  # weak token (review M1)
+    ],
+)
+def test_weak_or_generic_recovery_requires_a_single_table(tmp_path, hints, definition):
+    row = {
+        "word": "lion", "lang_code": "en", "pos": "noun",
+        "senses": [{"glosses": [definition]}],
+        "translations": [{"code": "zh", "word": f"译{index}", "sense": hint} for index, hint in enumerate(hints)],
+    }
+    assert _senses(_import(tmp_path, [row]))[0][3] == []
+    single = dict(row, translations=[{"code": "zh", "word": "狮子", "sense": "literal"}])
+    (tmp_path / "single").mkdir()
+    assert _senses(_import(tmp_path / "single", [single]))[0][3] == ["狮子"]
+
+
+def test_verb_style_table_under_a_noun_is_not_recovered_as_mismatch(tmp_path):
+    row = {
+        "word": "fly", "lang_code": "en", "pos": "noun",
+        "senses": [{"glosses": ["A small winged insect."]}],
+        "translations": [{"code": "zh", "word": "飞", "sense": "to travel through the air"}],
+    }
+    assert _senses(_import(tmp_path, [row]))[0][3] == []  # likely misfiled verb table (review M2)
+    verb = dict(row, pos="verb", senses=[{"glosses": ["To move through the air with wings."]}])
+    (tmp_path / "verb").mkdir()
+    assert _senses(_import(tmp_path / "verb", [verb]))[0][3] == ["飞"]
+
+
+def test_recovered_telemetry_counts_only_values_that_reached_storage(tmp_path):
+    row = {
+        "word": "many", "lang_code": "en", "pos": "adj",
+        "senses": [{"glosses": ["A large number."],
+                    "translations": [{"code": "zh", "word": f"多{index}"} for index in range(10)]}],
+        "translations": [{"code": "zh", "word": "许多", "sense": "much"}],
+    }
+    telemetry = ImportTelemetry()
+    _import(tmp_path, [row], telemetry=telemetry)
+    assert telemetry.report()["single_sense_fallback_recovered_from"] == []  # over limit (review L1)
+
+
+def test_raw_cause_analysis_matches_importer_decisions(tmp_path):
+    import gzip
+
+    from services.dictionary.release_comparison import raw_alignment_causes
+
+    row = {
+        "word": "bank", "lang_code": "en", "pos": "noun",
+        "senses": [{"glosses": ["An institution where one can deposit money."]}],
+        "translations": [{"code": "zh", "word": "河岸", "sense": "edge of river"},
+                         {"code": "de", "word": "Bank", "sense": "financial establishment"},
+                         {"code": "zh", "word": "щён", "sense": "edge of river"}],
+    }
+    source = tmp_path / "en.jsonl.gz"
+    source.write_bytes(gzip.compress((json.dumps(row, ensure_ascii=False) + "\n").encode()))
+    causes = raw_alignment_causes({"en": source}, {"en": {"bank"}})["en"]["bank"]
+    assert causes["repaired_decisions"] == {"single_sense_mismatch": 1, "dungan_filtered": 1}  # review M3
+    assert _senses(_import(tmp_path, [row]))[0][3] == []
+
     row = {
         "word": "many", "lang_code": "en", "pos": "adj",
         "senses": [{"glosses": ["A large number."],
@@ -214,10 +298,9 @@ def test_dungan_and_romanized_values_are_filtered_and_counted(tmp_path):
     }
     telemetry = ImportTelemetry()
     repaired = _senses(_import(tmp_path, [row], telemetry=telemetry))
-    assert repaired[0][3] == ["要", "想要"]
+    assert repaired[0][3] == ["要", "yào", "想要"]  # romanization is outside the approved filter
     rejected = {(item["scope"], item["reason"]): item["count"] for item in telemetry.report()["script_rejected"]}
-    assert rejected == {("sense_local", "dungan_cyrillic"): 1, ("entry_level", "dungan_cyrillic"): 2,
-                        ("entry_level", "non_han_script"): 1}
+    assert rejected == {("sense_local", "dungan_cyrillic"): 1, ("entry_level", "dungan_cyrillic"): 2}
     strict = _senses(_import(tmp_path, [row], recovery=False))
     assert "щён" in strict[0][3] and "ё" in strict[0][3]  # strict mode reproduces Phase 7A
 

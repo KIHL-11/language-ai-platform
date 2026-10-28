@@ -96,3 +96,13 @@ def test_strict_mode_build_is_available_for_same_snapshot_comparison(env, tmp_pa
     result = env.prepare(legacy, withhold_ready=True, recovery=False)
     quality = json.loads((release_dir(env, result["build_id"]) / "quality-report.json").read_text())
     assert quality["importer_recovery_enabled"] is False
+
+
+def test_strict_importer_builds_cannot_be_normal_releases(env):
+    legacy = env.legacy_release()
+    with pytest.raises(PrepareError, match="evaluation-only"):
+        env.prepare(legacy, recovery=False)
+    assert sorted(path.name for path in env.layout.releases.iterdir()) == [legacy]
+    strict = env.prepare(legacy, withhold_ready=True, recovery=False, dry_run=True)
+    repaired = env.prepare(legacy, withhold_ready=True, dry_run=True)
+    assert strict["build_id"] != repaired["build_id"]

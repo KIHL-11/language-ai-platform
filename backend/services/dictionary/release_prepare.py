@@ -220,6 +220,8 @@ def prepare_release(
     now = now or datetime.now(timezone.utc)
 
     # ---- read-only preflight -------------------------------------------------
+    if not recovery and not withhold_ready:
+        raise PrepareError("strict-importer (recovery=False) builds are evaluation-only; use withhold_ready")
     if not repository.worktree_clean:
         raise PrepareError("repository worktree is not clean; commit or stash before building")
     if len(repository.git_sha) != 40 or any(c not in "0123456789abcdef" for c in repository.git_sha):
@@ -256,6 +258,7 @@ def prepare_release(
     identity_seed = ":".join([
         *(source["snapshot_identity"]["sha256"] for source in sources),
         repository.git_sha,
+        *([] if recovery else ["strict-importer"]),
     ])
     build_id = f"{now.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{hashlib.sha256(identity_seed.encode()).hexdigest()[:12]}"
     plan = {

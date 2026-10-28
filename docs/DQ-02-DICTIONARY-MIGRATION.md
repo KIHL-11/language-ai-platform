@@ -747,22 +747,25 @@ Three narrowly scoped repairs are implemented in
 `services/dictionary/recovery.py` and enabled by default
 (`import_kaikki_sources(recovery=True)`; `recovery=False` reproduces 7A):
 
-1. **Single-sense fallback** — only when the source entry has exactly one sense
-   and it has a gloss. Recovers `weak_single_token_evidence`,
-   `unsupported_morphology`, `generic_stopword_or_lemma_only`; recovers
-   `single_sense_mismatch` only when every translation record of the entry
-   shares one hint (one translation table). Several distinct hints (e.g. a
-   "river shore" table inside a bank entry whose only sense is financial) stay
-   rejected. Over-limit is never recovered.
+1. **Single-sense fallback** — only when the source entry has exactly one raw
+   sense (with a gloss) *and* exactly one raw translation table: every raw
+   translation record, in any language and before any filter, shares one hint.
+   Then `weak_single_token_evidence`, `unsupported_morphology`,
+   `generic_stopword_or_lemma_only` and `single_sense_mismatch` are recovered;
+   a mismatch is still refused for an English non-verb entry whose table reads
+   "to ..." (likely misfiled). Several distinct hints (e.g. a "river shore"
+   table inside a bank entry whose only sense is financial) block every
+   recovery. Over-limit is never recovered.
 2. **Equivalent parent/child groups** — senses merge only when they share the
    exact same `glosses[0]` and nesting is explicit (≥1 subsense, ≤1 bare
    parent); identical text without nesting is never merged; groups are
    per-entry, hence never cross POS. A tie whose winners all lie in one group,
    or an unscoped translation on a one-group entry, goes to the representative
    only (the parent), never re-broadcast to children.
-3. **zh-CN script filter** — values without a Han character are rejected as
-   `dungan_cyrillic` (Cyrillic or tagged Dungan) or `non_han_script`, counted in
-   `build-report.json` (`script_rejected`).
+3. **Dungan filter** — zh-CN values without a Han character that are Cyrillic
+   or tagged Dungan are rejected as `dungan_cyrillic`, counted in
+   `build-report.json` (`script_rejected`). Other non-Han values (e.g. "DNA",
+   pinyin) are kept: they are outside the approved scope.
 
 Every stored translation now has a `translation_provenance` row (`method`:
 `sense_local` or an accepted entry-level outcome; `recovered_from`: the strict

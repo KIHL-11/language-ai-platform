@@ -25,15 +25,16 @@ from services.dictionary.provider import (
     _SENSE_ALIGNMENT_STOPWORDS,
     _aligned_entry_translations,
     _strings,
-    _translation_code,
+    entry_translation_records,
     lexical_tokens,
     normalize_lexical,
 )
 from services.dictionary.release_manifest import dictionary_statistics
 from services.dictionary.recovery import (
+    chinese_script_rejection,
     equivalence_groups,
-    single_sense_entry_is_safe,
-    single_translation_table,
+    raw_translation_hints,
+    single_sense_fallback_allowed,
 )
 from services.dictionary.release_quality import evaluate_gold_cases
 
@@ -177,30 +178,31 @@ def raw_alignment_causes(
                     if glosses
                 ]
                 definitions = [glosses[0] for glosses in gloss_lists]
-                records = []
-                for translation in value.get("translations", []):
-                    if not isinstance(translation, dict):
-                        continue
-                    code = _translation_code(
-                        translation.get("code") or translation.get("lang_code") or translation.get("lang")
-                    )
-                    word = translation.get("word")
-                    if code == "zh-CN" and isinstance(word, str) and 0 < len(word.strip()) <= 500:
-                        hint = translation.get("sense")
-                        records.append((code, word.strip(), hint.strip() if isinstance(hint, str) else ""))
+                # Same record construction as the importer (en/de/zh); decisions are
+                # per record, so restricting to zh-CN afterwards does not change them.
+                records = [record for record in entry_translation_records(value) if record[0] == "zh-CN"]
                 if not records:
                     continue
                 decisions: list = []
                 _aligned_entry_translations(records, definitions, language=language,
                                             lemma=lemma.strip(), decisions=decisions)
+                fallback_allowed, mismatch_allowed = single_sense_fallback_allowed(
+                    raw_senses, len(definitions), raw_translation_hints(value),
+                    language=language,
+                    part_of_speech=value.get("pos") if isinstance(value.get("pos"), str) else None,
+                )
                 repaired_decisions: list = []
                 _aligned_entry_translations(
                     records, definitions, language=language, lemma=lemma.strip(),
                     decisions=repaired_decisions,
                     groups=equivalence_groups(gloss_lists),
-                    single_sense_fallback=single_sense_entry_is_safe(raw_senses, len(definitions)),
-                    single_table=single_translation_table([hint for _, _, hint in records]),
+                    single_sense_fallback=fallback_allowed,
+                    single_table=mismatch_allowed,
                 )
+                repaired_decisions = [
+                    ("dungan_filtered", None) if chinese_script_rejection(code, word) else decision
+                    for (code, word, _), decision in zip(records, repaired_decisions)
+                ]
                 ignored = _SENSE_ALIGNMENT_STOPWORDS[language] | _SENSE_ALIGNMENT_GENERIC_TOKENS
                 entry = output[language].setdefault(lemma.strip(), {
                     "entries": 0, "senses": 0, "zh_records": 0,
