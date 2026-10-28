@@ -3,7 +3,14 @@
 
 import argparse
 import plistlib
+import sys
 from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parents[1] / "backend"
+sys.path.insert(0, str(BACKEND))
+
+from services.dictionary.release_manifest import validate_rollback_release  # noqa: E402
+from services.dictionary.release_store import current_build_id, resolve_layout  # noqa: E402
 
 
 LABEL = "com.language-ai-platform"
@@ -20,6 +27,11 @@ def dictionary_environment(dictionary_current: Path | None) -> dict[str, str]:
         return {}
     if not dictionary_current.is_symlink():
         raise SystemExit("--dictionary-current must be the dictionary_current symlink")
+    layout = resolve_layout(dictionary_current.parent)
+    build_id = current_build_id(layout)
+    if build_id is None:
+        raise SystemExit("--dictionary-current does not name a release")
+    validate_rollback_release(layout.releases, build_id)
     link = dictionary_current.parent.resolve(strict=True) / dictionary_current.name
     return {
         "DICTIONARY_DB_PATH": str(link / DICTIONARY_NAME),

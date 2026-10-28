@@ -2,11 +2,11 @@
 # Controlled dictionary release lifecycle for the Language AI LaunchAgent.
 #
 #   scripts/cutover_dictionary_macos.sh status
-#   scripts/cutover_dictionary_macos.sh legacy-rollback [--dry-run]
+#   scripts/cutover_dictionary_macos.sh legacy-rollback [--execute]
 #   scripts/cutover_dictionary_macos.sh cutover --build-id ID --source-root DIR \
-#       [--dry-run | --confirm "CUTOVER ID"]
+#       [--execute --confirm "CUTOVER ID"]
 #   scripts/cutover_dictionary_macos.sh rollback --build-id ID \
-#       [--dry-run | --confirm "ROLLBACK ID"]
+#       [--execute --confirm "ROLLBACK ID"]
 #
 # This wrapper never downloads, imports, or deletes data. See
 # docs/DQ-02-PHASE7A-MIGRATION-RUNBOOK.md before running a non-dry-run command.

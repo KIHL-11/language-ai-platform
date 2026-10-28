@@ -1,8 +1,12 @@
+import argparse
+import importlib.util
 import plistlib
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.migration_support import MigrationEnvironment
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -15,6 +19,27 @@ SHELL_SCRIPTS = [
     SCRIPTS / "uninstall_personal_app_macos.sh",
     SCRIPTS / "cutover_dictionary_macos.sh",
 ]
+
+
+def _load_backend_script(name: str):
+    path = REPOSITORY / "backend" / "scripts" / name
+    spec = importlib.util.spec_from_file_location(f"test_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dictionary_migration_commands_are_dry_run_by_default():
+    prepare = _load_backend_script("prepare_dictionary_release.py")
+    cutover = _load_backend_script("dictionary_cutover.py")
+
+    assert prepare._dry_run(argparse.Namespace(execute=False)) is True
+    assert prepare._dry_run(argparse.Namespace(execute=True)) is False
+    for command in ("legacy-rollback", "cutover", "rollback"):
+        assert cutover._dry_run(argparse.Namespace(command=command, execute=False)) is True
+        assert cutover._dry_run(argparse.Namespace(command=command, execute=True)) is False
+    assert cutover._dry_run(argparse.Namespace(command="status", execute=True)) is True
 
 
 def test_personal_app_shell_scripts_have_valid_bash_syntax():
@@ -124,10 +149,11 @@ def test_generated_launch_agent_without_release_keeps_backend_dictionary_default
 
 
 def test_generated_launch_agent_preserves_versioned_dictionary_paths(tmp_path):
-    storage = tmp_path / "storage"
-    (storage / "dictionary_releases" / "release-a").mkdir(parents=True)
+    env = MigrationEnvironment(tmp_path)
+    storage = env.storage
+    release_id = env.legacy_release()
     current = storage / "dictionary_current"
-    current.symlink_to("dictionary_releases/release-a", target_is_directory=True)
+    current.symlink_to(f"dictionary_releases/{release_id}", target_is_directory=True)
     result, plist_path = _generate(tmp_path, "--dictionary-current", str(current))
     assert result.returncode == 0, result.stderr
     environment = plistlib.loads(plist_path.read_bytes())["EnvironmentVariables"]
@@ -137,7 +163,17 @@ def test_generated_launch_agent_preserves_versioned_dictionary_paths(tmp_path):
     assert environment["DICTIONARY_FORMS_INDEX_PATH"] == str(
         resolved_storage / "dictionary_current" / "dictionary.forms.sqlite3"
     )
-    assert "release-a" not in plist_path.read_text()
+    assert release_id not in plist_path.read_text()
+
+
+def test_generated_launch_agent_rejects_unverified_release_symlink(tmp_path):
+    storage = tmp_path / "storage"
+    (storage / "dictionary_releases" / "release-a").mkdir(parents=True)
+    current = storage / "dictionary_current"
+    current.symlink_to("dictionary_releases/release-a", target_is_directory=True)
+    result, plist_path = _generate(tmp_path, "--dictionary-current", str(current))
+    assert result.returncode != 0
+    assert not plist_path.exists()
 
 
 def test_generator_refuses_a_non_symlink_dictionary_current(tmp_path):
@@ -186,6 +222,13 @@ def test_installer_keeps_versioned_paths_only_when_agent_already_uses_them(tmp_p
     assert _installer_dictionary_arguments(tmp_path / "d", link=False, plist_text=versioned).strip() == "0"
 
 
+def test_installer_validates_generated_plist_before_stopping_launch_agent():
+    source = (SCRIPTS / "install_personal_app_macos.sh").read_text(encoding="utf-8")
+    assert source.index('"${SCRIPT_DIR}/generate_launch_agent.py"') < source.index(
+        'launchctl bootout "${DOMAIN}/${LABEL}"'
+    )
+
+
 def test_cutover_wrapper_refuses_non_macos_and_never_deletes():
     wrapper = SCRIPTS / "cutover_dictionary_macos.sh"
     source = wrapper.read_text(encoding="utf-8")
@@ -206,7 +249,20 @@ def test_dictionary_migration_clis_parse_without_side_effects():
             check=False,
         )
         assert result.returncode == 0, result.stderr
-        assert "--dry-run" in result.stdout or "dry-run" in result.stdout
+        assert "read-only" in result.stdout or "dry-run" in result.stdout
+    cutover_help = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY / "backend/scripts/dictionary_cutover.py"),
+            "legacy-rollback",
+            "--help",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cutover_help.returncode == 0
+    assert "--execute" in cutover_help.stdout
 
 
 def test_dictionary_cutover_status_on_non_macos_fails_cleanly(tmp_path):

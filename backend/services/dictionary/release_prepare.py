@@ -279,6 +279,19 @@ def prepare_release(
         database_validation = validate_candidate_database(database)
         database_sha = file_sha256(database)
         database_stat = database.stat()
+        budget = disk_budget(
+            source_bytes=sum(
+                source["snapshot_identity"]["size_bytes"] for source in sources
+            ),
+            dictionary_bytes=max(database_stat.st_size, projected_dictionary_bytes),
+            sidecar_bytes=max(rollback_sidecar.stat().st_size, projected_sidecar_bytes),
+            minimum_headroom_bytes=minimum_headroom_bytes,
+        )
+        require_free_space(
+            layout.releases,
+            max(0, budget["required_free_bytes"] - database_stat.st_size),
+            disk_usage=disk_usage,
+        )
         fault("after_candidate_validation")
 
         stage = "sidecar"
@@ -301,6 +314,24 @@ def prepare_release(
         }
         if any(status != "available" for status in sidecar_status.values()):
             raise PrepareError("candidate forms Sidecar is not available for both languages")
+        budget = disk_budget(
+            source_bytes=sum(
+                source["snapshot_identity"]["size_bytes"] for source in sources
+            ),
+            dictionary_bytes=max(database.stat().st_size, projected_dictionary_bytes),
+            sidecar_bytes=max(sidecar.stat().st_size, projected_sidecar_bytes),
+            minimum_headroom_bytes=minimum_headroom_bytes,
+        )
+        require_free_space(
+            layout.releases,
+            max(
+                0,
+                budget["required_free_bytes"]
+                - database.stat().st_size
+                - sidecar.stat().st_size,
+            ),
+            disk_usage=disk_usage,
+        )
 
         stage = "quality"
         gold_results = evaluate_gold_cases(database, sidecar, gold)

@@ -497,23 +497,17 @@ def _validate_published_candidate_as_rollback(release: Path, build_id: str) -> N
     _sqlite_health(database, sidecar)
 
 
-def validate_rollback_release(releases_root: Path, build_id: str) -> Path:
-    """Read-only proof that a release can be switched back to and served.
-
-    A rollback is either a legacy conversion with ``rollback-verification.json``
-    or a previously published candidate whose ``READY`` matches its manifest.
-    """
+def validate_rollback_eligibility(releases_root: Path, build_id: str) -> tuple[Path, bytes]:
+    """Validate legacy rollback files before its READY marker is published."""
     release = _contained_child(releases_root, build_id, "rollback.previous_build_id")
     if (release / "build-failure.json").exists() or (release / "build-failure.json").is_symlink():
         raise ManifestValidationError("rollback release recorded a build failure")
     verification_path = _direct_regular_file(release, "rollback-verification.json")
     if verification_path is None:
-        _validate_published_candidate_as_rollback(release, build_id)
-        return release
+        raise ManifestValidationError("legacy rollback verification is missing")
     if verification_path.stat().st_size > 1024 * 1024:
         raise ManifestValidationError("rollback verification metadata is unreasonably large")
     raw = verification_path.read_bytes()
-    _ready_matches(release, raw, "rollback release")
     try:
         record = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -529,6 +523,24 @@ def validate_rollback_release(releases_root: Path, build_id: str) -> Path:
     database = _verified_file(release, dictionary_record, "rollback.dictionary")
     sidecar = _verified_file(release, sidecar_record, "rollback.forms_sidecar")
     _sqlite_health(database, sidecar)
+    return release, raw
+
+
+def validate_rollback_release(releases_root: Path, build_id: str) -> Path:
+    """Read-only proof that a release can be switched back to and served.
+
+    A rollback is either a legacy conversion with ``rollback-verification.json``
+    or a previously published candidate whose ``READY`` matches its manifest.
+    """
+    release = _contained_child(releases_root, build_id, "rollback.previous_build_id")
+    if (release / "build-failure.json").exists() or (release / "build-failure.json").is_symlink():
+        raise ManifestValidationError("rollback release recorded a build failure")
+    verification_path = _direct_regular_file(release, "rollback-verification.json")
+    if verification_path is None:
+        _validate_published_candidate_as_rollback(release, build_id)
+        return release
+    release, raw = validate_rollback_eligibility(releases_root, build_id)
+    _ready_matches(release, raw, "rollback release")
     return release
 
 

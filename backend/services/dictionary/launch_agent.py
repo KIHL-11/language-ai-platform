@@ -20,6 +20,17 @@ LABEL = "com.language-ai-platform"
 DICTIONARY_ENVIRONMENT_KEYS = ("DICTIONARY_DB_PATH", "DICTIONARY_FORMS_INDEX_PATH")
 _CREDENTIAL_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|COOKIE|CREDENTIAL|AUTH)", re.IGNORECASE)
 _MAX_PLIST_BYTES = 256 * 1024
+_ALLOWED_PLIST_KEYS = {
+    "Label", "ProgramArguments", "WorkingDirectory", "RunAtLoad", "KeepAlive",
+    "ThrottleInterval", "ProcessType", "EnvironmentVariables",
+    "StandardOutPath", "StandardErrorPath",
+}
+_ALLOWED_ENVIRONMENT_KEYS = {
+    "PATH", "PYTHONUNBUFFERED", *DICTIONARY_ENVIRONMENT_KEYS,
+}
+_EXPECTED_ARGUMENTS_TAIL = [
+    "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8000",
+]
 
 
 class LaunchAgentError(RuntimeError):
@@ -195,22 +206,28 @@ def migrated_plist(original: bytes, dictionary_environment: dict[str, str]) -> b
         raise LaunchAgentError("LaunchAgent plist cannot be parsed") from exc
     if not isinstance(value, dict) or value.get("Label") != LABEL:
         raise LaunchAgentError("LaunchAgent plist is not the Language AI agent")
+    if set(value) - _ALLOWED_PLIST_KEYS:
+        raise LaunchAgentError("LaunchAgent plist contains unsupported fields")
     arguments = value.get("ProgramArguments")
-    if not isinstance(arguments, list) or "--host" not in arguments:
-        raise LaunchAgentError("LaunchAgent ProgramArguments are unexpected")
-    host_index = arguments.index("--host")
-    if host_index + 1 >= len(arguments) or arguments[host_index + 1] != "127.0.0.1":
-        raise LaunchAgentError("LaunchAgent must bind the backend to 127.0.0.1")
+    if (
+        not isinstance(arguments, list)
+        or len(arguments) != 8
+        or not all(isinstance(argument, str) for argument in arguments)
+        or arguments[1:] != _EXPECTED_ARGUMENTS_TAIL
+        or not Path(arguments[0]).is_absolute()
+    ):
+        raise LaunchAgentError("LaunchAgent ProgramArguments are outside the safe contract")
     environment = value.get("EnvironmentVariables", {})
     if not isinstance(environment, dict) or not all(
         isinstance(key, str) and isinstance(item, str) for key, item in environment.items()
     ):
         raise LaunchAgentError("LaunchAgent EnvironmentVariables are malformed")
+    unsupported = sorted(set(environment) - _ALLOWED_ENVIRONMENT_KEYS)
     credentials = credential_like_variables(environment)
-    if credentials:
+    if unsupported or credentials:
         raise LaunchAgentError(
-            f"LaunchAgent defines {len(credentials)} credential-like environment variable(s); "
-            "move secrets to backend/.env and reinstall before migrating"
+            "LaunchAgent defines unsupported environment variable(s); reinstall the generated "
+            "local-only agent before migrating"
         )
     updated = dict(value)
     updated["EnvironmentVariables"] = {**environment, **dictionary_environment}

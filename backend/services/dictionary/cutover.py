@@ -71,6 +71,12 @@ LEARNING_STORE_FILES = (
 LEARNING_MEDIA_DIRECTORY = "library_media"
 MIGRATIONS_DIRNAME = "dictionary_migrations"
 LOCK_NAME = ".dictionary-migration.lock"
+EMPTY_LEARNING_STORES = {
+    "study_bank.json": {"version": 3, "items": []},
+    "chunk_bank.json": {"version": 2, "chunks": []},
+    "learning_library.json": {"version": 3, "items": []},
+    "speaking_sessions.json": {"version": 1, "sessions": []},
+}
 
 
 class LearningDriftError(RuntimeError):
@@ -100,25 +106,36 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _entry(path: Path) -> dict:
+def _entry(path: Path, *, empty_store: object | None = None) -> dict:
     if path.is_symlink():
-        return {"type": "symlink", "target_sha256": hashlib.sha256(os.readlink(path).encode()).hexdigest()}
+        raise LearningDriftError(f"learning-data path is a symlink: {path.name}")
     if not path.exists():
         return {"type": "missing"}
     if path.is_dir():
         return {"type": "directory"}
     stat_result = path.stat()
-    return {
+    result = {
         "type": "file",
         "size_bytes": stat_result.st_size,
         "mtime_ns": stat_result.st_mtime_ns,
         "sha256": _sha256(path),
     }
+    if empty_store is not None:
+        try:
+            result["known_empty_default"] = json.loads(
+                path.read_text(encoding="utf-8")
+            ) == empty_store
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            result["known_empty_default"] = False
+    return result
 
 
 def learning_snapshot(storage: Path) -> dict:
     """Existence, size, mtime and SHA-256 of every learning store; never contents."""
-    files = {name: _entry(storage / name) for name in LEARNING_STORE_FILES}
+    files = {
+        name: _entry(storage / name, empty_store=EMPTY_LEARNING_STORES[name])
+        for name in LEARNING_STORE_FILES
+    }
     media_root = storage / LEARNING_MEDIA_DIRECTORY
     media = {}
     if media_root.is_dir() and not media_root.is_symlink():
@@ -471,7 +488,12 @@ def learning_preserved(before: dict | None, after: dict) -> bool:
         return True
     for name, entry in before["files"].items():
         now = after["files"].get(name)
-        if entry != now and not (entry["type"] == "missing" and now and now["type"] == "file"):
+        if entry != now and not (
+            entry["type"] == "missing"
+            and now
+            and now["type"] == "file"
+            and now.get("known_empty_default") is True
+        ):
             return False
     if before["media_root"] != after["media_root"] and not (
         before["media_root"]["type"] == "missing" and after["media_root"]["type"] == "directory"
@@ -599,8 +621,22 @@ def _finish_failure(
         recovery = transition.recover(baseline=baseline, samples=samples, environment=environment)
     except BaseException as recovery_exc:  # noqa: BLE001
         record.event("recovery_failed", error_type=type(recovery_exc).__name__, message=str(recovery_exc)[:500])
-        record.write_json("result.json", {"result": "recovery_failed", "operation": operation,
-                                          "events": record.events})
+        safe_stop_error = None
+        try:
+            transition.controller.stop()
+            if transition.controller.is_loaded() or transition.client.healthy():
+                raise CutoverError("service still responds after final safe stop")
+            record.event("final_safe_stop_verified")
+        except BaseException as stop_exc:  # noqa: BLE001
+            safe_stop_error = f"{type(stop_exc).__name__}: {stop_exc}"[:500]
+            record.event("final_safe_stop_failed", message=safe_stop_error)
+        record.write_json("result.json", {
+            "result": "recovery_failed",
+            "operation": operation,
+            "final_safe_stop_verified": safe_stop_error is None,
+            "final_safe_stop_error": safe_stop_error,
+            "events": record.events,
+        })
         return CutoverError(
             f"{operation} failed ({exc or type(exc).__name__}) and automatic recovery failed "
             f"({recovery_exc}); see {record.path.name} and the runbook manual-recovery section",

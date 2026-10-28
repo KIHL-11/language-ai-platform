@@ -293,6 +293,24 @@ def test_failed_recovery_is_reported_for_manual_intervention(prepared):
     assert raised.value.recovered is False
     record, _ = _result(env)
     assert record["result"] == "recovery_failed"
+    assert record["final_safe_stop_verified"] is True
+    assert not controller.loaded and not backend.healthy()
+
+
+def test_failed_recovery_after_old_service_restart_ends_safely_stopped(prepared):
+    env, _, candidate = prepared
+    controller, backend = lifecycle(env)
+
+    def fault(stage):
+        if stage == "before_smoke":
+            backend.fail_lookup = True
+
+    with pytest.raises(CutoverError, match="automatic recovery failed") as raised:
+        _cutover(env, candidate, controller, backend, _fault=fault)
+    assert raised.value.recovered is False
+    assert not controller.loaded and not backend.healthy()
+    record, _ = _result(env)
+    assert record["final_safe_stop_verified"] is True
 
 
 def test_backend_that_refuses_to_stop_is_never_switched(prepared):
@@ -481,7 +499,7 @@ def test_launchctl_missing_is_reported_cleanly():
 
 
 def test_migrated_plist_changes_only_dictionary_variables(tmp_path):
-    original = write_launch_agent(tmp_path / "agent.plist", environment={"CUSTOM_FLAG": "1"})
+    original = write_launch_agent(tmp_path / "agent.plist")
     updated = plistlib.loads(migrated_plist(original, {"DICTIONARY_DB_PATH": "/a", "DICTIONARY_FORMS_INDEX_PATH": "/b"}))
     before = plistlib.loads(original)
     assert {key: value for key, value in updated.items() if key != "EnvironmentVariables"} == {
@@ -490,6 +508,15 @@ def test_migrated_plist_changes_only_dictionary_variables(tmp_path):
     assert updated["EnvironmentVariables"] == {
         **before["EnvironmentVariables"], "DICTIONARY_DB_PATH": "/a", "DICTIONARY_FORMS_INDEX_PATH": "/b",
     }
+
+
+@pytest.mark.parametrize("unsafe_key", ["CUSTOM_FLAG", "AUTHORIZATION"])
+def test_migrated_plist_refuses_unapproved_environment_fields(tmp_path, unsafe_key):
+    original = write_launch_agent(
+        tmp_path / "agent.plist", environment={unsafe_key: "not-a-real-secret"}
+    )
+    with pytest.raises(LaunchAgentError, match="unsupported environment"):
+        migrated_plist(original, {"DICTIONARY_DB_PATH": "/a"})
 
 
 
@@ -589,9 +616,36 @@ def test_startup_created_learning_stores_are_not_drift(prepared):
         original_boot(environment)
         path = env.storage / "speaking_sessions.json"
         if not path.exists():
-            path.write_text('{"sessions":[]}', encoding="utf-8")
+            path.write_text('{"version":1,"sessions":[]}', encoding="utf-8")
     backend.boot = boot_creates_default
     assert _cutover(env, candidate, controller, backend)["action"] == "cutover_complete"
+
+
+def test_startup_created_nonempty_learning_store_is_drift(prepared):
+    env, _, candidate = prepared
+    (env.storage / "speaking_sessions.json").unlink()
+    controller, backend = lifecycle(env)
+    original_boot = backend.boot
+
+    def boot_creates_content(environment):
+        original_boot(environment)
+        path = env.storage / "speaking_sessions.json"
+        if not path.exists():
+            path.write_text('{"version":1,"sessions":[{"id":"unexpected"}]}')
+
+    backend.boot = boot_creates_content
+    with pytest.raises(CutoverError, match="learning-store hashes differ"):
+        _cutover(env, candidate, controller, backend)
+
+
+def test_learning_snapshot_rejects_symlinked_media(tmp_path):
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    outside = tmp_path / "outside-media"
+    outside.mkdir()
+    (storage / "library_media").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="symlink"):
+        learning_snapshot(storage)
 
 
 def test_concurrent_migration_is_refused_by_lock(prepared):

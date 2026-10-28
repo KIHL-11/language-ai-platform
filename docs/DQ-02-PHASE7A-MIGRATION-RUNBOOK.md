@@ -57,8 +57,8 @@ Expected before migration: `current_build_id: null`, `release_id: "unversioned"`
 ## 3. Legacy rollback release (stops and restarts the backend once)
 
 ```bash
-scripts/cutover_dictionary_macos.sh legacy-rollback --dry-run
 scripts/cutover_dictionary_macos.sh legacy-rollback
+scripts/cutover_dictionary_macos.sh legacy-rollback --execute
 ```
 
 Verify:
@@ -105,14 +105,14 @@ refuses unapproved or fixture gold sets.
 ## 6. Prepare the candidate — **Owner approval: candidate build + disk use**
 
 ```bash
-$PY backend/scripts/prepare_dictionary_release.py --dry-run \
+$PY backend/scripts/prepare_dictionary_release.py \
   --source-root "$SOURCE_ROOT" --source-evidence ~/dq02-source-evidence.json \
   --gold-set ~/dq02-gold-v1.json --rollback-build-id "$LEGACY_ID" \
   --projected-dictionary-bytes 2700000000 --projected-sidecar-bytes 600000000
 ```
 
 Check `disk_budget.required_free_bytes` against `free_bytes`. Then run the same
-command without `--dry-run`. It does not stop the backend. Record `build_id` as
+command with `--execute`. It does not stop the backend. Record `build_id` as
 `CANDIDATE_ID`. Inspect in `backend/storage/dictionary_releases/$CANDIDATE_ID/`:
 
 - `quality-report.json`: `gold_case_failures == 0`, `incorrect_associations == 0`,
@@ -136,9 +136,9 @@ never selectable. Revise and re-run (a new build ID is allocated).
 
 ```bash
 scripts/cutover_dictionary_macos.sh cutover --build-id "$CANDIDATE_ID" \
-  --source-root "$SOURCE_ROOT" --dry-run
+  --source-root "$SOURCE_ROOT"
 scripts/cutover_dictionary_macos.sh cutover --build-id "$CANDIDATE_ID" \
-  --source-root "$SOURCE_ROOT" --confirm "CUTOVER $CANDIDATE_ID"
+  --source-root "$SOURCE_ROOT" --execute --confirm "CUTOVER $CANDIDATE_ID"
 ```
 
 The tool stops the LaunchAgent, hashes learning stores, switches
@@ -167,10 +167,11 @@ signal is deferred until the cutover finishes or rolls back, then reported.
 ## 8. Rollback rehearsal (recommended once)
 
 ```bash
-scripts/cutover_dictionary_macos.sh rollback --build-id "$LEGACY_ID" --dry-run
-scripts/cutover_dictionary_macos.sh rollback --build-id "$LEGACY_ID" --confirm "ROLLBACK $LEGACY_ID"
+scripts/cutover_dictionary_macos.sh rollback --build-id "$LEGACY_ID"
+scripts/cutover_dictionary_macos.sh rollback --build-id "$LEGACY_ID" \
+  --execute --confirm "ROLLBACK $LEGACY_ID"
 scripts/cutover_dictionary_macos.sh cutover --build-id "$CANDIDATE_ID" \
-  --source-root "$SOURCE_ROOT" --confirm "CUTOVER $CANDIDATE_ID"
+  --source-root "$SOURCE_ROOT" --execute --confirm "CUTOVER $CANDIDATE_ID"
 ```
 
 After rolling back to `LEGACY_ID` the backend serves the byte-identical copy of

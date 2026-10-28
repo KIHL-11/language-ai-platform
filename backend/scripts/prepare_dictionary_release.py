@@ -4,7 +4,7 @@
 Imports already-downloaded, hash-verified Kaikki gzip artifacts into a new
 ``dictionary_releases/<build-id>`` directory, validates it, builds its forms
 Sidecar, writes manifest/quality/build reports, and writes READY last.
-``--dry-run`` performs only the read-only preflight and creates nothing.
+Read-only dry-run is the default. ``--execute`` is required to create anything.
 """
 
 import argparse
@@ -25,6 +25,11 @@ from services.dictionary.release_prepare import (  # noqa: E402
 from services.dictionary.release_store import ReleaseStoreError, resolve_layout  # noqa: E402
 
 
+def _dry_run(arguments: argparse.Namespace) -> bool:
+    """Mutation is opt-in; absence of --execute always means read-only."""
+    return not bool(getattr(arguments, "execute", False))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--storage-root", type=Path, default=BACKEND / "storage")
@@ -37,10 +42,21 @@ def main() -> int:
     parser.add_argument("--rollback-build-id", required=True)
     parser.add_argument("--projected-dictionary-bytes", type=int, default=0)
     parser.add_argument("--projected-sidecar-bytes", type=int, default=0)
-    parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--execute",
+        action="store_true",
+        help="Build a new release; without this flag only read-only preflight runs",
+    )
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Explicitly request the default read-only preflight",
+    )
     arguments = parser.parse_args()
     try:
-        layout = resolve_layout(arguments.storage_root, create=not arguments.dry_run)
+        dry_run = _dry_run(arguments)
+        layout = resolve_layout(arguments.storage_root, create=not dry_run)
         result = prepare_release(
             layout=layout,
             source_root=arguments.source_root,
@@ -48,7 +64,7 @@ def main() -> int:
             gold_set=arguments.gold_set,
             rollback_build_id=arguments.rollback_build_id,
             repository=repository_state(BACKEND.parent),
-            dry_run=arguments.dry_run,
+            dry_run=dry_run,
             projected_dictionary_bytes=arguments.projected_dictionary_bytes,
             projected_sidecar_bytes=arguments.projected_sidecar_bytes,
         )

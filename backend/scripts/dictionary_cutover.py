@@ -7,8 +7,8 @@ Subcommands:
   cutover           switch to a prepared release; automatic rollback on failure
   rollback          switch back to an earlier validated release
 
-Every mutating subcommand supports --dry-run, which performs only read-only
-validation. cutover/rollback also require an exact Owner confirmation phrase.
+Every mutating subcommand is read-only by default. ``--execute`` is required
+before mutation; cutover/rollback also require an exact Owner confirmation phrase.
 This tool never downloads, imports, or deletes data.
 """
 
@@ -44,6 +44,13 @@ from services.dictionary.release_store import (  # noqa: E402
     current_build_id,
     resolve_layout,
 )
+
+
+def _dry_run(arguments: argparse.Namespace) -> bool:
+    """Status and every command without --execute are read-only."""
+    return arguments.command == "status" or not bool(
+        getattr(arguments, "execute", False)
+    )
 
 
 def _status(layout, plist_path: Path, controller) -> dict:
@@ -84,23 +91,29 @@ def main() -> int:
     commands.add_parser("status")
     legacy = commands.add_parser("legacy-rollback")
     legacy.add_argument("--legacy-database", type=Path)
-    legacy.add_argument("--dry-run", action="store_true")
+    legacy_mode = legacy.add_mutually_exclusive_group()
+    legacy_mode.add_argument("--execute", action="store_true")
+    legacy_mode.add_argument("--dry-run", action="store_true")
     cutover = commands.add_parser("cutover")
     cutover.add_argument("--build-id", required=True)
     cutover.add_argument("--source-root", type=Path, required=True)
     cutover.add_argument("--legacy-database", type=Path)
     cutover.add_argument("--confirm")
-    cutover.add_argument("--dry-run", action="store_true")
+    cutover_mode = cutover.add_mutually_exclusive_group()
+    cutover_mode.add_argument("--execute", action="store_true")
+    cutover_mode.add_argument("--dry-run", action="store_true")
     rollback = commands.add_parser("rollback")
     rollback.add_argument("--build-id", required=True)
     rollback.add_argument("--confirm")
-    rollback.add_argument("--dry-run", action="store_true")
+    rollback_mode = rollback.add_mutually_exclusive_group()
+    rollback_mode.add_argument("--execute", action="store_true")
+    rollback_mode.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args()
 
     controller = LaunchctlController()
     client = LocalBackendClient()
     try:
-        dry_run = getattr(arguments, "dry_run", True) or arguments.command == "status"
+        dry_run = _dry_run(arguments)
         layout = resolve_layout(arguments.storage_root, create=False)
         legacy_database = getattr(arguments, "legacy_database", None) or layout.storage / LEGACY_DICTIONARY_NAME
         if arguments.command == "status":

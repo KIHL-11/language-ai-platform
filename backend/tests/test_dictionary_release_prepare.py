@@ -17,6 +17,7 @@ from migration_support import (
     release_dir,
     tree_state,
 )
+from services.dictionary import legacy_release as legacy_module
 from services.dictionary import release_prepare as prepare_module
 from services.dictionary.forms_sidecar import lookup_forms
 from services.dictionary.legacy_release import (
@@ -58,6 +59,36 @@ def test_legacy_dry_run_creates_nothing(env):
     assert plan["action"] == "would_create" and plan["copy_method"] == "byte_copy"
     assert plan["build_id"].startswith("legacy-")
     assert tree_state(env.root) == before
+
+
+def test_legacy_preflight_rejects_insufficient_disk_without_creating_release(env):
+    layout = env.layout
+    before = tree_state(env.root)
+    with pytest.raises(LegacyConversionError, match="insufficient disk space"):
+        create_legacy_rollback_release(
+            layout,
+            env.legacy,
+            minimum_headroom_bytes=0,
+            disk_usage=lambda _path: type("Usage", (), {"free": 1})(),
+        )
+    assert tree_state(env.root) == before
+
+
+def test_legacy_ready_is_not_written_before_independent_validation(
+    env, monkeypatch
+):
+    def reject(*_args):
+        raise ManifestValidationError("simulated independent validation failure")
+
+    monkeypatch.setattr(legacy_module, "validate_rollback_eligibility", reject)
+    with pytest.raises(ManifestValidationError, match="simulated independent"):
+        create_legacy_rollback_release(
+            env.layout,
+            env.legacy,
+            minimum_headroom_bytes=0,
+        )
+    release = next(env.layout.releases.iterdir())
+    assert not (release / "READY").exists()
 
 
 def test_legacy_conversion_copies_without_touching_the_installed_database(env):
@@ -324,6 +355,24 @@ def test_disk_budget_matches_design_formula():
     assert 22 * gib < budget["required_free_bytes"] < 24 * gib
     with pytest.raises(ReleaseStoreError):
         disk_budget(source_bytes=-1, dictionary_bytes=0, sidecar_bytes=0)
+
+
+def test_actual_candidate_size_rechecks_disk_headroom(env):
+    rollback = env.legacy_release()
+    calls = {"count": 0}
+
+    def shrinking_disk(_path):
+        calls["count"] += 1
+        free = 1 << 40 if calls["count"] == 1 else 1
+        return type("Usage", (), {"free": free})()
+
+    with pytest.raises(PrepareError, match="insufficient disk space"):
+        env.prepare(rollback, disk_usage=shrinking_disk)
+    candidate = next(
+        path for path in env.layout.releases.iterdir() if path.name != rollback
+    )
+    assert not (candidate / "READY").exists()
+    assert calls["count"] >= 2
 
 
 def _corrupt(database: Path) -> None:

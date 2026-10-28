@@ -9,9 +9,11 @@ WAL (if any) is never touched. The copy lives in a new
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from services.dictionary.forms_sidecar import build_forms_index, lookup_forms
 from services.dictionary.provider import SQLiteDictionaryProvider
@@ -19,17 +21,21 @@ from services.dictionary.release_manifest import (
     ManifestValidationError,
     _sqlite_health,
     file_sha256,
+    validate_rollback_eligibility,
     validate_rollback_release,
 )
 from services.dictionary.release_store import (
     DICTIONARY_NAME,
+    GIB,
     SIDECAR_NAME,
     ReleaseLayout,
     ReleaseStoreError,
     canonical_json,
     create_release_directory,
+    disk_budget,
     fsync_directory,
     fsync_file,
+    require_free_space,
     seal_release,
     write_new_file_atomic,
 )
@@ -77,6 +83,7 @@ def legacy_fingerprint(legacy_database: Path) -> dict:
         "wal_present": wal_present,
         "wal_mode": wal_mode,
         "wal_sha256": wal_sha,
+        "wal_size_bytes": wal.stat().st_size if wal_present else 0,
         "state_sha256": combined,
     }
 
@@ -152,6 +159,8 @@ def create_legacy_rollback_release(
     *,
     dry_run: bool = False,
     now: datetime | None = None,
+    minimum_headroom_bytes: int = 10 * GIB,
+    disk_usage: Callable[[Path], object] = shutil.disk_usage,
 ) -> dict:
     """Create (or re-verify) the ``legacy-<sha>`` rollback release.
 
@@ -178,6 +187,22 @@ def create_legacy_rollback_release(
         "legacy_size_bytes": before["size_bytes"],
         "wal_present": before["wal_present"],
     }
+    projected_sidecar = max(1, before["size_bytes"] // 5)
+    budget = disk_budget(
+        source_bytes=before["size_bytes"] + before["wal_size_bytes"],
+        dictionary_bytes=before["size_bytes"] + before["wal_size_bytes"],
+        sidecar_bytes=projected_sidecar,
+        minimum_headroom_bytes=minimum_headroom_bytes,
+    )
+    try:
+        free_bytes = require_free_space(
+            layout.releases if layout.releases.is_dir() else layout.storage,
+            budget["required_free_bytes"],
+            disk_usage=disk_usage,
+        )
+    except ReleaseStoreError as exc:
+        raise LegacyConversionError(str(exc)) from exc
+    plan_base.update({"disk_budget": budget, "free_bytes_at_preflight": free_bytes})
     # An earlier interrupted attempt leaves an incomplete directory without
     # READY. It is preserved for inspection and skipped; never reused or deleted.
     preserved_attempts = []
@@ -232,11 +257,39 @@ def create_legacy_rollback_release(
         if companion.exists():
             raise LegacyConversionError("rollback copy left SQLite journal state behind")
 
+    actual_budget = disk_budget(
+        source_bytes=before["size_bytes"] + before["wal_size_bytes"],
+        dictionary_bytes=database.stat().st_size,
+        sidecar_bytes=projected_sidecar,
+        minimum_headroom_bytes=minimum_headroom_bytes,
+    )
+    require_free_space(
+        layout.releases,
+        max(0, actual_budget["required_free_bytes"] - database.stat().st_size),
+        disk_usage=disk_usage,
+    )
+
     sidecar = release / SIDECAR_NAME
     build_forms_index(database, sidecar)
     lock = Path(f"{sidecar}.lock")
     if lock.is_file() and not lock.is_symlink():
         lock.unlink()
+    actual_budget = disk_budget(
+        source_bytes=before["size_bytes"] + before["wal_size_bytes"],
+        dictionary_bytes=database.stat().st_size,
+        sidecar_bytes=sidecar.stat().st_size,
+        minimum_headroom_bytes=minimum_headroom_bytes,
+    )
+    require_free_space(
+        layout.releases,
+        max(
+            0,
+            actual_budget["required_free_bytes"]
+            - database.stat().st_size
+            - sidecar.stat().st_size,
+        ),
+        disk_usage=disk_usage,
+    )
     try:
         _sqlite_health(database, sidecar)
     except ManifestValidationError as exc:
@@ -285,6 +338,7 @@ def create_legacy_rollback_release(
         },
     }
     verification_bytes = write_new_file_atomic(release, VERIFICATION_NAME, canonical_json(verification))
+    validate_rollback_eligibility(layout.releases, build_id)
     write_new_file_atomic(release, "READY", (hashlib.sha256(verification_bytes).hexdigest() + "\n").encode())
     seal_release(release)
     validate_rollback_release(layout.releases, build_id)
