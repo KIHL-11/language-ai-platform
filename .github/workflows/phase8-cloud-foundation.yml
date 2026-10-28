@@ -57,7 +57,7 @@ jobs:
       - name: Verify dependency consistency
         run: python -m pip check
       - name: Verify patch whitespace
-        run: git diff --check HEAD^
+        run: git show --check --format= --no-renames HEAD
 
   frontend:
     name: Frontend regression
