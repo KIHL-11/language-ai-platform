@@ -14,7 +14,7 @@ GOLD_SET_VERSION = 1
 COLD_LOOKUP_LIMIT_SECONDS = 1.0
 HOT_LOOKUP_LIMIT_SECONDS = 0.5
 _LANGUAGES = ("en", "de")
-_HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+from services.dictionary.recovery import HAN_PATTERN as _HAN  # noqa: E402  shared Han ranges
 _CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 
 # Every provider lookup query must be served by the named index; a plain

@@ -107,7 +107,7 @@ def prepared_release(tmp_path):
         "sense_local": {"seen": 0, "retained": 0, "deduplicated": 0, "truncated": 0},
         "entry_level": {
             "seen": 0,
-            "accepted": {"unique_multi_token": 0, "reliable_single_token_head": 0, "unscoped_single_sense": 0, "total": 0},
+            "accepted": {"unique_multi_token": 0, "reliable_single_token_head": 0, "unscoped_single_sense": 0, "equivalent_group": 0, "single_sense_fallback": 0, "total": 0},
             "rejected": {
                 "ambiguous_or_tied": 0,
                 "zero_evidence": 0,

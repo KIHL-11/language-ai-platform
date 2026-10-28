@@ -11,7 +11,11 @@ ENTRY_ACCEPTED = (
     "unique_multi_token",
     "reliable_single_token_head",
     "unscoped_single_sense",
+    # Phase 7B recovery (see services/dictionary/recovery.py)
+    "equivalent_group",
+    "single_sense_fallback",
 )
+SCRIPT_REJECTION_REASONS = ("dungan_cyrillic",)
 ENTRY_REJECTED = (
     "ambiguous_or_tied",
     "zero_evidence",
@@ -39,6 +43,8 @@ class ImportTelemetry:
         self._sense_local: dict[tuple[str, str], Counter] = {}
         self._entry_level: dict[tuple[str, str], Counter] = {}
         self._records: dict[str, Counter] = {}
+        self._script_rejected: dict[tuple[str, str, str], int] = {}
+        self._recovered_from: dict[tuple[str, str, str], int] = {}
 
     def _pair(self, store: dict, edition: str, target: str) -> Counter:
         return store.setdefault((edition, target), Counter())
@@ -65,6 +71,18 @@ class ImportTelemetry:
         counter = self._pair(self._entry_level, edition, target)
         counter["seen"] += 1
         counter[outcome] += 1
+
+    def script_rejected(self, edition: str, scope: str, reason: str) -> None:
+        """A zh-CN value dropped before alignment because it is not Han script."""
+        if reason not in SCRIPT_REJECTION_REASONS or scope not in {"sense_local", "entry_level"}:
+            raise ValueError(f"unknown script rejection: {scope}/{reason}")
+        key = (edition, scope, reason)
+        self._script_rejected[key] = self._script_rejected.get(key, 0) + 1
+
+    def recovered(self, edition: str, method: str, from_reason: str) -> None:
+        """A stored value recovered by ``method`` that strict alignment rejected."""
+        key = (edition, method, from_reason)
+        self._recovered_from[key] = self._recovered_from.get(key, 0) + 1
 
     def entry_level_duplicate(self, edition: str, target: str) -> None:
         """An aligned translation that already existed on its sense."""
@@ -118,6 +136,15 @@ class ImportTelemetry:
         return {
             "telemetry_version": 1,
             "records": records,
+            "script_rejected": [
+                {"edition": edition, "scope": scope, "reason": reason, "count": count}
+                for (edition, scope, reason), count in sorted(self._script_rejected.items())
+            ],
+            "single_sense_fallback_recovered_from": [
+                {"edition": edition, "from_reason": reason, "count": count}
+                for (edition, method, reason), count in sorted(self._recovered_from.items())
+                if method == "single_sense_fallback"
+            ],
             "by_edition_and_target": by_pair,
             "totals": self.manifest_telemetry(),
         }

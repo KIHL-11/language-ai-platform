@@ -42,6 +42,10 @@ def main() -> int:
     parser.add_argument("--rollback-build-id", required=True)
     parser.add_argument("--projected-dictionary-bytes", type=int, default=0)
     parser.add_argument("--projected-sidecar-bytes", type=int, default=0)
+    parser.add_argument("--data-quality-cases", type=Path,
+                        help="Sense-level Dictionary Data Quality cases (adds a gate)")
+    parser.add_argument("--withhold-ready", action="store_true",
+                        help="Evaluation build: run and report every gate, never write READY")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--execute",
@@ -67,6 +71,8 @@ def main() -> int:
             dry_run=dry_run,
             projected_dictionary_bytes=arguments.projected_dictionary_bytes,
             projected_sidecar_bytes=arguments.projected_sidecar_bytes,
+            data_quality_cases=arguments.data_quality_cases,
+            withhold_ready=arguments.withhold_ready,
         )
     except (PrepareError, ReleaseStoreError, OSError, sqlite3.Error, RuntimeError,
             ValueError, subprocess.CalledProcessError) as exc:

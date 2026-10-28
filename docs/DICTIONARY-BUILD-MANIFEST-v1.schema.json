@@ -253,11 +253,13 @@
             "seen": {"type": "integer", "minimum": 0},
             "accepted": {
               "type": "object",
-              "required": ["unique_multi_token", "reliable_single_token_head", "unscoped_single_sense", "total"],
+              "required": ["unique_multi_token", "reliable_single_token_head", "unscoped_single_sense", "equivalent_group", "single_sense_fallback", "total"],
               "properties": {
                 "unique_multi_token": {"type": "integer", "minimum": 0},
                 "reliable_single_token_head": {"type": "integer", "minimum": 0},
                 "unscoped_single_sense": {"type": "integer", "minimum": 0},
+                "equivalent_group": {"type": "integer", "minimum": 0},
+                "single_sense_fallback": {"type": "integer", "minimum": 0},
                 "total": {"type": "integer", "minimum": 0}
               },
               "additionalProperties": false

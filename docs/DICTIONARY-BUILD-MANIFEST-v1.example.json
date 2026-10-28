@@ -92,15 +92,47 @@
     "peak_rss_bytes": null
   },
   "statistics": {
-    "entries": {"en": 0, "de": 0, "total": 0},
-    "senses": {"en": 0, "de": 0, "total": 0},
-    "forms": {"en": 0, "de": 0, "total": 0},
-    "pronunciations": {"en": 0, "de": 0, "total": 0},
+    "entries": {
+      "en": 0,
+      "de": 0,
+      "total": 0
+    },
+    "senses": {
+      "en": 0,
+      "de": 0,
+      "total": 0
+    },
+    "forms": {
+      "en": 0,
+      "de": 0,
+      "total": 0
+    },
+    "pronunciations": {
+      "en": 0,
+      "de": 0,
+      "total": 0
+    },
     "chinese_coverage": {
-      "entries_with_chinese": {"en": 0, "de": 0, "total": 0},
-      "entry_percent": {"en": 0.0, "de": 0.0, "total": 0.0},
-      "senses_with_chinese": {"en": 0, "de": 0, "total": 0},
-      "sense_percent": {"en": 0.0, "de": 0.0, "total": 0.0}
+      "entries_with_chinese": {
+        "en": 0,
+        "de": 0,
+        "total": 0
+      },
+      "entry_percent": {
+        "en": 0.0,
+        "de": 0.0,
+        "total": 0.0
+      },
+      "senses_with_chinese": {
+        "en": 0,
+        "de": 0,
+        "total": 0
+      },
+      "sense_percent": {
+        "en": 0.0,
+        "de": 0.0,
+        "total": 0.0
+      }
     },
     "alignment_telemetry": {
       "instrumentation_status": "example",
@@ -116,6 +148,8 @@
           "unique_multi_token": 0,
           "reliable_single_token_head": 0,
           "unscoped_single_sense": 0,
+          "equivalent_group": 0,
+          "single_sense_fallback": 0,
           "total": 0
         },
         "rejected": {

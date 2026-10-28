@@ -62,6 +62,7 @@ def _status(layout, plist_path: Path, controller) -> dict:
                     "build_id": path.name,
                     "ready": (path / "READY").is_file(),
                     "failed": (path / "build-failure.json").exists(),
+                    "ready_withheld": (path / "readiness.json").exists() and not (path / "READY").exists(),
                 })
     plist_environment = None
     if plist_path.is_file():
