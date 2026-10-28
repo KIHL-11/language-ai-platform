@@ -709,3 +709,30 @@ production evidence.
 - that existing learning stores are not rewritten on start-up (missing ones are
   created by design and tolerated);
 - a full rehearsal on a copy before the production cutover.
+
+## Phase 7A follow-up — split quality gates (analysis only)
+
+Status: **analysis tooling; no change to READY, cutover, or the importer.**
+
+The first real candidate failed 7 of 9 gold cases while showing zero incorrect
+associations. Those gold cases run through `DictionaryService`, so they mix
+two different questions. They are now reported separately:
+
+| Test | What it checks | Input | Module |
+|---|---|---|---|
+| Dictionary Data Quality | Chinese values stored on a named source sense: forbidden values absent, values within the reviewed set, gaps counted (not failures) | SQLite rows only | `services/dictionary/data_quality.py`, cases in `docs/DICTIONARY-DATA-QUALITY-CASES-v1.draft.json` |
+| Context Sense Selection | the original 9 sentence gold cases, unchanged | `DictionaryService.lookup` | `release_quality.evaluate_gold_cases`, `docs/DICTIONARY-GOLD-CASES-v1.draft.json` |
+
+`backend/scripts/compare_dictionary_releases.py` compares the live (legacy)
+database with the candidate read-only and, given a *counterfactual* database
+built by the old importer (`9b56b8f`, byte-identical import code to the one that
+built the legacy dictionary) on the candidate's source snapshot, decomposes the
+coverage change into a snapshot effect and an importer effect. It classifies
+every entry that lost all Chinese under the importer change as single-sense,
+identical-definition tie, broadcast to distinct senses, or single-target
+rejection, and re-runs the strict aligner on raw records of lost common words
+to record each translation's exact decision.
+
+`prepare_dictionary_release.py` is unchanged: READY still requires zero gold
+(context) failures. Whether READY should instead require Data Quality only is
+an Owner decision after the comparison report.
