@@ -262,12 +262,13 @@ def test_raw_cause_analysis_matches_importer_decisions(tmp_path):
         "senses": [{"glosses": ["An institution where one can deposit money."]}],
         "translations": [{"code": "zh", "word": "河岸", "sense": "edge of river"},
                          {"code": "de", "word": "Bank", "sense": "financial establishment"},
-                         {"code": "zh", "word": "щён", "sense": "edge of river"}],
+                         {"code": "zh", "word": "щён", "sense": "edge of river"},
+                         {"code": "zh", "word": "shjon", "sense": "edge of river", "tags": ["Dungan"]}],
     }
     source = tmp_path / "en.jsonl.gz"
     source.write_bytes(gzip.compress((json.dumps(row, ensure_ascii=False) + "\n").encode()))
     causes = raw_alignment_causes({"en": source}, {"en": {"bank"}})["en"]["bank"]
-    assert causes["repaired_decisions"] == {"single_sense_mismatch": 1, "dungan_filtered": 1}  # review M3
+    assert causes["repaired_decisions"] == {"single_sense_mismatch": 1, "dungan_filtered": 2}  # review M3
     assert _senses(_import(tmp_path, [row]))[0][3] == []
 
     row = {

@@ -17,6 +17,7 @@ Nothing here writes to any database.
 import gzip
 import json
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 from services.dictionary.data_quality import broadcast_profile, evaluate_data_quality
@@ -31,7 +32,6 @@ from services.dictionary.provider import (
 )
 from services.dictionary.release_manifest import dictionary_statistics
 from services.dictionary.recovery import (
-    chinese_script_rejection,
     equivalence_groups,
     raw_translation_hints,
     single_sense_fallback_allowed,
@@ -199,10 +199,19 @@ def raw_alignment_causes(
                     single_sense_fallback=fallback_allowed,
                     single_table=mismatch_allowed,
                 )
-                repaired_decisions = [
-                    ("dungan_filtered", None) if chinese_script_rejection(code, word) else decision
-                    for (code, word, _), decision in zip(records, repaired_decisions)
-                ]
+                # Mark records the importer's script filter drops (it also sees tags).
+                kept = Counter(
+                    record for record in entry_translation_records(value, script_filter=True)
+                    if record[0] == "zh-CN"
+                )
+                marked = []
+                for record, decision in zip(records, repaired_decisions):
+                    if kept[record] > 0:
+                        kept[record] -= 1
+                        marked.append(decision)
+                    else:
+                        marked.append(("dungan_filtered", None))
+                repaired_decisions = marked
                 ignored = _SENSE_ALIGNMENT_STOPWORDS[language] | _SENSE_ALIGNMENT_GENERIC_TOKENS
                 entry = output[language].setdefault(lemma.strip(), {
                     "entries": 0, "senses": 0, "zh_records": 0,
