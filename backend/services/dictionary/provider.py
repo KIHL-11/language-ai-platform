@@ -17,6 +17,12 @@ from services.dictionary.forms_sidecar import (
     lookup_forms,
 )
 from services.dictionary.import_telemetry import ImportTelemetry
+from services.dictionary.recovery import (
+    chinese_script_rejection,
+    equivalence_groups,
+    single_sense_entry_is_safe,
+    single_translation_table,
+)
 
 
 SCHEMA_VERSION = 1
@@ -161,6 +167,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(form_id, position)
         );
         CREATE INDEX form_components_lookup ON form_components(component);
+        CREATE TABLE translation_provenance (
+            entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+            sense_index INTEGER NOT NULL,
+            language TEXT NOT NULL,
+            value TEXT NOT NULL,
+            method TEXT NOT NULL,
+            recovered_from TEXT,
+            hint TEXT
+        );
         CREATE TABLE pronunciations (
             entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
             pronunciation_index INTEGER NOT NULL,
@@ -243,6 +258,10 @@ def _aligned_entry_translations(
     language: str,
     lemma: str,
     decisions: list[tuple[str, int | None]] | None = None,
+    groups: list[int] | None = None,
+    single_sense_fallback: bool = False,
+    single_table: bool = False,
+    recovered_from: list[str | None] | None = None,
 ) -> list[list[tuple[str, str]]]:
     """Assign each entry translation to at most one source sense.
 
@@ -250,20 +269,46 @@ def _aligned_entry_translations(
     sense. Scoped translations require a unique best lexical match across the
     complete entry. Ties and unsupported morphological guesses are omitted.
 
+    Phase 7B recovery (all off unless requested):
+
+    * ``groups`` maps each sense to its equivalence-group representative
+      (``recovery.equivalence_groups``). A tie whose winners all share one
+      group, or an unscoped translation on an entry that is one group, is
+      assigned to the representative with outcome ``equivalent_group``.
+    * ``single_sense_fallback`` attaches a recoverable rejection on a safe
+      single-sense entry to that sense with outcome ``single_sense_fallback``;
+      ``single_table`` additionally allows ``single_sense_mismatch`` when every
+      record of the entry shares one hint.
+
     When ``decisions`` is supplied it receives one ``(outcome, winner)`` pair per
-    record for build telemetry. Recording decisions never changes alignment.
+    record; ``recovered_from`` receives the strict rejection reason that a
+    recovery overrode (else ``None``). Recording never changes alignment.
     """
+    from services.dictionary.recovery import SINGLE_SENSE_RECOVERABLE, SINGLE_TABLE_RECOVERABLE
+
+    recoverable = SINGLE_SENSE_RECOVERABLE | (SINGLE_TABLE_RECOVERABLE if single_table else frozenset())
+
     aligned: list[list[tuple[str, str]]] = [[] for _ in definitions]
 
-    def decide(outcome: str, winner: int | None = None) -> None:
+    def decide(outcome: str, winner: int | None = None, recovered: str | None = None) -> None:
         if decisions is not None:
             decisions.append((outcome, winner))
+        if recovered_from is not None:
+            recovered_from.append(recovered)
+
+    def reject(code: str, word: str, outcome: str) -> None:
+        if single_sense_fallback and len(definitions) == 1 and outcome in recoverable:
+            aligned[0].append((code, word))
+            decide("single_sense_fallback", 0, outcome)
+            return
+        decide(outcome)
 
     if not definitions:
         for _ in records:
             decide("zero_evidence")
         return aligned
 
+    single_group = groups is not None and len(set(groups)) == 1
     ignored = (
         _SENSE_ALIGNMENT_STOPWORDS[language]
         | _SENSE_ALIGNMENT_GENERIC_TOKENS
@@ -281,45 +326,53 @@ def _aligned_entry_translations(
             if len(definitions) == 1:
                 aligned[0].append((code, word))
                 decide("unscoped_single_sense", 0)
+            elif single_group:
+                aligned[groups[0]].append((code, word))
+                decide("equivalent_group", groups[0])
             else:
                 decide("ambiguous_or_tied")
             continue
 
         hint_tokens = raw_hint_tokens - ignored
         if not hint_tokens:
-            decide("generic_stopword_or_lemma_only")
+            reject(code, word, "generic_stopword_or_lemma_only")
             continue
         scores = [len(hint_tokens & tokens) for tokens in definition_tokens]
         best_score = max(scores)
         if best_score == 0:
-            if decisions is not None:
-                if _morphology_only_similarity(hint_tokens, definition_tokens):
-                    decide("unsupported_morphology")
-                elif len(definitions) == 1:
-                    decide("single_sense_mismatch")
-                else:
-                    decide("zero_evidence")
+            if _morphology_only_similarity(hint_tokens, definition_tokens):
+                reject(code, word, "unsupported_morphology")
+            elif len(definitions) == 1:
+                reject(code, word, "single_sense_mismatch")
+            else:
+                reject(code, word, "zero_evidence")
             continue
-        if scores.count(best_score) != 1:
-            decide("ambiguous_or_tied")
-            continue
-        winner = scores.index(best_score)
+        winners = [index for index, score in enumerate(scores) if score == best_score]
+        grouped = False
+        if len(winners) != 1:
+            if groups is None or len({groups[index] for index in winners}) != 1:
+                decide("ambiguous_or_tied")
+                continue
+            winner = groups[winners[0]]
+            grouped = True
+        else:
+            winner = winners[0]
         if best_score == 1:
             # A lone token is reliable only when the source hint itself has one
             # content token and that token is the definition's lexical head.
             # This retains labels such as "understand" -> "To understand..."
             # without accepting an incidental word later in a long definition.
             if len(hint_tokens) != 1 or not definition_token_lists[winner]:
-                decide("weak_single_token_evidence")
+                reject(code, word, "weak_single_token_evidence")
                 continue
             if next(iter(hint_tokens)) != definition_token_lists[winner][0]:
-                decide("weak_single_token_evidence")
+                reject(code, word, "weak_single_token_evidence")
                 continue
             aligned[winner].append((code, word))
-            decide("reliable_single_token_head", winner)
+            decide("equivalent_group" if grouped else "reliable_single_token_head", winner)
             continue
         aligned[winner].append((code, word))
-        decide("unique_multi_token", winner)
+        decide("equivalent_group" if grouped else "unique_multi_token", winner)
 
     return aligned
 
@@ -350,11 +403,18 @@ def import_kaikki_sources(
     *,
     content_license: str,
     telemetry: ImportTelemetry | None = None,
+    recovery: bool = True,
 ) -> int:
     """Atomically stream edition-tagged JSONL or JSONL gzip files into SQLite.
 
     The finished database is fsynced before it replaces ``database_path`` and the
     containing directory is fsynced afterward. ``telemetry`` only observes.
+
+    ``recovery`` enables the Phase 7B repairs (``services/dictionary/recovery``):
+    the zh-CN script filter, equivalent parent/child groups for ties, and the
+    single-sense fallback. ``recovery=False`` reproduces Phase 7A strict output
+    (plus the provenance table) for same-snapshot comparisons.
+    Every stored translation gets one ``translation_provenance`` row.
     """
     source_values = list(sources)
     if not source_values:
@@ -433,6 +493,14 @@ def import_kaikki_sources(
                             )
                             word = translation.get("word")
                             if code and isinstance(word, str) and 0 < len(word.strip()) <= 500:
+                                if recovery:
+                                    script_reason = chinese_script_rejection(
+                                        code, word.strip(), translation.get("tags")
+                                    )
+                                    if script_reason is not None:
+                                        if telemetry is not None:
+                                            telemetry.script_rejected(edition_language, "entry_level", script_reason)
+                                        continue
                                 hint = translation.get("sense")
                                 translation_records.append((
                                     code,
@@ -451,32 +519,71 @@ def import_kaikki_sources(
                                     valid_senses.append((sense, definitions))
                                 elif telemetry is not None:
                                     telemetry.record(edition_language, "senses_without_definition")
-                                    for code, _ in _sense_translation_records(sense):
+                                    for code, _ in _sense_translation_records(sense, script_filter=recovery):
                                         telemetry.sense_local_discarded_with_invalid_sense(
                                             edition_language, code
                                         )
                             elif telemetry is not None:
                                 telemetry.record(edition_language, "senses_without_definition")
-                        decisions: list[tuple[str, int | None]] | None = (
-                            [] if telemetry is not None else None
-                        )
+                        decisions: list[tuple[str, int | None]] = []
+                        recovered_from: list[str | None] = []
                         aligned_entry_translations = _aligned_entry_translations(
                             translation_records,
                             [definitions[0] for _, definitions in valid_senses],
                             language=language,
                             lemma=lemma,
                             decisions=decisions,
+                            groups=(
+                                equivalence_groups([definitions for _, definitions in valid_senses])
+                                if recovery else None
+                            ),
+                            single_sense_fallback=(
+                                recovery and single_sense_entry_is_safe(senses, len(valid_senses))
+                            ),
+                            single_table=single_translation_table(
+                                [hint for _, _, hint in translation_records]
+                            ),
+                            recovered_from=recovered_from,
                         )
+                        # Per sense, the provenance of each aligned record, in order.
+                        aligned_methods: list[list[tuple[str, str | None, str]]] = [[] for _ in valid_senses]
+                        for (_, _, hint), (outcome, winner), recovered in zip(
+                            translation_records, decisions, recovered_from
+                        ):
+                            if winner is not None:
+                                aligned_methods[winner].append((outcome, recovered, hint))
                         entry_statuses_by_sense: list[list[str]] = []
                         for sense_index, (sense, definitions) in enumerate(valid_senses):
-                            sense_translation_records = _sense_translation_records(sense)
-                            outcomes: dict[str, list[str]] | None = (
-                                {} if telemetry is not None else None
+                            sense_translation_records = _sense_translation_records(
+                                sense,
+                                script_filter=recovery,
+                                on_reject=(
+                                    (lambda reason: telemetry.script_rejected(edition_language, "sense_local", reason))
+                                    if telemetry is not None else None
+                                ),
                             )
+                            outcomes: dict[str, list[str]] = {}
                             translations = _translation_values(
                                 aligned_entry_translations[sense_index],
                                 sense_translation_records,
                                 outcomes=outcomes,
+                            )
+                            provenance_rows = [
+                                (entry_id, sense_index, code, word, "sense_local", None, None)
+                                for (code, word), status in zip(sense_translation_records, outcomes["sense"])
+                                if status == "stored"
+                            ] + [
+                                (entry_id, sense_index, code, word, method, recovered, hint[:200] or None)
+                                for (code, word), status, (method, recovered, hint) in zip(
+                                    aligned_entry_translations[sense_index],
+                                    outcomes["entry"],
+                                    aligned_methods[sense_index],
+                                )
+                                if status == "stored"
+                            ]
+                            connection.executemany(
+                                "INSERT INTO translation_provenance VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                provenance_rows,
                             )
                             if telemetry is not None and outcomes is not None:
                                 for (code, _), status in zip(
@@ -545,7 +652,7 @@ def import_kaikki_sources(
                                 (entry_id, pronunciation_index, ipa, accent, audio_url),
                             )
                             pronunciation_index += 1
-                        if telemetry is not None and decisions is not None:
+                        if telemetry is not None:
                             _record_entry_decisions(
                                 telemetry,
                                 edition_language,
@@ -553,6 +660,9 @@ def import_kaikki_sources(
                                 decisions,
                                 entry_statuses_by_sense,
                             )
+                            for (outcome, _), recovered in zip(decisions, recovered_from):
+                                if recovered is not None:
+                                    telemetry.recovered(edition_language, outcome, recovered)
                             telemetry.record(edition_language, "entries_imported")
                         count += 1
             except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
@@ -586,7 +696,12 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _sense_translation_records(sense: dict) -> list[tuple[str, str]]:
+def _sense_translation_records(
+    sense: dict,
+    *,
+    script_filter: bool = False,
+    on_reject=None,
+) -> list[tuple[str, str]]:
     records: list[tuple[str, str]] = []
     for translation in sense.get("translations", []):
         if not isinstance(translation, dict):
@@ -598,6 +713,12 @@ def _sense_translation_records(sense: dict) -> list[tuple[str, str]]:
         )
         word = translation.get("word")
         if code and isinstance(word, str) and word.strip():
+            if script_filter:
+                reason = chinese_script_rejection(code, word.strip(), translation.get("tags"))
+                if reason is not None:
+                    if on_reject is not None:
+                        on_reject(reason)
+                    continue
             records.append((code, word.strip()))
     return records
 
@@ -636,12 +757,14 @@ def import_kaikki_jsonl(
     edition_language: str,
     source_url: str,
     content_license: str,
+    recovery: bool = True,
 ) -> int:
     """Backward-compatible one-source import helper used by focused tests."""
     return import_kaikki_sources(
         [(input_path, edition_language, source_url)],
         database_path,
         content_license=content_license,
+        recovery=recovery,
     )
 
 

@@ -1052,10 +1052,12 @@ def test_importer_does_not_guess_derivations_or_german_compounds(
         "senses": [{"glosses": [definition]}],
     }])
 
+    # Phase 7A strict alignment never guesses derivations or compounds.
     import_kaikki_sources(
         [(source, language, f"https://kaikki.org/{language}/")],
         database,
         content_license=TEST_CONTENT_LICENSE,
+        recovery=False,
     )
 
     with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
@@ -1064,6 +1066,61 @@ def test_importer_does_not_guess_derivations_or_german_compounds(
         ).fetchone()[0])
 
     assert stored == {}
+
+
+@pytest.mark.parametrize(
+    ("language", "lemma", "hint", "definition", "other"),
+    [
+        ("en", "obtain", "acquisition", "To acquire ownership.", "To be accepted or prevail."),
+        ("de", "Haus", "Wohngebäude", "Ein Gebäude, in dem Menschen wohnen.", "Eine Familie oder Dynastie."),
+    ],
+)
+def test_recovery_never_uses_morphology_to_choose_between_senses(
+    tmp_path, language, lemma, hint, definition, other
+):
+    source = tmp_path / "multi.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(source, [{
+        "word": lemma,
+        "lang_code": language,
+        "translations": [{"code": "zh", "word": "不可靠译文", "sense": hint}],
+        "senses": [{"glosses": [definition]}, {"glosses": [other]}],
+    }])
+    import_kaikki_sources([(source, language, "https://kaikki.org/x")], database,
+                          content_license=TEST_CONTENT_LICENSE)
+    with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
+        values = [json.loads(row[0]) for row in connection.execute("SELECT translations_json FROM senses")]
+        assert connection.execute("SELECT count(*) FROM translation_provenance").fetchone()[0] == 0
+    assert values == [{}, {}]
+
+
+@pytest.mark.parametrize(
+    ("language", "lemma", "hint", "definition", "strict_reason"),
+    [
+        # no shared token at all: recoverable only because the entry has one table
+        ("en", "obtain", "acquisition", "To acquire ownership.", "single_sense_mismatch"),
+        # compound contains the definition token
+        ("de", "Haus", "Wohngebäude", "Ein Gebäude, in dem Menschen wohnen.", "unsupported_morphology"),
+    ],
+)
+def test_single_sense_fallback_recovers_with_provenance(tmp_path, language, lemma, hint, definition, strict_reason):
+    source = tmp_path / "single.jsonl.gz"
+    database = tmp_path / "dictionary.sqlite3"
+    _write_gzip_jsonl(source, [{
+        "word": lemma,
+        "lang_code": language,
+        "translations": [{"code": "zh", "word": "单义译文", "sense": hint}],
+        "senses": [{"glosses": [definition]}],
+    }])
+    import_kaikki_sources([(source, language, "https://kaikki.org/x")], database,
+                          content_license=TEST_CONTENT_LICENSE)
+    with sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True) as connection:
+        stored = json.loads(connection.execute("SELECT translations_json FROM senses").fetchone()[0])
+        provenance = connection.execute(
+            "SELECT sense_index, language, value, method, recovered_from, hint FROM translation_provenance"
+        ).fetchall()
+    assert stored == {"zh-CN": ["单义译文"]}
+    assert provenance == [(0, "zh-CN", "单义译文", "single_sense_fallback", strict_reason, hint)]
 
 
 def test_importer_prioritizes_deduplicates_and_limits_sense_local_translations(tmp_path):

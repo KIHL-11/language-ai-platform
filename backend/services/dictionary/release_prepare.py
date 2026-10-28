@@ -20,6 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from services.dictionary.data_quality import (
+    DataQualityError,
+    broadcast_profile,
+    evaluate_data_quality,
+    load_data_quality_cases,
+)
 from services.dictionary.forms_sidecar import (
     FORMS_INDEX_SCHEMA_VERSION,
     build_forms_index,
@@ -70,6 +76,7 @@ QUALITY_REPORT_NAME = "quality-report.json"
 BUILD_REPORT_NAME = "build-report.json"
 FAILURE_NAME = "build-failure.json"
 MANIFEST_NAME = "manifest.json"
+READINESS_NAME = "readiness.json"
 
 
 class PrepareError(RuntimeError):
@@ -195,9 +202,20 @@ def prepare_release(
     minimum_headroom_bytes: int = 10 * GIB,
     allow_fixture_gold: bool = False,
     disk_usage: Callable[[Path], object] = shutil.disk_usage,
+    data_quality_cases: Path | None = None,
+    withhold_ready: bool = False,
+    recovery: bool = True,
     _fault: Callable[[str], None] | None = None,
 ) -> dict:
-    """Prepare a candidate release. Returns a JSON-safe summary without absolute paths."""
+    """Prepare a candidate release. Returns a JSON-safe summary without absolute paths.
+
+    ``withhold_ready`` is the Owner-requested evaluation mode: every gate runs
+    and is reported (gate failures do not stop the run), the manifest records
+    ``candidate_validated`` only when all gates pass, ``readiness.json`` records
+    the read-only READY-eligibility result, the release is sealed, and READY is
+    never written, so the release can never be selected for cutover.
+    ``data_quality_cases`` adds the sense-level Dictionary Data Quality gate.
+    """
     fault = _fault or (lambda stage: None)
     now = now or datetime.now(timezone.utc)
 
@@ -269,6 +287,7 @@ def prepare_release(
             database,
             content_license=content_license,
             telemetry=telemetry,
+            recovery=recovery,
         )
         elapsed = time.perf_counter() - started
         completed_at = datetime.now(timezone.utc)
@@ -334,6 +353,16 @@ def prepare_release(
         )
 
         stage = "quality"
+        data_quality = None
+        if data_quality_cases is not None:
+            data_quality = evaluate_data_quality(
+                database,
+                load_data_quality_cases(
+                    data_quality_cases,
+                    require_approval=not withhold_ready,
+                    allow_fixture=allow_fixture_gold,
+                ),
+            )
         gold_results = evaluate_gold_cases(database, sidecar, gold)
         performance = measure_performance(database, sidecar, gold)
         snapshot = _snapshot_comparison(sources, _baseline_sources(rollback))
@@ -353,6 +382,9 @@ def prepare_release(
             "structural_comparison": structural_comparison(rollback_database, database),
             "snapshot_comparison": snapshot,
             "performance": performance,
+            "dictionary_data_quality": data_quality,
+            "broadcast_profile": broadcast_profile(database),
+            "importer_recovery_enabled": recovery,
             "performance_environment": {
                 "platform": platform.platform(),
                 "python_version": platform.python_version(),
@@ -362,10 +394,15 @@ def prepare_release(
             },
         }
         quality_bytes = write_new_file_atomic(release, QUALITY_REPORT_NAME, canonical_json(quality_report))
+        gate_failures = []
         if gold_results["gold_case_failures"]:
-            raise PrepareError(f"{gold_results['gold_case_failures']} gold case(s) failed")
+            gate_failures.append(f"{gold_results['gold_case_failures']} gold case(s) failed")
         if not performance["passed"]:
-            raise PrepareError("lookup performance gate failed")
+            gate_failures.append("lookup performance gate failed")
+        if data_quality is not None and data_quality["data_quality_failures"]:
+            gate_failures.append(f"{data_quality['data_quality_failures']} data-quality case(s) failed")
+        if gate_failures and not withhold_ready:
+            raise PrepareError("; ".join(gate_failures))
         fault("after_quality")
 
         stage = "manifest"
@@ -386,7 +423,7 @@ def prepare_release(
         manifest = {
             "manifest_version": 1,
             "example_only": False,
-            "status": "candidate_validated",
+            "status": "failed" if gate_failures else "candidate_validated",
             "build_id": build_id,
             "created_at": _utc(now),
             "repository": {
@@ -451,12 +488,41 @@ def prepare_release(
         fault("after_manifest")
 
         stage = "ready"
+        if withhold_ready:
+            try:
+                validate_ready_eligibility(release, layout.releases, source_root)
+                eligibility = {"ready_eligible": True, "reason": None}
+            except (ManifestValidationError, OSError) as exc:
+                eligibility = {"ready_eligible": False, "reason": str(exc)}
+            readiness = {
+                "readiness_version": 1,
+                "build_id": build_id,
+                "ready_written": False,
+                "ready_withheld_by": "Owner instruction (DQ-02 Phase 7B evaluation)",
+                "gate_failures": gate_failures,
+                **eligibility,
+            }
+            write_new_file_atomic(release, READINESS_NAME, canonical_json(readiness))
+            seal_release(release)
+            if (release / "READY").exists():
+                raise PrepareError("READY must not exist in a withheld evaluation build")
+            return {
+                **plan,
+                "action": "evaluated_ready_withheld",
+                "gate_failures": gate_failures,
+                "ready_eligible": eligibility["ready_eligible"],
+                "ready_eligibility_reason": eligibility["reason"],
+                "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "statistics": {
+                    key: statistics[key]["total"] for key in ("entries", "senses", "forms", "pronunciations")
+                },
+            }
         validate_ready_eligibility(release, layout.releases, source_root)
         write_new_file_atomic(release, "READY", (hashlib.sha256(manifest_bytes).hexdigest() + "\n").encode())
         seal_release(release)
         validate_published_release(release, layout.releases, source_root)
     except (PrepareError, ManifestValidationError, QualityGateError, ReleaseStoreError,
-            sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+            DataQualityError, sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
         _record_failure(release, build_id, stage, exc)
         if isinstance(exc, PrepareError):
             raise

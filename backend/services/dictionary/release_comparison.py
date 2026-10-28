@@ -30,6 +30,11 @@ from services.dictionary.provider import (
     normalize_lexical,
 )
 from services.dictionary.release_manifest import dictionary_statistics
+from services.dictionary.recovery import (
+    equivalence_groups,
+    single_sense_entry_is_safe,
+    single_translation_table,
+)
 from services.dictionary.release_quality import evaluate_gold_cases
 
 _LANGUAGES = ("en", "de")
@@ -163,13 +168,15 @@ def raw_alignment_causes(
                 key = normalize_lexical(lemma.strip())
                 if key not in wanted:
                     continue
-                definitions = [
-                    definitions[0]
-                    for sense in (value.get("senses") or [])
+                raw_senses = value.get("senses") if isinstance(value.get("senses"), list) else []
+                gloss_lists = [
+                    glosses
+                    for sense in raw_senses
                     if isinstance(sense, dict)
-                    for definitions in [_strings(sense.get("glosses"), limit=3, max_length=2_000)]
-                    if definitions
+                    for glosses in [_strings(sense.get("glosses"), limit=3, max_length=2_000)]
+                    if glosses
                 ]
+                definitions = [glosses[0] for glosses in gloss_lists]
                 records = []
                 for translation in value.get("translations", []):
                     if not isinstance(translation, dict):
@@ -186,15 +193,23 @@ def raw_alignment_causes(
                 decisions: list = []
                 _aligned_entry_translations(records, definitions, language=language,
                                             lemma=lemma.strip(), decisions=decisions)
+                repaired_decisions: list = []
+                _aligned_entry_translations(
+                    records, definitions, language=language, lemma=lemma.strip(),
+                    decisions=repaired_decisions,
+                    groups=equivalence_groups(gloss_lists),
+                    single_sense_fallback=single_sense_entry_is_safe(raw_senses, len(definitions)),
+                    single_table=single_translation_table([hint for _, _, hint in records]),
+                )
                 ignored = _SENSE_ALIGNMENT_STOPWORDS[language] | _SENSE_ALIGNMENT_GENERIC_TOKENS
                 entry = output[language].setdefault(lemma.strip(), {
                     "entries": 0, "senses": 0, "zh_records": 0,
                     "old_importer_accepts": 0, "old_matches_only_stopword_or_generic": 0,
-                    "strict_decisions": {}, "examples": [],
+                    "strict_decisions": {}, "repaired_decisions": {}, "examples": [],
                 })
                 entry["entries"] += 1
                 entry["senses"] += len(definitions)
-                for (code, word, hint), (decision, winner) in zip(records, decisions):
+                for (code, word, hint), (decision, winner), (repaired, _) in zip(records, decisions, repaired_decisions):
                     hint_tokens = set(lexical_tokens(hint))
                     old_senses = [
                         index for index, definition in enumerate(definitions)
@@ -209,6 +224,7 @@ def raw_alignment_causes(
                         if len(definitions) > 1 and old_overlap and not (set(old_overlap) - ignored):
                             entry["old_matches_only_stopword_or_generic"] += 1
                     entry["strict_decisions"][decision] = entry["strict_decisions"].get(decision, 0) + 1
+                    entry["repaired_decisions"][repaired] = entry["repaired_decisions"].get(repaired, 0) + 1
                     if len(entry["examples"]) < record_limit:
                         entry["examples"].append({
                             "zh": word,
@@ -216,6 +232,7 @@ def raw_alignment_causes(
                             "old_importer_senses": len(old_senses),
                             "old_overlap_tokens": old_overlap[:8],
                             "strict_decision": decision,
+                            "repaired_decision": repaired,
                             "strict_sense": definitions[winner][:80] if winner is not None else None,
                         })
     return output
@@ -331,6 +348,90 @@ def importer_effect_breakdown(counterfactual: Path, candidate: Path, *, examples
         new_connection.close()
 
 
+RECOVERY_METHODS = ("single_sense_fallback", "equivalent_group")
+
+
+def recovery_analysis(strict: Path, repaired: Path, *, samples_per_method: int = 40) -> dict:
+    """Same-snapshot strict vs repaired: what recovery added, and what it removed.
+
+    Entry IDs and sense order must match (verified row by row). Removed values
+    are expected only from the zh-CN script filter; anything else is reported.
+    """
+    from services.dictionary.recovery import chinese_script_rejection
+
+    strict_connection = _readonly(strict)
+    repaired_connection = _readonly(repaired)
+    try:
+        summary = {language: {"entries_with_chinese_strict": 0, "entries_with_chinese_repaired": 0,
+                              "entries_gained": 0, "entries_lost": 0,
+                              "values_added": 0, "values_removed_by_script_filter": 0,
+                              "values_removed_other": 0, "removed_other_examples": []}
+                   for language in _LANGUAGES}
+        repaired_rows = _entry_rows(repaired_connection)
+        for old in _entry_rows(strict_connection):
+            new = next(repaired_rows, None)
+            if new is None or new[:3] != old[:3] or len(new[3]) != len(old[3]):
+                raise ValueError("strict and repaired databases are not from the same snapshot/order")
+            _, language, lemma, old_senses = old
+            if language not in summary:
+                continue
+            bucket = summary[language]
+            old_any = any(values for _, values in old_senses)
+            new_any = any(values for _, values in new[3])
+            bucket["entries_with_chinese_strict"] += old_any
+            bucket["entries_with_chinese_repaired"] += new_any
+            bucket["entries_gained"] += new_any and not old_any
+            bucket["entries_lost"] += old_any and not new_any
+            for (_, before), (_, after) in zip(old_senses, new[3]):
+                bucket["values_added"] += len([value for value in after if value not in before])
+                for value in before:
+                    if value in after:
+                        continue
+                    if chinese_script_rejection("zh-CN", value) is not None:
+                        bucket["values_removed_by_script_filter"] += 1
+                    else:
+                        bucket["values_removed_other"] += 1
+                        if len(bucket["removed_other_examples"]) < 20:
+                            bucket["removed_other_examples"].append({"lemma": lemma, "value": value})
+        if next(repaired_rows, None) is not None:
+            raise ValueError("repaired database has more entries than the strict one")
+
+        methods = {}
+        for language, method, recovered_from, count in repaired_connection.execute(
+            """SELECT entries.language, translation_provenance.method,
+                      coalesce(translation_provenance.recovered_from, ''), count(*)
+               FROM translation_provenance JOIN entries ON entries.id = translation_provenance.entry_id
+               WHERE translation_provenance.language = 'zh-CN'
+               GROUP BY 1, 2, 3"""
+        ):
+            methods.setdefault(str(language), {}).setdefault(method, {})[recovered_from or "-"] = int(count)
+        samples = {}
+        for method in RECOVERY_METHODS:
+            # Deterministic spread across the whole dictionary for manual review.
+            rows = repaired_connection.execute(
+                """SELECT entries.language, entries.lemma, entries.part_of_speech, senses.definition,
+                          translation_provenance.value, translation_provenance.recovered_from,
+                          translation_provenance.hint
+                   FROM translation_provenance
+                   JOIN entries ON entries.id = translation_provenance.entry_id
+                   JOIN senses ON senses.entry_id = translation_provenance.entry_id
+                              AND senses.sense_index = translation_provenance.sense_index
+                   WHERE translation_provenance.method = ? AND translation_provenance.language = 'zh-CN'
+                   ORDER BY (translation_provenance.entry_id * 2654435761) % 4294967296
+                   LIMIT ?""",
+                (method, samples_per_method),
+            ).fetchall()
+            samples[method] = [
+                {"language": row[0], "lemma": row[1], "pos": row[2], "definition": row[3][:120],
+                 "zh": row[4], "strict_reason": row[5], "hint": row[6]}
+                for row in rows
+            ]
+        return {"summary": summary, "zh_values_by_method": methods, "review_samples": samples}
+    finally:
+        strict_connection.close()
+        repaired_connection.close()
+
+
 def telemetry_summary(build_report: dict | None) -> dict | None:
     if not build_report:
         return None
@@ -352,10 +453,13 @@ def compare_releases(
     common_words: dict[str, list[str]] | None = None,
     build_report: dict | None = None,
     sources: dict[str, Path] | None = None,
+    strict: Path | None = None,
 ) -> dict:
     databases = {"baseline": baseline, "candidate": candidate}
     if counterfactual is not None:
         databases["counterfactual"] = counterfactual
+    if strict is not None:
+        databases["strict"] = strict
     coverage = {name: _coverage(dictionary_statistics(path)) for name, path in databases.items()}
     decomposition = {"total": _delta(coverage["baseline"], coverage["candidate"])}
     if counterfactual is not None:
@@ -367,6 +471,13 @@ def compare_releases(
     words = common_words or gold.get("common_words") or {}
     word_changes = common_word_changes(baseline, candidate, counterfactual, words)
     breakdown = importer_effect_breakdown(counterfactual, candidate) if counterfactual is not None else None
+    recovery = recovery_analysis(strict, candidate) if strict is not None else None
+    strict_words = None
+    if strict is not None:
+        strict_words = {
+            language: sum(1 for values in word_chinese(strict, language, list(dict.fromkeys(words.get(language, [])))).values() if values)
+            for language in _LANGUAGES
+        }
     causes = None
     if sources:
         targets = {language: {item["word"] for item in word_changes[language]["lost"]} for language in _LANGUAGES}
@@ -401,6 +512,8 @@ def compare_releases(
         "context_sense_selection": context,
         "broadcast_profile": broadcast,
         "importer_effect_breakdown": breakdown,
+        "recovery_analysis": recovery,
+        "strict_common_words_with_chinese": strict_words,
         "common_words": word_changes,
         "strict_alignment_causes_for_lost_words": causes,
         "candidate_zh_telemetry": telemetry_summary(build_report),
@@ -440,6 +553,19 @@ def markdown_summary(report: dict) -> str:
             lines.append(f"| {language} | {item['entries_lost_all']} | {counts['single_sense_entry']} | "
                          f"{counts['identical_definition_tie']} | {counts['broadcast_to_distinct_senses']} | "
                          f"{counts['single_target_sense_rejected']} |")
+    if "strict" in report["coverage"]:
+        lines += ["", "## Same-snapshot three-way coverage (entries with zh-CN)", "",
+                  "| language | old importer | strict (7A) | repaired (7B) |", "|---|---|---|---|"]
+        for language in ("en", "de"):
+            row = [report["coverage"][name][language] for name in ("counterfactual", "strict", "candidate")
+                   if name in report["coverage"]]
+            lines.append(f"| {language} | " + " | ".join(f"{r['entries_with_chinese']} ({r['entry_percent']}%)" for r in row) + " |")
+        recovery = report.get("recovery_analysis") or {}
+        for language in ("en", "de"):
+            item = (recovery.get("summary") or {}).get(language)
+            if item:
+                lines.append(f"- {language}: +{item['entries_gained']} entries / +{item['values_added']} values recovered; "
+                             f"removed by script filter {item['values_removed_by_script_filter']}, other removals {item['values_removed_other']}")
     lines += ["", "## Data quality cases (candidate)", ""]
     for case in report["data_quality"]["candidate"]["cases"]:
         lines.append(f"- {case['id']}: {'PASS' if case['passed'] else 'FAIL'} {case['classification']} {case['chinese_values'][:6]}")

@@ -38,6 +38,8 @@ def main() -> int:
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--counterfactual", type=Path,
                         help="old importer run on the candidate's source snapshot")
+    parser.add_argument("--strict", type=Path,
+                        help="Phase 7A strict importer build of the same snapshot (three-way comparison)")
     parser.add_argument("--data-quality-cases", type=Path, required=True)
     parser.add_argument("--gold-set", type=Path, required=True)
     parser.add_argument("--build-report", type=Path)
@@ -73,6 +75,7 @@ def main() -> int:
         common_words=words,
         build_report=build_report,
         sources=sources or None,
+        strict=arguments.strict,
     )
     report["inputs"] = {
         "data_quality_cases_approved": cases.get("approved") is True,

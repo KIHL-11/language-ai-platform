@@ -196,7 +196,9 @@ def test_importer_effect_breakdown_detects_identical_definition_ties(tmp_path):
         "translations": [{"code": "zh", "word": "死", "sense": "to stop living"}],
     }, ensure_ascii=False) + "\n", encoding="utf-8")
     candidate = tmp_path / "candidate.sqlite3"
-    import_kaikki_sources([(source, "en", "https://kaikki.org/x")], candidate, content_license="Fixture")
+    # Phase 7A strict output: the tie is dropped, which is what the classifier must explain.
+    import_kaikki_sources([(source, "en", "https://kaikki.org/x")], candidate, content_license="Fixture",
+                          recovery=False)
     counterfactual = tmp_path / "old.sqlite3"
     shutil.copy(candidate, counterfactual)
     _set_chinese(counterfactual, "die", {0: ["死"], 1: ["死"]})
@@ -271,3 +273,35 @@ def test_compare_cli_refuses_to_write_into_release_directory(tmp_path):
     )
     assert result.returncode == 1 and "dictionary_releases" in result.stderr
     assert not output.exists()
+
+
+def test_recovery_analysis_counts_added_and_script_removed_values(tmp_path):
+    from services.dictionary.release_comparison import recovery_analysis
+
+    rows = [
+        {"word": "raven", "lang_code": "en", "pos": "noun",
+         "senses": [{"glosses": ["A black bird."]}, {"glosses": ["A black bird.", "Corvus corax."]}],
+         "translations": [{"code": "zh", "word": "渡鸦"}]},
+        {"word": "want", "lang_code": "en", "pos": "verb",
+         "senses": [{"glosses": ["To desire."], "translations": [{"code": "zh", "word": "щён"}, {"code": "zh", "word": "要"}]}]},
+    ]
+    source = tmp_path / "rows.jsonl"
+    source.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    strict = tmp_path / "strict.sqlite3"
+    repaired = tmp_path / "repaired.sqlite3"
+    import_kaikki_sources([(source, "en", "https://kaikki.org/x")], strict, content_license="F", recovery=False)
+    import_kaikki_sources([(source, "en", "https://kaikki.org/x")], repaired, content_license="F")
+    result = recovery_analysis(strict, repaired)
+    en = result["summary"]["en"]
+    assert en["entries_gained"] == 1 and en["values_added"] == 1
+    assert en["values_removed_by_script_filter"] == 1 and en["values_removed_other"] == 0
+    assert result["zh_values_by_method"]["en"]["equivalent_group"] == {"-": 1}
+    assert result["review_samples"]["equivalent_group"][0]["zh"] == "渡鸦"
+    other = tmp_path / "other.sqlite3"
+    import_kaikki_sources([(source, "en", "https://kaikki.org/x")], other, content_license="F")
+    connection = sqlite3.connect(other)
+    connection.execute("DELETE FROM senses WHERE sense_index = 1")
+    connection.commit()
+    connection.close()
+    with pytest.raises(ValueError, match="same snapshot"):
+        recovery_analysis(strict, other)

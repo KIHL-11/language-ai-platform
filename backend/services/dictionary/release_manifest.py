@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from services.dictionary.forms_sidecar import FORMS_INDEX_SCHEMA_VERSION, lookup_forms
+from services.dictionary.import_telemetry import ENTRY_ACCEPTED as _ACCEPTED_KEYS
 from services.dictionary.import_telemetry import ENTRY_REJECTED as _REJECTION_KEYS
 from services.dictionary.provider import SCHEMA_VERSION
 
@@ -283,7 +284,7 @@ def validate_manifest_structure(payload: object) -> dict:
     _exact_keys(entry_level, {"seen", "accepted", "rejected"}, "statistics.alignment_telemetry.entry_level")
     _integer(entry_level["seen"], "statistics.alignment_telemetry.entry_level.seen")
     accepted = _object(entry_level["accepted"], "statistics.alignment_telemetry.entry_level.accepted")
-    _exact_keys(accepted, {"unique_multi_token", "reliable_single_token_head", "unscoped_single_sense", "total"}, "statistics.alignment_telemetry.entry_level.accepted")
+    _exact_keys(accepted, {*_ACCEPTED_KEYS, "total"}, "statistics.alignment_telemetry.entry_level.accepted")
     accepted_values = {key: _integer(value, f"statistics.alignment_telemetry.entry_level.accepted.{key}") for key, value in accepted.items()}
     if accepted_values["total"] != sum(accepted_values[key] for key in accepted_values if key != "total"):
         raise ManifestValidationError("accepted telemetry total is inconsistent")

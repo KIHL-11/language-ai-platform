@@ -736,3 +736,46 @@ to record each translation's exact decision.
 `prepare_dictionary_release.py` is unchanged: READY still requires zero gold
 (context) failures. Whether READY should instead require Data Quality only is
 an Owner decision after the comparison report.
+
+## Phase 7B — importer recovery (Owner-approved; no READY, no cutover)
+
+Same-snapshot analysis of the first real candidate showed English Chinese
+coverage falling 24.4% entirely from strict alignment (snapshot effect 0), with
+58% of lost entries being single-sense entries and many common words losing
+correct values to ties between subsenses that repeat their parent gloss.
+Three narrowly scoped repairs are implemented in
+`services/dictionary/recovery.py` and enabled by default
+(`import_kaikki_sources(recovery=True)`; `recovery=False` reproduces 7A):
+
+1. **Single-sense fallback** — only when the source entry has exactly one sense
+   and it has a gloss. Recovers `weak_single_token_evidence`,
+   `unsupported_morphology`, `generic_stopword_or_lemma_only`; recovers
+   `single_sense_mismatch` only when every translation record of the entry
+   shares one hint (one translation table). Several distinct hints (e.g. a
+   "river shore" table inside a bank entry whose only sense is financial) stay
+   rejected. Over-limit is never recovered.
+2. **Equivalent parent/child groups** — senses merge only when they share the
+   exact same `glosses[0]` and nesting is explicit (≥1 subsense, ≤1 bare
+   parent); identical text without nesting is never merged; groups are
+   per-entry, hence never cross POS. A tie whose winners all lie in one group,
+   or an unscoped translation on a one-group entry, goes to the representative
+   only (the parent), never re-broadcast to children.
+3. **zh-CN script filter** — values without a Han character are rejected as
+   `dungan_cyrillic` (Cyrillic or tagged Dungan) or `non_han_script`, counted in
+   `build-report.json` (`script_rejected`).
+
+Every stored translation now has a `translation_provenance` row (`method`:
+`sense_local` or an accepted entry-level outcome; `recovered_from`: the strict
+rejection a recovery overrode; `hint`). Manifest v1 telemetry gains accepted
+keys `equivalent_group` and `single_sense_fallback`. Two PR #47 tests that
+asserted single-sense morphology rejection now run in strict mode, with new
+tests proving multi-sense morphology is still never aligned and single-sense
+recovery is recorded with provenance.
+
+`prepare_dictionary_release.py --withhold-ready` is an evaluation build: every
+gate (context gold, performance, optional `--data-quality-cases`) runs and is
+reported, the manifest is `candidate_validated` only if all pass,
+`readiness.json` records READY eligibility, the release is sealed, and READY is
+never written. `compare_dictionary_releases.py --strict` adds the same-snapshot
+old / strict / repaired comparison with recovery counts by method, values
+removed by the script filter, and deterministic review samples.
