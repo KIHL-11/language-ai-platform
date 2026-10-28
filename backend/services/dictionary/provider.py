@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 import re
 import sqlite3
 import unicodedata
@@ -15,6 +16,7 @@ from services.dictionary.forms_sidecar import (
     default_forms_index_path,
     lookup_forms,
 )
+from services.dictionary.import_telemetry import ImportTelemetry
 
 
 SCHEMA_VERSION = 1
@@ -188,24 +190,50 @@ def _translation_code(value: object) -> str | None:
     return None
 
 
+_TRANSLATION_LIMIT_PER_LANGUAGE = 10
+
+
 def _translation_values(
     aligned_entry_records: list[tuple[str, str]],
     sense_records: list[tuple[str, str]],
+    *,
+    outcomes: dict[str, list[str]] | None = None,
 ) -> dict[str, list[str]]:
+    """Merge direct and aligned translations for one sense.
+
+    When ``outcomes`` is supplied it receives one status per input record, in
+    input order, under ``"sense"`` and ``"entry"``. It never changes the output.
+    """
     output: dict[str, list[str]] = {}
 
-    def append(code: str, word: str) -> None:
+    def append(code: str, word: str) -> str:
         values = output.setdefault(code, [])
-        if word not in values and len(values) < 10:
-            values.append(word)
+        if word in values:
+            return "duplicate"
+        if len(values) >= _TRANSLATION_LIMIT_PER_LANGUAGE:
+            return "over_limit"
+        values.append(word)
+        return "stored"
 
     # A translation nested under a source sense is direct evidence and takes priority.
-    for code, word in sense_records:
-        append(code, word)
-
-    for code, word in aligned_entry_records:
-        append(code, word)
+    sense_statuses = [append(code, word) for code, word in sense_records]
+    entry_statuses = [append(code, word) for code, word in aligned_entry_records]
+    if outcomes is not None:
+        outcomes["sense"] = sense_statuses
+        outcomes["entry"] = entry_statuses
     return output
+
+
+def _morphology_only_similarity(hint_tokens: set[str], definition_tokens: list[set[str]]) -> bool:
+    """Telemetry-only: hint and definition share a stem/compound but no exact token."""
+    for hint in hint_tokens:
+        if len(hint) < 4:
+            continue
+        for tokens in definition_tokens:
+            for token in tokens:
+                if len(token) >= 4 and token != hint and (hint in token or token in hint):
+                    return True
+    return False
 
 
 def _aligned_entry_translations(
@@ -214,15 +242,26 @@ def _aligned_entry_translations(
     *,
     language: str,
     lemma: str,
+    decisions: list[tuple[str, int | None]] | None = None,
 ) -> list[list[tuple[str, str]]]:
     """Assign each entry translation to at most one source sense.
 
     Unscoped translations remain usable only when there is exactly one valid
     sense. Scoped translations require a unique best lexical match across the
     complete entry. Ties and unsupported morphological guesses are omitted.
+
+    When ``decisions`` is supplied it receives one ``(outcome, winner)`` pair per
+    record for build telemetry. Recording decisions never changes alignment.
     """
     aligned: list[list[tuple[str, str]]] = [[] for _ in definitions]
+
+    def decide(outcome: str, winner: int | None = None) -> None:
+        if decisions is not None:
+            decisions.append((outcome, winner))
+
     if not definitions:
+        for _ in records:
+            decide("zero_evidence")
         return aligned
 
     ignored = (
@@ -241,14 +280,28 @@ def _aligned_entry_translations(
         if not raw_hint_tokens:
             if len(definitions) == 1:
                 aligned[0].append((code, word))
+                decide("unscoped_single_sense", 0)
+            else:
+                decide("ambiguous_or_tied")
             continue
 
         hint_tokens = raw_hint_tokens - ignored
         if not hint_tokens:
+            decide("generic_stopword_or_lemma_only")
             continue
         scores = [len(hint_tokens & tokens) for tokens in definition_tokens]
         best_score = max(scores)
-        if best_score == 0 or scores.count(best_score) != 1:
+        if best_score == 0:
+            if decisions is not None:
+                if _morphology_only_similarity(hint_tokens, definition_tokens):
+                    decide("unsupported_morphology")
+                elif len(definitions) == 1:
+                    decide("single_sense_mismatch")
+                else:
+                    decide("zero_evidence")
+            continue
+        if scores.count(best_score) != 1:
+            decide("ambiguous_or_tied")
             continue
         winner = scores.index(best_score)
         if best_score == 1:
@@ -257,10 +310,16 @@ def _aligned_entry_translations(
             # This retains labels such as "understand" -> "To understand..."
             # without accepting an incidental word later in a long definition.
             if len(hint_tokens) != 1 or not definition_token_lists[winner]:
+                decide("weak_single_token_evidence")
                 continue
             if next(iter(hint_tokens)) != definition_token_lists[winner][0]:
+                decide("weak_single_token_evidence")
                 continue
+            aligned[winner].append((code, word))
+            decide("reliable_single_token_head", winner)
+            continue
         aligned[winner].append((code, word))
+        decide("unique_multi_token", winner)
 
     return aligned
 
@@ -290,8 +349,13 @@ def import_kaikki_sources(
     database_path: Path,
     *,
     content_license: str,
+    telemetry: ImportTelemetry | None = None,
 ) -> int:
-    """Atomically stream edition-tagged JSONL or JSONL gzip files into SQLite."""
+    """Atomically stream edition-tagged JSONL or JSONL gzip files into SQLite.
+
+    The finished database is fsynced before it replaces ``database_path`` and the
+    containing directory is fsynced afterward. ``telemetry`` only observes.
+    """
     source_values = list(sources)
     if not source_values:
         raise ValueError("At least one dictionary source is required")
@@ -316,7 +380,11 @@ def import_kaikki_sources(
             try:
                 with _open_dictionary_source(input_path) as source:
                     for line_number, line in enumerate(source, start=1):
+                        if telemetry is not None:
+                            telemetry.record(edition_language, "lines_read")
                         if not line.strip():
+                            if telemetry is not None:
+                                telemetry.record(edition_language, "blank_lines")
                             continue
                         try:
                             value = json.loads(line)
@@ -326,11 +394,19 @@ def import_kaikki_sources(
                             ) from exc
                         language = value.get("lang_code")
                         lemma = value.get("word")
-                        if language != edition_language or not isinstance(lemma, str):
+                        if language != edition_language:
+                            if telemetry is not None:
+                                telemetry.record(edition_language, "skipped_language")
+                            continue
+                        if not isinstance(lemma, str):
+                            if telemetry is not None:
+                                telemetry.record(edition_language, "skipped_lemma")
                             continue
                         lemma = lemma.strip()
                         normalized = normalize_lexical(lemma)
                         if not normalized or len(lemma) > 200:
+                            if telemetry is not None:
+                                telemetry.record(edition_language, "skipped_lemma")
                             continue
                         pos = value.get("pos") if isinstance(value.get("pos"), str) else None
                         fallback_source = f"https://{edition_language}.wiktionary.org/wiki/{lemma.replace(' ', '_')}"
@@ -373,29 +449,45 @@ def import_kaikki_sources(
                                 )
                                 if definitions:
                                     valid_senses.append((sense, definitions))
+                                elif telemetry is not None:
+                                    telemetry.record(edition_language, "senses_without_definition")
+                                    for code, _ in _sense_translation_records(sense):
+                                        telemetry.sense_local_discarded_with_invalid_sense(
+                                            edition_language, code
+                                        )
+                            elif telemetry is not None:
+                                telemetry.record(edition_language, "senses_without_definition")
+                        decisions: list[tuple[str, int | None]] | None = (
+                            [] if telemetry is not None else None
+                        )
                         aligned_entry_translations = _aligned_entry_translations(
                             translation_records,
                             [definitions[0] for _, definitions in valid_senses],
                             language=language,
                             lemma=lemma,
+                            decisions=decisions,
                         )
+                        entry_statuses_by_sense: list[list[str]] = []
                         for sense_index, (sense, definitions) in enumerate(valid_senses):
-                            sense_translation_records: list[tuple[str, str]] = []
-                            for translation in sense.get("translations", []):
-                                if not isinstance(translation, dict):
-                                    continue
-                                code = _translation_code(
-                                    translation.get("code")
-                                    or translation.get("lang_code")
-                                    or translation.get("lang")
-                                )
-                                word = translation.get("word")
-                                if code and isinstance(word, str) and word.strip():
-                                    sense_translation_records.append((code, word.strip()))
+                            sense_translation_records = _sense_translation_records(sense)
+                            outcomes: dict[str, list[str]] | None = (
+                                {} if telemetry is not None else None
+                            )
                             translations = _translation_values(
                                 aligned_entry_translations[sense_index],
                                 sense_translation_records,
+                                outcomes=outcomes,
                             )
+                            if telemetry is not None and outcomes is not None:
+                                for (code, _), status in zip(
+                                    sense_translation_records, outcomes["sense"]
+                                ):
+                                    telemetry.sense_local(edition_language, code, {
+                                        "stored": "retained",
+                                        "duplicate": "deduplicated",
+                                        "over_limit": "truncated",
+                                    }[status])
+                                entry_statuses_by_sense.append(list(outcomes["entry"]))
                             examples: list[str] = []
                             for example in sense.get("examples", []):
                                 if isinstance(example, dict):
@@ -404,6 +496,8 @@ def import_kaikki_sources(
                                         examples.append(text.strip())
                                 if len(examples) >= 5:
                                     break
+                            if telemetry is not None:
+                                telemetry.record(edition_language, "senses_imported")
                             connection.execute(
                                 "INSERT INTO senses VALUES (?, ?, ?, ?, ?)",
                                 (
@@ -451,6 +545,15 @@ def import_kaikki_sources(
                                 (entry_id, pronunciation_index, ipa, accent, audio_url),
                             )
                             pronunciation_index += 1
+                        if telemetry is not None and decisions is not None:
+                            _record_entry_decisions(
+                                telemetry,
+                                edition_language,
+                                translation_records,
+                                decisions,
+                                entry_statuses_by_sense,
+                            )
+                            telemetry.record(edition_language, "entries_imported")
                         count += 1
             except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
                 raise ValueError(
@@ -464,8 +567,66 @@ def import_kaikki_sources(
         raise
     else:
         connection.close()
+        _fsync_file(temporary)
         temporary.replace(database_path)
+        _fsync_directory(database_path.parent)
     return count
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sense_translation_records(sense: dict) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    for translation in sense.get("translations", []):
+        if not isinstance(translation, dict):
+            continue
+        code = _translation_code(
+            translation.get("code")
+            or translation.get("lang_code")
+            or translation.get("lang")
+        )
+        word = translation.get("word")
+        if code and isinstance(word, str) and word.strip():
+            records.append((code, word.strip()))
+    return records
+
+
+def _record_entry_decisions(
+    telemetry: ImportTelemetry,
+    edition: str,
+    records: list[tuple[str, str, str]],
+    decisions: list[tuple[str, int | None]],
+    entry_statuses_by_sense: list[list[str]],
+) -> None:
+    """Reconcile alignment decisions with what each sense actually stored."""
+    if len(decisions) != len(records):
+        raise RuntimeError("alignment telemetry lost a translation record")
+    positions = [0 for _ in entry_statuses_by_sense]
+    for (code, _, _), (outcome, winner) in zip(records, decisions):
+        if winner is None:
+            telemetry.entry_level(edition, code, outcome)
+            continue
+        status = entry_statuses_by_sense[winner][positions[winner]]
+        positions[winner] += 1
+        if status == "over_limit":
+            telemetry.entry_level(edition, code, "over_limit")
+            continue
+        telemetry.entry_level(edition, code, outcome)
+        if status == "duplicate":
+            telemetry.entry_level_duplicate(edition, code)
+    if any(position != len(statuses) for position, statuses in zip(positions, entry_statuses_by_sense)):
+        raise RuntimeError("alignment telemetry does not reconcile with stored senses")
 
 
 def import_kaikki_jsonl(

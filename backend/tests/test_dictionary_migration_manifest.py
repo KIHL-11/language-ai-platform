@@ -114,6 +114,7 @@ def prepared_release(tmp_path):
                 "generic_stopword_or_lemma_only": 0,
                 "single_sense_mismatch": 0,
                 "unsupported_morphology": 0,
+                "weak_single_token_evidence": 0,
                 "over_limit": 0,
                 "total": 0,
             },
