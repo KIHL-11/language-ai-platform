@@ -33,13 +33,12 @@ P8-02A scopes their API calls to the authenticated principal and keeps their
 existing resource lookups non-enumerating (`404`) when an ID belongs to another
 owner.
 
-Learning Library v3, Library media, and the generated `/media` directory do not
-have a durable owner. Adding an authorization check around `item_id` without an
-owner field would be security theater. These paths therefore stay usable in
-Personal Desktop and fail closed in cloud mode with `503
-cloud_tenant_storage_not_configured`. The same applies to routes that combine
-Library records with Study Bank or Speaking data. No owner fields are silently
-written into legacy JSON.
+P8-02B1 adds a separately configured PostgreSQL owner-scoped adapter for core
+Library CRUD/progress and authorized audio delivery. Personal Library v3 JSON,
+local media, direct `/media` paths, transcript repair, Shadowing, and cross-store
+Library joins are unchanged. Those unowned legacy paths remain usable in
+Personal Desktop and fail closed in cloud mode. No owner fields are silently
+written into legacy JSON. See `docs/P8-02B1-OWNER-SCOPED-LIBRARY.md`.
 
 `OwnerScopedRepository` records the minimum P8-02B persistence contract:
 list/get/create/update/delete must all take the server-owned owner ID, uniqueness
@@ -74,7 +73,8 @@ Legend:
 | `/api/extract`, `/api/lesson/from-url` | personal-only | generates unowned local media paths; media ownership and SSRF/egress policy deferred |
 | `/media/*` | personal-only | generated file path has no tenant owner; path traversal remains rejected |
 | `/api/config/azure` GET/POST | personal-only | local secret configuration file; never a cloud account-management API |
-| `/api/library/items*`, Library audio, transcript repair, shadowing attempt | personal-only | Library JSON/audio/cache has no owner field; list/detail/update/delete/audio all fail closed in cloud |
+| Library core list/detail/create/progress/listening/delete/audio | cloud-auth when an owner-scoped repository is configured | principal-scoped PostgreSQL metadata; wrong owner is a non-enumerating 404; no fallback to JSON |
+| Library transcript repair and shadowing attempt/cache | personal-only | not migrated to the owner-scoped repository; remains fail closed in cloud |
 | Library study candidates/contextual word save/status | personal-only | depends on an unowned Library item even though Study Bank is user-scoped |
 | `/api/chunks/from-lesson`, `/api/chunks/search` | personal-only | legacy/global chunk index is not a tenant repository |
 | Chunk Memory create/from-lesson | personal-only | accepts legacy Lesson/media provenance that cannot yet be owner-verified |
