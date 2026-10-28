@@ -1,0 +1,4 @@
+# Only DQ-02 synthetic dictionary migration tests; not the application runtime.
+# Keep dependency scope small for cross-platform CI. No Kaikki downloads.
+fastapi==0.136.3
+pytest>=8,<9

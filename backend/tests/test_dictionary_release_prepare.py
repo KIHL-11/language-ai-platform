@@ -489,10 +489,13 @@ def test_renamed_release_is_rejected_after_sidecar_build(env):
     build_id = env.prepare(rollback)["build_id"]
     release = release_dir(env, build_id)
     renamed = release.with_name(build_id + "-renamed")
+    # A published release is intentionally sealed read-only. To simulate an
+    # out-of-band rename on macOS as well as Linux, first emulate a privileged
+    # operator removing those permissions. Normal migration code never does this.
+    make_writable(release)
     release.rename(renamed)
     with pytest.raises(ManifestValidationError):
         validate_published_release(renamed, env.layout.releases, env.sources)
-    make_writable(renamed)
     # Even with a corrected manifest ID the Sidecar identity is now stale.
     assert lookup_forms(renamed / "dictionary.sqlite3", renamed / "dictionary.forms.sqlite3", 1).status == "index_stale"
 
