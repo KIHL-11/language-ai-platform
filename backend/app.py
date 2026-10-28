@@ -25,6 +25,13 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from services.media.extractor import extract_media
 from services.schemas.lesson import SourceLanguage
+from services.auth.identity import (
+    DeploymentMode,
+    IdentityDependency,
+    PersonalStorageDependency,
+    ProviderAccessDependency,
+    deployment_mode,
+)
 
 BASE = Path(__file__).parent
 MEDIA = BASE / "media"
@@ -167,7 +174,7 @@ async def api_voices():
     return VOICE_LIST
 
 @app.post("/api/tts")
-async def api_tts(req: TTSReq):
+async def api_tts(req: TTSReq, _identity: IdentityDependency):
     voice = req.voice or VOICES.get((req.accent, req.gender), VOICES[("en-US", "female")])
     key = (req.text, voice, round(req.rate, 2))
     if key in _cache:
@@ -236,7 +243,7 @@ class ExtractReq(BaseModel):
     source_language: SourceLanguage = "en"
 
 @app.post("/api/extract")
-def api_extract(req: ExtractReq):    # 用同步函数，FastAPI 自动丢线程池（yt-dlp/whisper 是阻塞的）
+def api_extract(req: ExtractReq, _storage: PersonalStorageDependency):    # 用同步函数，FastAPI 自动丢线程池（yt-dlp/whisper 是阻塞的）
     try:
         return extract_media(
             req.url,
@@ -356,7 +363,8 @@ def _assess(wav_path: str, reference_text: str, language: str) -> dict:
 
 
 @app.post("/api/assess")
-async def api_assess(audio: UploadFile = File(...),
+async def api_assess(_access: ProviderAccessDependency,
+                     audio: UploadFile = File(...),
                      reference_text: str = Form(...),
                      accent: str = Form("en-US")):
     if not AZURE_KEY:
@@ -385,14 +393,16 @@ async def api_assess(audio: UploadFile = File(...),
 
 # ---------- Azure key 设置面板（App 内填 key，存了即时生效、无需重启）----------
 @app.get("/api/config/azure")
-async def get_azure_config():
+async def get_azure_config(_storage: PersonalStorageDependency):
     tail = AZURE_KEY[-4:] if (AZURE_KEY and len(AZURE_KEY) >= 4) else ""
     return {"configured": bool(AZURE_KEY), "region": AZURE_REGION,
             "key_tail": tail, "locked": bool(AZURE_ENV_KEY)}
 
 
 @app.post("/api/config/azure")
-async def set_azure_config(request: Request):
+async def set_azure_config(
+    request: Request, _storage: PersonalStorageDependency
+):
     """把 key/region 写进 azure_key.txt 并更新全局，立刻生效。环境变量配过的话拒绝覆盖。"""
     global AZURE_KEY, AZURE_REGION
     if AZURE_ENV_KEY:
@@ -439,7 +449,9 @@ def _transcribe_text(wav_path: str) -> str:
 
 
 @app.post("/api/transcribe")
-async def api_transcribe(audio: UploadFile = File(...)):
+async def api_transcribe(
+    _identity: IdentityDependency, audio: UploadFile = File(...)
+):
     raw = await audio.read()
     if not raw:
         return JSONResponse(status_code=400, content={"ok": False, "message": "没收到音频。"})
@@ -492,7 +504,9 @@ def _extract_doc_text(raw: bytes, filename: str) -> str:
 
 
 @app.post("/api/extract-doc")
-async def api_extract_doc(doc: UploadFile = File(...)):
+async def api_extract_doc(
+    _identity: IdentityDependency, doc: UploadFile = File(...)
+):
     raw = await doc.read()
     if not raw:
         return JSONResponse(status_code=400, content={"ok": False, "message": "没收到文件。"})
@@ -598,6 +612,8 @@ async def api_ipa(word: str = ""):
 
 @app.get("/api/health")
 async def health():
+    if deployment_mode() is DeploymentMode.CLOUD:
+        return {"ok": True}
     return {"ok": True, "azure": bool(AZURE_KEY), "region": AZURE_REGION}
 
 def _safe_static_file(root: Path, relative_path: str) -> Path:
@@ -629,7 +645,7 @@ def _personal_frontend_index():
 # remain authoritative for /api/*, while generated media never shares the
 # frontend asset root.
 @app.get("/media/{media_path:path}", include_in_schema=False)
-async def media_file(media_path: str):
+async def media_file(media_path: str, _storage: PersonalStorageDependency):
     return FileResponse(_safe_static_file(MEDIA, media_path))
 
 

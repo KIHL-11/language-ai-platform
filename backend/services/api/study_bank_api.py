@@ -2,6 +2,11 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from services.auth.identity import (
+    IdentityDependency,
+    PersonalStorageDependency,
+    owner_user_id,
+)
 from services.library.store import LibraryStoreError
 from services.schemas.lesson import SourceLanguage
 from services.retrieval.chunk_store import ChunkStoreError
@@ -91,6 +96,7 @@ def _contextual_store_error(operation):
 def list_study_candidates(
     item_id: str,
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    _storage: PersonalStorageDependency,
 ):
     from services.api import library_api
 
@@ -113,6 +119,7 @@ def contextual_word_status(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
     sentence_id: Annotated[int, Query(gt=0)],
     word: Annotated[str, Query(min_length=1, max_length=100)],
+    _storage: PersonalStorageDependency,
 ):
     value = _contextual_input(item_id, user_id, sentence_id, word)
     item = _contextual_store_error(lambda: _contextual_word_service().status(value))
@@ -128,7 +135,11 @@ def contextual_word_status(
     "/library/items/{item_id}/study-bank/words",
     response_model=ContextualWordSaveResult,
 )
-def save_contextual_word(item_id: str, request: ContextualWordSaveRequest):
+def save_contextual_word(
+    item_id: str,
+    request: ContextualWordSaveRequest,
+    _storage: PersonalStorageDependency,
+):
     value = _contextual_input(
         item_id, request.user_id, request.sentence_id, request.word
     )
@@ -139,12 +150,14 @@ def save_contextual_word(item_id: str, request: ContextualWordSaveRequest):
 @router.get("/study-bank/items", response_model=StudyListResponse)
 def list_study_items(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
     kind: Literal["word", "chunk"] | None = None,
     language: SourceLanguage | None = None,
     active: bool | None = True,
     library_item_id: str | None = None,
     search: Annotated[str | None, Query(max_length=500)] = None,
 ):
+    user_id = owner_user_id(identity, user_id)
     items = _store_error(lambda: study_bank_store.list_items(
         user_id,
         kind=kind,
@@ -157,7 +170,9 @@ def list_study_items(
 
 
 @router.post("/study-bank/items/bulk", response_model=StudyBulkResult)
-def save_study_items(request: StudyBulkRequest):
+def save_study_items(
+    request: StudyBulkRequest, _storage: PersonalStorageDependency
+):
     from services.api import chunk_api
 
     _store_error(study_bank_store.assert_readable)
@@ -203,7 +218,9 @@ def update_study_item(
     item_id: str,
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
     request: StudyItemPatch,
+    identity: IdentityDependency,
 ):
+    user_id = owner_user_id(identity, user_id)
     return _store_error(lambda: study_bank_store.update_item(user_id, item_id, request))
 
 
@@ -211,6 +228,8 @@ def update_study_item(
 def delete_study_item(
     item_id: str,
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
 ):
+    user_id = owner_user_id(identity, user_id)
     _store_error(lambda: study_bank_store.delete_item(user_id, item_id))
     return Response(status_code=204)

@@ -7,6 +7,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.api.realtime_api import DEFAULT_REALTIME_MODEL
+from services.auth.identity import (
+    IdentityDependency,
+    ProviderAccessDependency,
+    owner_user_id,
+    require_personal_storage,
+)
 from services.library.store import LearningLibraryStore, LibraryStoreError
 from services.schemas.speaking import (
     SpeakingContext, SpeakingContextRequest, SpeakingEventRequest,
@@ -61,16 +67,25 @@ def provider_status():
 
 
 @router.post("/speaking/context", response_model=SpeakingContext)
-def speaking_context(request: SpeakingContextRequest):
-    return _context(request)
+def speaking_context(
+    request: SpeakingContextRequest, identity: IdentityDependency
+):
+    if request.mode == "media":
+        require_personal_storage(identity)
+    user_id = owner_user_id(identity, request.user_id)
+    return _context(request.model_copy(update={"user_id": user_id}))
 
 
 @router.post("/speaking/sessions", response_model=SpeakingSessionCreateResponse)
-def create_session(request: SpeakingSessionCreate):
-    context = _context(SpeakingContextRequest(**request.model_dump(exclude={"provider", "duration_seconds"})))
+def create_session(request: SpeakingSessionCreate, identity: IdentityDependency):
+    if request.mode == "media":
+        require_personal_storage(identity)
+    user_id = owner_user_id(identity, request.user_id)
+    scoped_request = request.model_copy(update={"user_id": user_id})
+    context = _context(SpeakingContextRequest(**scoped_request.model_dump(exclude={"provider", "duration_seconds"})))
     try:
         session = speaking_store.create(
-            user_id=request.user_id, provider=request.provider, model=_model(request.provider),
+            user_id=user_id, provider=request.provider, model=_model(request.provider),
             duration=request.duration_seconds, context=context, goal=request.goal,
         )
     except SpeakingStoreError as exc:
@@ -79,7 +94,12 @@ def create_session(request: SpeakingSessionCreate):
 
 
 @router.get("/speaking/sessions", response_model=SpeakingSessionList)
-def recent_sessions(user_id: Annotated[str, Query(min_length=1, max_length=128)], limit: Annotated[int, Query(ge=1, le=10)] = 10):
+def recent_sessions(
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
+    limit: Annotated[int, Query(ge=1, le=10)] = 10,
+):
+    user_id = owner_user_id(identity, user_id)
     try:
         return SpeakingSessionList(sessions=speaking_store.list_recent(user_id, limit))
     except SpeakingStoreError as exc:
@@ -87,7 +107,12 @@ def recent_sessions(user_id: Annotated[str, Query(min_length=1, max_length=128)]
 
 
 @router.get("/speaking/sessions/{session_id}", response_model=SpeakingSession)
-def get_session(session_id: str, user_id: Annotated[str, Query(min_length=1, max_length=128)]):
+def get_session(
+    session_id: str,
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
+):
+    user_id = owner_user_id(identity, user_id)
     try:
         return speaking_store.get(user_id, session_id)
     except KeyError as exc:
@@ -97,7 +122,13 @@ def get_session(session_id: str, user_id: Annotated[str, Query(min_length=1, max
 
 
 @router.post("/speaking/sessions/{session_id}/events", response_model=SpeakingSession)
-def append_event(session_id: str, user_id: Annotated[str, Query(min_length=1, max_length=128)], request: SpeakingEventRequest):
+def append_event(
+    session_id: str,
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    request: SpeakingEventRequest,
+    identity: IdentityDependency,
+):
+    user_id = owner_user_id(identity, user_id)
     try:
         return speaking_store.append_event(user_id, session_id, request)
     except KeyError as exc:
@@ -111,7 +142,13 @@ def append_event(session_id: str, user_id: Annotated[str, Query(min_length=1, ma
 
 
 @router.post("/speaking/sessions/{session_id}/finish", response_model=SpeakingSession)
-def finish_session(session_id: str, user_id: Annotated[str, Query(min_length=1, max_length=128)], request: SpeakingFinishRequest):
+def finish_session(
+    session_id: str,
+    user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    request: SpeakingFinishRequest,
+    identity: IdentityDependency,
+):
+    user_id = owner_user_id(identity, user_id)
     try:
         return speaking_store.finish(user_id, session_id, request.expected_event_count, request.status, request.end_reason)
     except KeyError as exc:
@@ -123,22 +160,27 @@ def finish_session(session_id: str, user_id: Annotated[str, Query(min_length=1, 
 
 
 @router.post("/speaking/sessions/{session_id}/tools")
-def execute_tool(session_id: str, request: ToolRequest):
+def execute_tool(
+    session_id: str, request: ToolRequest, identity: IdentityDependency
+):
+    user_id = owner_user_id(identity, request.user_id)
     try:
-        session = speaking_store.get(request.user_id, session_id)
+        session = speaking_store.get(user_id, session_id)
         if session.event_count != request.expected_event_count or session.status != "active":
             raise SpeakingConflictError("Speaking session state is stale")
+        if request.name == "get_media_context":
+            require_personal_storage(identity)
         result = ToolDispatcher(study_bank, library_store).execute(
-            request.name, request.arguments, user_id=request.user_id,
+            request.name, request.arguments, user_id=user_id,
             language=session.language, library_item_id=session.library_item_id,
         )
         updated = None
         if request.name == "record_correction":
-            updated = speaking_store.append_event(request.user_id, session_id, SpeakingEventRequest(
+            updated = speaking_store.append_event(user_id, session_id, SpeakingEventRequest(
                 expected_event_count=request.expected_event_count, type="correction", correction=result,
             ))
         elif request.name == "suggest_expression":
-            updated = speaking_store.append_event(request.user_id, session_id, SpeakingEventRequest(
+            updated = speaking_store.append_event(user_id, session_id, SpeakingEventRequest(
                 expected_event_count=request.expected_event_count, type="suggestion", suggestion=result,
             ))
         return {"name": request.name, "result": result, "session": updated}
@@ -153,7 +195,7 @@ def execute_tool(session_id: str, request: ToolRequest):
 
 
 @router.post("/speaking/gemini/client-token")
-def gemini_client_token():
+def gemini_client_token(_access: ProviderAccessDependency):
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="Gemini Live is not configured on the server.")

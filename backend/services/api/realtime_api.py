@@ -6,6 +6,8 @@ import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 
+from services.auth.identity import ProviderAccessDependency
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(BACKEND_DIR / ".env")
@@ -33,7 +35,7 @@ def _upstream_detail(response: requests.Response, api_key: str) -> str:
 
 
 @router.post("/realtime/client-secret")
-def create_realtime_client_secret():
+def create_realtime_client_secret(_access: ProviderAccessDependency):
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(

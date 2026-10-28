@@ -2,6 +2,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
+from services.auth.identity import (
+    IdentityDependency,
+    PersonalStorageDependency,
+    owner_user_id,
+)
 from services.integration.recommendations import IntegrationService
 from services.library.store import LibraryStoreError
 from services.retrieval.chunk_store import ChunkStoreError
@@ -36,6 +41,7 @@ def _service() -> IntegrationService:
 @router.get("/integration/overview", response_model=IntegrationOverview)
 def integration_overview(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    _storage: PersonalStorageDependency,
     language: SourceLanguage | None = None,
 ):
     try:
@@ -51,6 +57,7 @@ def integration_overview(
 def study_item_evidence(
     item_id: str,
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    _storage: PersonalStorageDependency,
 ):
     try:
         return _service().evidence(user_id, item_id)
@@ -64,7 +71,9 @@ def study_item_evidence(
 def target_languages(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
     source_language: SourceLanguage,
+    identity: IdentityDependency,
 ):
+    user_id = owner_user_id(identity, user_id)
     try:
         return TargetLanguageList(
             target_languages=_service().target_languages(user_id, source_language)
@@ -81,11 +90,13 @@ def save_speaking_suggestion(
     session_id: str,
     suggestion_index: int,
     request: SpeakingSuggestionSaveRequest,
+    identity: IdentityDependency,
 ):
     from services.api import chunk_api, speaking_api, study_bank_api
 
+    user_id = owner_user_id(identity, request.user_id)
     try:
-        session = speaking_api.speaking_store.get(request.user_id, session_id)
+        session = speaking_api.speaking_store.get(user_id, session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Speaking session not found") from exc
     except SpeakingStoreError as exc:
@@ -114,7 +125,7 @@ def save_speaking_suggestion(
         evidence_text=evidence[:2_000] if evidence else None,
     )
     value = StudyItemInput(
-        user_id=request.user_id,
+        user_id=user_id,
         kind=suggestion.kind,
         source_language=session.language,
         target_language=request.target_language,
@@ -135,7 +146,7 @@ def save_speaking_suggestion(
     if suggestion.kind == "chunk":
         try:
             chunk, _ = chunk_api.chunk_memory_service.save_chunk(
-                user_id=request.user_id,
+                user_id=user_id,
                 text=suggestion.text,
                 meaning=value.meaning,
                 language=session.language,
@@ -145,7 +156,7 @@ def save_speaking_suggestion(
                 source_stage="speaking",
             )
             if not chunk.active:
-                chunk_api.chunk_memory_service.set_active(request.user_id, chunk.id, True)
+                chunk_api.chunk_memory_service.set_active(user_id, chunk.id, True)
             synchronized = True
         except (ValueError, ChunkStoreError) as exc:
             raise HTTPException(
