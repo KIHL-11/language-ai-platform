@@ -1,0 +1,79 @@
+name: Phase 8 cloud foundation
+
+on:
+  pull_request:
+    branches:
+      - codex/phase8-cloud-foundation-design
+      - codex/p8-02a-auth-tenant-boundary
+    paths-ignore:
+      - "**/*.md"
+  push:
+    branches:
+      - codex/p8-02b1-owner-scoped-library
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase8-cloud-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend and tenant isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: language_ai_test
+          POSTGRES_PASSWORD: language_ai_test
+          POSTGRES_DB: language_ai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U language_ai_test -d language_ai_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AI_MODE: mock
+      TEST_POSTGRES_DSN: postgresql://language_ai_test:language_ai_test@127.0.0.1:5432/language_ai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Run backend regression suite
+        env:
+          PYTHONPATH: backend
+        run: python -m pytest -q backend/tests
+      - name: Verify dependency consistency
+        run: python -m pip check
+      - name: Verify patch whitespace
+        run: git diff --check HEAD^
+
+  frontend:
+    name: Frontend regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build

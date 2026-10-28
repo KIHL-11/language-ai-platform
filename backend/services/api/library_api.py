@@ -6,6 +6,12 @@ from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from services.auth.identity import PersonalStorageDependency
+from services.library.access import LibraryAccessDependency
+from services.library.owner_repository import OwnerScopedLibraryRepository
+from services.library.postgres import (
+    CloudLibraryUnavailableError,
+    OwnerNotProvisionedError,
+)
 from services.library.store import (
     LearningLibraryStore,
     LibraryConflictError,
@@ -41,14 +47,46 @@ def _store_error(operation):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except LibraryConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OwnerNotProvisionedError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "cloud_owner_not_provisioned",
+                "message": "The authenticated cloud account is not provisioned.",
+            },
+        ) from exc
+    except CloudLibraryUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "cloud_tenant_storage_unavailable",
+                "message": "Cloud tenant Library storage is unavailable.",
+            },
+        ) from exc
     except LibraryStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def _cloud_repository(access) -> tuple[OwnerScopedLibraryRepository, str]:
+    repository = access.cloud_repository
+    owner_user_id = access.owner_user_id
+    if repository is None or owner_user_id is None:
+        raise RuntimeError("Cloud Library access was not resolved")
+    return repository, owner_user_id
+
+
 @router.post("/library/items", response_model=LibraryItem)
 def save_library_item(
-    request: LibrarySaveRequest, _storage: PersonalStorageDependency
+    request: LibrarySaveRequest, access: LibraryAccessDependency
 ):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        item = _store_error(
+            lambda: repository.create_for_owner(
+                owner_user_id, request.lesson, request.progress
+            )
+        )
+        return repository.item_for_response(item)
     item = _store_error(
         lambda: library_store.save_item(request.lesson, request.progress)
     )
@@ -56,12 +94,25 @@ def save_library_item(
 
 
 @router.get("/library/items", response_model=LibraryListResponse)
-def list_library_items(_storage: PersonalStorageDependency):
+def list_library_items(access: LibraryAccessDependency):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        return LibraryListResponse(
+            items=_store_error(
+                lambda: repository.list_summaries_for_owner(owner_user_id)
+            )
+        )
     return LibraryListResponse(items=_store_error(library_store.list_summaries))
 
 
 @router.get("/library/items/{item_id}", response_model=LibraryItem)
-def get_library_item(item_id: str, _storage: PersonalStorageDependency):
+def get_library_item(item_id: str, access: LibraryAccessDependency):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        item = _store_error(
+            lambda: repository.get_for_owner(owner_user_id, item_id)
+        )
+        return repository.item_for_response(item)
     item = _store_error(lambda: library_store.get_item(item_id))
     return library_store.item_for_response(item)
 
@@ -70,8 +121,16 @@ def get_library_item(item_id: str, _storage: PersonalStorageDependency):
 def update_library_progress(
     item_id: str,
     request: LibraryProgressRequest,
-    _storage: PersonalStorageDependency,
+    access: LibraryAccessDependency,
 ):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        item = _store_error(
+            lambda: repository.update_progress_for_owner(
+                owner_user_id, item_id, request.model_dump()
+            )
+        )
+        return repository.item_for_response(item)
     item = _store_error(
         lambda: library_store.update_progress(item_id, request.model_dump())
     )
@@ -82,8 +141,16 @@ def update_library_progress(
 def update_library_listening_progress(
     item_id: str,
     request: ListeningProgressRequest,
-    _storage: PersonalStorageDependency,
+    access: LibraryAccessDependency,
 ):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        item = _store_error(
+            lambda: repository.update_listening_progress_for_owner(
+                owner_user_id, item_id, request.model_dump()
+            )
+        )
+        return repository.item_for_response(item)
     item = _store_error(
         lambda: library_store.update_listening_progress(
             item_id, request.model_dump()
@@ -134,13 +201,23 @@ def repair_library_transcript(
 
 
 @router.delete("/library/items/{item_id}", status_code=204)
-def delete_library_item(item_id: str, _storage: PersonalStorageDependency):
+def delete_library_item(item_id: str, access: LibraryAccessDependency):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        _store_error(lambda: repository.delete_for_owner(owner_user_id, item_id))
+        return Response(status_code=204)
     _store_error(lambda: library_store.delete_item(item_id))
     return Response(status_code=204)
 
 
 @router.get("/library/items/{item_id}/audio", response_class=FileResponse)
-def get_library_audio(item_id: str, _storage: PersonalStorageDependency):
+def get_library_audio(item_id: str, access: LibraryAccessDependency):
+    if access.is_cloud:
+        repository, owner_user_id = _cloud_repository(access)
+        audio = _store_error(
+            lambda: repository.audio_for_owner(owner_user_id, item_id)
+        )
+        return FileResponse(audio.path, media_type=audio.content_type)
     path, content_type = _store_error(lambda: library_store.audio_path(item_id))
     return FileResponse(path, media_type=content_type)
 
