@@ -3,6 +3,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
+from services.auth.identity import (
+    IdentityDependency,
+    PersonalStorageDependency,
+    owner_user_id,
+)
 from services.retrieval.chunk_memory import (
     DEFAULT_ACTIVE_RECALL_LIMIT,
     MAX_ACTIVE_RECALL_LIMIT,
@@ -34,13 +39,17 @@ chunk_memory_service = ChunkMemoryService(chunk_store)
 
 
 @router.post("/chunks/from-lesson", response_model=StoreLessonChunksResponse)
-def store_chunks_from_lesson(lesson: Lesson):
+def store_chunks_from_lesson(
+    lesson: Lesson, _storage: PersonalStorageDependency
+):
     added = add_lesson_chunks(lesson, chunk_store)
     return StoreLessonChunksResponse(added=len(added), total=chunk_store.count())
 
 
 @router.post("/chunks/search", response_model=ChunkSearchResponse)
-def search_chunks(request: ChunkSearchRequest):
+def search_chunks(
+    request: ChunkSearchRequest, _storage: PersonalStorageDependency
+):
     results = chunk_retriever.retrieve_chunks(
         request.query,
         source_language=request.source_language,
@@ -51,7 +60,9 @@ def search_chunks(request: ChunkSearchRequest):
 
 
 @router.post("/chunks/memory", response_model=ChunkMemoryUpsertResponse)
-def save_chunk_memory(request: ChunkMemoryCreateRequest):
+def save_chunk_memory(
+    request: ChunkMemoryCreateRequest, _storage: PersonalStorageDependency
+):
     try:
         chunk, created = chunk_memory_service.save_chunk(
             **request.model_dump()
@@ -64,7 +75,9 @@ def save_chunk_memory(request: ChunkMemoryCreateRequest):
 @router.post(
     "/chunks/memory/from-lesson", response_model=StoreLessonChunksResponse
 )
-def save_lesson_chunk_memory(request: StoreLessonMemoryRequest):
+def save_lesson_chunk_memory(
+    request: StoreLessonMemoryRequest, _storage: PersonalStorageDependency
+):
     added = 0
     for sentence in request.lesson.sentences:
         for chunk in sentence.chunks:
@@ -91,11 +104,13 @@ def save_lesson_chunk_memory(request: StoreLessonMemoryRequest):
 @router.get("/chunks/memory", response_model=ChunkMemoryListResponse)
 def list_chunk_memory(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
     language: SourceLanguage | None = None,
     include_archived: bool = False,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
+    user_id = owner_user_id(identity, user_id)
     chunks = chunk_memory_service.list_chunks(
         user_id,
         language,
@@ -108,6 +123,7 @@ def list_chunk_memory(
 def select_active_recall_memory(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
     language: SourceLanguage,
+    identity: IdentityDependency,
     current_lesson_id: Annotated[
         str | None, Query(min_length=1, max_length=128)
     ] = None,
@@ -115,6 +131,7 @@ def select_active_recall_memory(
         int, Query(ge=1, le=MAX_ACTIVE_RECALL_LIMIT)
     ] = DEFAULT_ACTIVE_RECALL_LIMIT,
 ):
+    user_id = owner_user_id(identity, user_id)
     from services.api import study_bank_api
 
     try:
@@ -145,19 +162,25 @@ def _memory_or_404(operation: Callable[[], StoredChunk]) -> StoredChunk:
 @router.patch(
     "/chunks/memory/{chunk_id}/practice", response_model=StoredChunk
 )
-def record_chunk_practice(chunk_id: str, request: ChunkPracticeRequest):
+def record_chunk_practice(
+    chunk_id: str, request: ChunkPracticeRequest, identity: IdentityDependency
+):
+    user_id = owner_user_id(identity, request.user_id)
     return _memory_or_404(
         lambda: chunk_memory_service.record_practice(
-            request.user_id, chunk_id, request.outcome
+            user_id, chunk_id, request.outcome
         )
     )
 
 
 @router.patch("/chunks/memory/{chunk_id}", response_model=StoredChunk)
-def set_chunk_memory_active(chunk_id: str, request: ChunkActiveRequest):
+def set_chunk_memory_active(
+    chunk_id: str, request: ChunkActiveRequest, identity: IdentityDependency
+):
+    user_id = owner_user_id(identity, request.user_id)
     return _memory_or_404(
         lambda: chunk_memory_service.set_active(
-            request.user_id, chunk_id, request.active
+            user_id, chunk_id, request.active
         )
     )
 

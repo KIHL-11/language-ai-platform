@@ -2,6 +2,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
+from services.auth.identity import IdentityDependency, owner_user_id
 from services.api import study_bank_api
 from services.review.service import (
     DEFAULT_NEW_LIMIT,
@@ -30,8 +31,10 @@ def _service() -> ReviewService:
 @router.get("/review/summary", response_model=ReviewSummary)
 def review_summary(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
     language: SourceLanguage | None = None,
 ):
+    user_id = owner_user_id(identity, user_id)
     try:
         return _service().summary(user_id, language=language)
     except StudyBankStoreError as exc:
@@ -41,11 +44,13 @@ def review_summary(
 @router.get("/review/queue", response_model=ReviewQueue)
 def review_queue(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
+    identity: IdentityDependency,
     language: SourceLanguage | None = None,
     kind: Literal["word", "chunk"] | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_SESSION_LIMIT)] = DEFAULT_SESSION_LIMIT,
     new_limit: Annotated[int, Query(ge=0, le=MAX_SESSION_LIMIT)] = DEFAULT_NEW_LIMIT,
 ):
+    user_id = owner_user_id(identity, user_id)
     try:
         return ReviewQueue(items=_service().queue(
             user_id,
@@ -59,10 +64,13 @@ def review_queue(
 
 
 @router.post("/review/items/{item_id}/rate", response_model=ReviewRatingResponse)
-def rate_review_item(item_id: str, request: ReviewRatingRequest):
+def rate_review_item(
+    item_id: str, request: ReviewRatingRequest, identity: IdentityDependency
+):
+    user_id = owner_user_id(identity, request.user_id)
     try:
         item, previous_due_at = _service().rate(
-            request.user_id,
+            user_id,
             item_id,
             request.rating,
             request.expected_review_count,

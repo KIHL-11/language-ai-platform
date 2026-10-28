@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
+from services.auth.identity import IdentityDependency
+
 from services.media.discovery import (
     MediaDiscoveryService,
     VideoSearchProviderError,
@@ -19,7 +21,9 @@ discovery_service = MediaDiscoveryService(
     "/media/discover",
     response_model=list[MediaCandidate],
 )
-def discover_media(request: MediaDiscoveryRequest):
+def discover_media(
+    request: MediaDiscoveryRequest, _identity: IdentityDependency
+):
     try:
         return discovery_service.discover(request)
     except VideoSearchProviderError as exc:

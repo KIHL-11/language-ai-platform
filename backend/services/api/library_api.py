@@ -5,6 +5,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
+from services.auth.identity import PersonalStorageDependency
 from services.library.store import (
     LearningLibraryStore,
     LibraryConflictError,
@@ -45,7 +46,9 @@ def _store_error(operation):
 
 
 @router.post("/library/items", response_model=LibraryItem)
-def save_library_item(request: LibrarySaveRequest):
+def save_library_item(
+    request: LibrarySaveRequest, _storage: PersonalStorageDependency
+):
     item = _store_error(
         lambda: library_store.save_item(request.lesson, request.progress)
     )
@@ -53,18 +56,22 @@ def save_library_item(request: LibrarySaveRequest):
 
 
 @router.get("/library/items", response_model=LibraryListResponse)
-def list_library_items():
+def list_library_items(_storage: PersonalStorageDependency):
     return LibraryListResponse(items=_store_error(library_store.list_summaries))
 
 
 @router.get("/library/items/{item_id}", response_model=LibraryItem)
-def get_library_item(item_id: str):
+def get_library_item(item_id: str, _storage: PersonalStorageDependency):
     item = _store_error(lambda: library_store.get_item(item_id))
     return library_store.item_for_response(item)
 
 
 @router.patch("/library/items/{item_id}/progress", response_model=LibraryItem)
-def update_library_progress(item_id: str, request: LibraryProgressRequest):
+def update_library_progress(
+    item_id: str,
+    request: LibraryProgressRequest,
+    _storage: PersonalStorageDependency,
+):
     item = _store_error(
         lambda: library_store.update_progress(item_id, request.model_dump())
     )
@@ -73,7 +80,9 @@ def update_library_progress(item_id: str, request: LibraryProgressRequest):
 
 @router.patch("/library/items/{item_id}/listening-progress", response_model=LibraryItem)
 def update_library_listening_progress(
-    item_id: str, request: ListeningProgressRequest
+    item_id: str,
+    request: ListeningProgressRequest,
+    _storage: PersonalStorageDependency,
 ):
     item = _store_error(
         lambda: library_store.update_listening_progress(
@@ -84,7 +93,11 @@ def update_library_listening_progress(
 
 
 @router.post("/library/items/{item_id}/repair-transcript")
-def repair_library_transcript(item_id: str, request: TranscriptRepairRequest):
+def repair_library_transcript(
+    item_id: str,
+    request: TranscriptRepairRequest,
+    _storage: PersonalStorageDependency,
+):
     item = _store_error(lambda: library_store.get_item(item_id))
     plan = build_repair_plan(item)
     preview = {
@@ -121,13 +134,13 @@ def repair_library_transcript(item_id: str, request: TranscriptRepairRequest):
 
 
 @router.delete("/library/items/{item_id}", status_code=204)
-def delete_library_item(item_id: str):
+def delete_library_item(item_id: str, _storage: PersonalStorageDependency):
     _store_error(lambda: library_store.delete_item(item_id))
     return Response(status_code=204)
 
 
 @router.get("/library/items/{item_id}/audio", response_class=FileResponse)
-def get_library_audio(item_id: str):
+def get_library_audio(item_id: str, _storage: PersonalStorageDependency):
     path, content_type = _store_error(lambda: library_store.audio_path(item_id))
     return FileResponse(path, media_type=content_type)
 
@@ -138,6 +151,7 @@ def get_library_audio(item_id: str):
 )
 async def analyze_shadowing_attempt(
     item_id: str,
+    _storage: PersonalStorageDependency,
     audio: UploadFile = File(...),
     sentence_id: int = Form(...),
     expected_attempt_count: int = Form(...),

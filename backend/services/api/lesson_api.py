@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from services.auth.identity import IdentityDependency, PersonalStorageDependency
 from services.media.extractor import extract_media
 from services.schemas.lesson import Lesson
 from services.schemas.requests import LessonFromUrlRequest
@@ -10,7 +11,7 @@ router = APIRouter()
 
 
 @router.post("/lesson/create")
-def generate_lesson(data: dict):
+def generate_lesson(data: dict, _identity: IdentityDependency):
 
     title = data.get(
         "title",
@@ -35,7 +36,9 @@ def generate_lesson(data: dict):
 
 
 @router.post("/lesson/from-url", response_model=Lesson)
-def generate_lesson_from_url(request: LessonFromUrlRequest):
+def generate_lesson_from_url(
+    request: LessonFromUrlRequest, _storage: PersonalStorageDependency
+):
     try:
         extracted = extract_media(
             str(request.url),
