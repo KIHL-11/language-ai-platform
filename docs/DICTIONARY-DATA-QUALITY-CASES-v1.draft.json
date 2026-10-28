@@ -1,0 +1,204 @@
+{
+  "data_quality_version": 1,
+  "scope": "production",
+  "approved": false,
+  "description": "DRAFT Dictionary Data Quality cases: checks the Chinese values stored on specific source senses directly in SQLite, independent of context sense selection. Expectations are written from the source definitions, not from either database's output. Owner approval required before gating.",
+  "cases": [
+    {
+      "id": "en-get-understand-sense",
+      "language": "en",
+      "lemma": "get",
+      "part_of_speech": "verb",
+      "sense": {
+        "definition_contains_any": [
+          "To understand"
+        ]
+      },
+      "chinese_allowed": [
+        "明白",
+        "懂",
+        "理解",
+        "懂得",
+        "领会"
+      ],
+      "chinese_forbidden": [
+        "得到",
+        "获得",
+        "成为",
+        "变得",
+        "收到",
+        "取"
+      ]
+    },
+    {
+      "id": "en-get-become-sense",
+      "language": "en",
+      "lemma": "get",
+      "part_of_speech": "verb",
+      "sense": {
+        "definition_contains_any": [
+          "To become"
+        ]
+      },
+      "chinese_allowed": [
+        "变得",
+        "变",
+        "成为",
+        "变成"
+      ],
+      "chinese_forbidden": [
+        "明白",
+        "理解",
+        "收到",
+        "得到"
+      ]
+    },
+    {
+      "id": "en-get-receive-sense",
+      "language": "en",
+      "lemma": "get",
+      "part_of_speech": "verb",
+      "sense": {
+        "definition_contains_any": [
+          "To receive"
+        ]
+      },
+      "chinese_forbidden": [
+        "明白",
+        "理解",
+        "成为",
+        "变得"
+      ]
+    },
+    {
+      "id": "en-bank-river-sense",
+      "language": "en",
+      "lemma": "bank",
+      "part_of_speech": "noun",
+      "sense": {
+        "definition_contains_any": [
+          "edge of river",
+          "edge of a river"
+        ]
+      },
+      "chinese_allowed": [
+        "岸",
+        "河岸",
+        "堤",
+        "河堤",
+        "岸边"
+      ],
+      "chinese_forbidden": [
+        "银行",
+        "銀行"
+      ]
+    },
+    {
+      "id": "en-bank-financial-sense",
+      "language": "en",
+      "lemma": "bank",
+      "part_of_speech": "noun",
+      "sense": {
+        "definition_contains_any": [
+          "institution where one can place and borrow money"
+        ]
+      },
+      "chinese_allowed": [
+        "银行",
+        "銀行"
+      ],
+      "chinese_forbidden": [
+        "岸",
+        "堤"
+      ]
+    },
+    {
+      "id": "en-die-stop-living-sense",
+      "language": "en",
+      "lemma": "die",
+      "part_of_speech": "verb",
+      "sense": {
+        "definition_contains_any": [
+          "To stop living"
+        ]
+      },
+      "chinese_allowed": [
+        "死",
+        "死亡",
+        "去世",
+        "亡",
+        "逝世",
+        "死去"
+      ],
+      "chinese_forbidden": [
+        "骰子",
+        "色子",
+        "模具"
+      ]
+    },
+    {
+      "id": "en-die-dice-sense",
+      "language": "en",
+      "lemma": "die",
+      "part_of_speech": "noun",
+      "sense": {
+        "definition_contains_any": [
+          "polyhedron",
+          "dice"
+        ]
+      },
+      "chinese_forbidden": [
+        "死",
+        "死亡",
+        "去世"
+      ]
+    },
+    {
+      "id": "de-kommen-arrive-sense",
+      "language": "de",
+      "lemma": "kommen",
+      "part_of_speech": "verb",
+      "sense": {
+        "definition_contains_any": [
+          "einen Ort erreichen"
+        ]
+      },
+      "chinese_allowed": [
+        "来",
+        "到",
+        "到达",
+        "来到"
+      ],
+      "chinese_forbidden": [
+        "高潮"
+      ]
+    },
+    {
+      "id": "de-entwicklung-any-sense",
+      "language": "de",
+      "lemma": "Entwicklung",
+      "sense": "all",
+      "chinese_allowed": [
+        "发展",
+        "开发",
+        "进展",
+        "发育",
+        "显影",
+        "演变",
+        "研发",
+        "研制"
+      ]
+    },
+    {
+      "id": "de-haustuer-no-fabrication",
+      "language": "de",
+      "lemma": "Haustür",
+      "sense": "all",
+      "chinese_forbidden": [
+        "房子",
+        "房屋",
+        "家"
+      ]
+    }
+  ]
+}
