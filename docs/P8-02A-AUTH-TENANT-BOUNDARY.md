@@ -28,10 +28,10 @@ from new cloud contracts once the frontend migration is versioned.
 
 ## Storage boundary
 
-Study Bank, Review, Chunk Memory, and Speaking JSON already record a user ID.
-P8-02A scopes their API calls to the authenticated principal and keeps their
-existing resource lookups non-enumerating (`404`) when an ID belongs to another
-owner.
+Study Bank and Daily Review now use the P8-03B1 owner-scoped PostgreSQL adapter
+in cloud mode, while Personal mode retains JSON. Chunk Memory and Speaking JSON
+still record a user ID and remain subject to their explicit route gates. API
+lookups remain non-enumerating (`404`) when an ID belongs to another owner.
 
 P8-02B1 adds a separately configured PostgreSQL owner-scoped adapter for core
 Library CRUD/progress and authorized audio delivery. Personal Library v3 JSON,
@@ -80,8 +80,8 @@ Legend:
 | Chunk Memory create/from-lesson | personal-only | accepts legacy Lesson/media provenance that cannot yet be owner-verified |
 | Chunk Memory list/practice/archive | cloud-auth | principal scopes reads and mutations; forged client/resource IDs rejected |
 | Study Bank bulk save | personal-only | accepts Library/Speaking provenance that cannot yet be owner-verified generically |
-| Study Bank list/update/delete | cloud-auth | principal scopes records; forged client/resource IDs rejected |
-| `/api/review/*` | cloud-auth | principal scopes summary/queue/rating; SRS state is unchanged by auth layer |
+| Study Bank list/create/update/delete | cloud-auth with P8-03B1 repository | PostgreSQL owner/RLS scopes records; Library provenance is owner-verified; forged IDs rejected |
+| `/api/review/*` | cloud-auth with P8-03B1 repository | owner-scoped summary/queue and atomic rating; the existing SRS algorithm is unchanged |
 | Speaking context/session routes (non-media) | cloud-auth | principal scopes targets, sessions, events, finish, and safe tools |
 | Speaking media context / `get_media_context` tool | personal-only | depends on unowned Library records |
 | `/api/integration/target-languages` | cloud-auth | derived only from owner-scoped Study Bank |

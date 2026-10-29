@@ -14,6 +14,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isProvenance(value: unknown): boolean {
   if (!isRecord(value)) return false
+  if (value.source_type === 'ai_text') {
+    return typeof value.source_label === 'string' && typeof value.source_text === 'string' &&
+      Number.isInteger(value.evidence_start) && Number(value.evidence_start) >= 0 &&
+      Number.isInteger(value.evidence_end) && Number(value.evidence_end) > Number(value.evidence_start) &&
+      Number(value.evidence_end) <= value.source_text.length
+  }
   if (value.source_type === 'speaking') {
     return typeof value.speaking_session_id === 'string' &&
       Number.isInteger(value.suggestion_index) && Number(value.suggestion_index) >= 0 &&
@@ -63,6 +69,7 @@ export function isStudyItem(value: unknown): value is StudyItem {
     isNullableString(value.example) && isNullableString(value.usage) &&
     isNullableString(value.note) &&
     Array.isArray(value.provenance) && value.provenance.every(isProvenance) &&
+    (value.revision === undefined || (Number.isInteger(value.revision) && Number(value.revision) >= 1)) &&
     isReviewState(value.review)
 }
 
@@ -195,7 +202,7 @@ export async function listStudyItems(filters: StudyListFilters): Promise<StudyIt
 export async function updateStudyItem(
   userId: string,
   itemId: string,
-  patch: { active?: boolean; meaning?: string; note?: string },
+  patch: { active?: boolean; meaning?: string; note?: string; expected_revision?: number },
 ): Promise<StudyItem> {
   const params = new URLSearchParams({ user_id: userId })
   const value = await json(await fetch(
@@ -210,8 +217,9 @@ export async function updateStudyItem(
   return value
 }
 
-export async function deleteStudyItem(userId: string, itemId: string): Promise<void> {
+export async function deleteStudyItem(userId: string, itemId: string, revision?: number): Promise<void> {
   const params = new URLSearchParams({ user_id: userId })
+  if (revision) params.set('expected_revision', String(revision))
   const response = await fetch(
     `${API_BASE_URL}/api/study-bank/items/${encodeURIComponent(itemId)}?${params}`,
     { method: 'DELETE' },

@@ -10,6 +10,7 @@ import { getOrCreateLearnerId } from '../session/learnerSession'
 import type { SourceLanguage } from '../types/lesson'
 import type { StudyItem, StudyKind } from '../types/studyBank'
 import type { StudyPracticeEvidence } from '../types/integration'
+import AiChunkOrganizer from '../components/AiChunkOrganizer'
 
 
 function reviewLabel(item: StudyItem): string {
@@ -57,7 +58,10 @@ export default function StudyBankPage() {
 
   async function setItemActive(item: StudyItem, value: boolean) {
     try {
-      await updateStudyItem(learnerId, item.id, { active: value })
+      await updateStudyItem(learnerId, item.id, {
+        active: value,
+        ...(item.revision ? { expected_revision: item.revision } : {}),
+      })
       setItems((current) => current.filter((candidate) => candidate.id !== item.id))
     } catch {
       setError('The Study Bank item could not be updated.')
@@ -67,7 +71,7 @@ export default function StudyBankPage() {
   async function remove(item: StudyItem) {
     if (!window.confirm('Permanently delete this Study Bank item?\nPractice history will be preserved.')) return
     try {
-      await deleteStudyItem(learnerId, item.id)
+      await deleteStudyItem(learnerId, item.id, item.revision)
       setItems((current) => current.filter((candidate) => candidate.id !== item.id))
     } catch {
       setError('The Study Bank item could not be deleted.')
@@ -78,6 +82,7 @@ export default function StudyBankPage() {
     <main className="mx-auto max-w-5xl px-5 py-10 sm:px-8">
       <h1 className="text-3xl font-semibold">Words & Chunks</h1>
       <p className="mt-2 text-sm text-[#66726e]">Your explicitly curated long-term study material.</p>
+      <AiChunkOrganizer learnerId={learnerId} />
       <div className="mt-6 flex flex-wrap gap-2">
         {(['word', 'chunk'] as const).map((value) => <button key={value} type="button" aria-pressed={kind === value} onClick={() => setKind(value)} className="h-10 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white">{value === 'word' ? 'Words' : 'Chunks'}</button>)}
         {(['all', 'en', 'de'] as const).map((value) => <button key={value} type="button" aria-pressed={language === value} onClick={() => setLanguage(value)} className="h-10 border border-[#aebcb6] px-4 aria-pressed:bg-[#dce9e4]">{value === 'all' ? 'All' : value === 'en' ? 'English' : 'German'}</button>)}
@@ -112,11 +117,14 @@ export default function StudyBankPage() {
                   <p className="text-xs text-[#66726e]">{source.start.toFixed(1)}–{source.end.toFixed(1)}s</p>
                   <p className="mt-1 text-sm">{source.sentence_text}</p>
                   <p className="mt-1 text-sm text-[#66726e]">{source.sentence_translation}</p>
-                </li> : <li key={`speaking:${source.speaking_session_id}:${source.suggestion_index}`} className="border-l-2 border-[#ccd6d1] pl-3">
+                </li> : source.source_type === 'speaking' ? <li key={`speaking:${source.speaking_session_id}:${source.suggestion_index}`} className="border-l-2 border-[#ccd6d1] pl-3">
                   <p className="font-medium">From Speaking practice · {source.provider === 'gemini-live' ? 'Gemini Live' : 'OpenAI Realtime'}</p>
                   {source.media_title_snapshot && <p className="text-xs text-[#66726e]">Discussed: {source.media_title_snapshot}</p>}
                   <p className="mt-1 text-sm">Suggested in turn {source.originating_turn}</p>
                   {source.evidence_text && <p className="mt-1 text-sm text-[#66726e]">“{source.evidence_text}”</p>}
+                </li> : <li key={`ai-text:${source.source_label}:${source.evidence_start}`} className="border-l-2 border-[#ccd6d1] pl-3">
+                  <p className="font-medium">{source.source_label}</p>
+                  <p className="mt-1 text-sm">{source.source_text}</p>
                 </li>)}
               </ul>
             </details>

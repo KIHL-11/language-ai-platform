@@ -355,7 +355,7 @@ describe('DictionaryPanel', () => {
     expect(await screen.findByText('Saved')).toBeInTheDocument()
     const restore = fetchMock.mock.calls.find(([, options]) => options?.method === 'PATCH')
     expect(String(restore?.[0])).toContain(`/study-bank/items/${studyItem.id}`)
-    expect(JSON.parse(String(restore?.[1]?.body))).toEqual({ active: true })
+    expect(JSON.parse(String(restore?.[1]?.body))).toEqual({ active: true, expected_revision: 3 })
   })
 
   it('recognizes an active word without issuing another save', async () => {

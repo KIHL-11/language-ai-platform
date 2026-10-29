@@ -85,6 +85,7 @@ describe('Words & Chunks page', () => {
       options?.method === 'PATCH' && String(options.body).includes('true'),
     )
     expect(restore).toBeDefined()
+    expect(JSON.parse(String(restore?.[1]?.body))).toEqual({ active: true, expected_revision: 3 })
   })
 
   it('requires confirmation before permanent delete', async () => {
