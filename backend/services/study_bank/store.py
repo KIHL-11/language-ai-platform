@@ -162,17 +162,39 @@ class StudyBankStore:
                 updates = {
                     key: value
                     for key, value in patch.model_dump().items()
-                    if value is not None
+                    if value is not None and key != "expected_revision"
                 }
-                updated = item.model_copy(update={**updates, "updated_at": self._now()})
+                if (
+                    patch.expected_revision is not None
+                    and patch.expected_revision != item.revision
+                ):
+                    raise StudyBankConflictError("Study Bank item state is stale")
+                updated = item.model_copy(update={
+                    **updates,
+                    "updated_at": self._now(),
+                    "revision": item.revision + 1,
+                })
                 items[index] = updated
                 self._write_items(items)
                 return updated
         raise KeyError(item_id)
 
-    def delete_item(self, user_id: str, item_id: str) -> None:
+    def delete_item(
+        self, user_id: str, item_id: str, expected_revision: int | None = None
+    ) -> None:
         with self._lock:
             items = self._read_items()
+            if expected_revision is not None:
+                item = next(
+                    (
+                        value
+                        for value in items
+                        if value.id == item_id and value.user_id == user_id
+                    ),
+                    None,
+                )
+                if item is not None and item.revision != expected_revision:
+                    raise StudyBankConflictError("Study Bank item state is stale")
             remaining = [
                 item for item in items
                 if item.id != item_id or item.user_id != user_id
@@ -201,7 +223,11 @@ class StudyBankStore:
                 now = self._now()
                 previous_due_at = item.review.due_at
                 review = schedule_review(item.review, rating, now)
-                updated = item.model_copy(update={"review": review, "updated_at": now})
+                updated = item.model_copy(update={
+                    "review": review,
+                    "updated_at": now,
+                    "revision": item.revision + 1,
+                })
                 items[index] = updated
                 self._write_items(items)
                 return updated, previous_due_at
@@ -262,7 +288,11 @@ class StudyBankStore:
         changed = any(getattr(existing, key) != result for key, result in updates.items())
         if not changed:
             return existing, False, False
-        updated = existing.model_copy(update={**updates, "updated_at": now})
+        updated = existing.model_copy(update={
+            **updates,
+            "updated_at": now,
+            "revision": existing.revision + 1,
+        })
         items[existing_index] = updated
         return updated, False, True
 

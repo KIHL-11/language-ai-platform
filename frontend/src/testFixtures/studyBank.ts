@@ -52,6 +52,7 @@ export const studyItem: StudyItem = {
   created_at: '2026-10-18T08:00:00Z', updated_at: '2026-10-18T08:00:00Z',
   lemma: 'figure', part_of_speech: 'verb', example: 'We can figure it out.',
   usage: null, note: null, provenance: [provenance],
+  revision: 3,
   review: {
     due_at: '2026-10-18T08:00:00Z', interval_seconds: 0, ease_factor: 2.5,
     repetition_count: 0, lapse_count: 0, review_count: 0,

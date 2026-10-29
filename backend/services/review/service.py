@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 
 from services.schemas.review import ReviewSummary
 from services.schemas.study_bank import ReviewRating, StudyItem
-from services.study_bank.store import StudyBankStore, utc_now
+from services.study_bank.owner_repository import OwnerScopedReviewRepository
+from services.study_bank.store import utc_now
 
 
 DEFAULT_SESSION_LIMIT = 20
@@ -14,7 +15,7 @@ MAX_SESSION_LIMIT = 100
 class ReviewService:
     def __init__(
         self,
-        store: StudyBankStore,
+        store: OwnerScopedReviewRepository,
         *,
         clock: Callable[[], datetime] = utc_now,
     ):

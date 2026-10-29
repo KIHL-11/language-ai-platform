@@ -75,6 +75,7 @@ export interface StudyItem extends StudyItemInput {
   created_at: string
   updated_at: string
   review: ReviewState
+  revision?: number
 }
 
 export interface StudyCandidate {
