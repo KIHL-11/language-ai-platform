@@ -35,7 +35,11 @@ export interface AiChunkBatch {
   batch_id: string
   user_id: string
   source_language: SourceLanguage
+  source_type: 'manual_text' | 'library_passage'
+  source_label: string
   created_at: string
+  expires_at: string | null
+  status: 'ready' | 'expired'
   candidates: AiChunkCandidate[]
 }
 
