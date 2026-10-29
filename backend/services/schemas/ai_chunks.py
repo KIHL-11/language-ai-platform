@@ -11,6 +11,7 @@ CandidateState = Literal[
     "proposed", "accepted", "edited_and_accepted", "rejected", "expired"
 ]
 DecisionAction = Literal["accept", "edit_and_accept", "reject"]
+BatchState = Literal["ready", "expired"]
 
 
 class AiChunkModel(BaseModel):
@@ -110,7 +111,11 @@ class AiChunkBatch(AiChunkModel):
     batch_id: str = Field(min_length=1, max_length=64)
     user_id: str = Field(min_length=1, max_length=128)
     source_language: SourceLanguage
+    source_type: Literal["manual_text", "library_passage"] = "manual_text"
+    source_label: str = Field(default="Candidate source", min_length=1, max_length=1_000)
     created_at: datetime
+    expires_at: datetime | None = None
+    status: BatchState = "ready"
     candidates: list[AiChunkCandidate] = Field(max_length=8)
 
     @field_validator("created_at", mode="after")
@@ -119,6 +124,21 @@ class AiChunkBatch(AiChunkModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("candidate batch timestamp must be timezone-aware")
         return value.astimezone(timezone.utc)
+
+    @field_validator("expires_at", mode="after")
+    @classmethod
+    def expiry_is_utc(cls, value: datetime | None):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("candidate batch expiry must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def expiry_follows_creation(self):
+        if self.expires_at is not None and self.expires_at <= self.created_at:
+            raise ValueError("candidate batch expiry must follow creation")
+        return self
 
 
 class CandidateEdit(AiChunkModel):

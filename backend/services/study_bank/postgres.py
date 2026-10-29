@@ -169,6 +169,26 @@ class PostgresOwnerScopedStudyBankRepository:
         except psycopg.Error as exc:
             raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
 
+    def save_item_in_transaction(
+        self,
+        connection,
+        owner_user_id: str,
+        value: StudyItemInput,
+    ) -> tuple[StudyItem, bool]:
+        """Upsert one item on a caller-owned transaction.
+
+        This narrow hook lets another durable PostgreSQL workflow commit its
+        authoritative state transition and the Study Bank write together.  It
+        deliberately does not commit or open a second connection.
+        """
+        self._validate_owner(owner_user_id)
+        if value.user_id != owner_user_id:
+            raise ValueError("Study Bank owner does not match authenticated account")
+        normalized_identity(value)
+        self._set_owner_context(connection, owner_user_id)
+        self._assert_owner_provisioned(connection, owner_user_id)
+        return self._upsert(connection, owner_user_id, value)
+
     def update_item(
         self, owner_user_id: str, item_id: str, patch: StudyItemPatch
     ) -> StudyItem:
