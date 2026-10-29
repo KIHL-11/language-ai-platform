@@ -58,7 +58,10 @@ export default function StudyBankPage() {
 
   async function setItemActive(item: StudyItem, value: boolean) {
     try {
-      await updateStudyItem(learnerId, item.id, { active: value })
+      await updateStudyItem(learnerId, item.id, {
+        active: value,
+        ...(item.revision ? { expected_revision: item.revision } : {}),
+      })
       setItems((current) => current.filter((candidate) => candidate.id !== item.id))
     } catch {
       setError('The Study Bank item could not be updated.')
@@ -68,7 +71,7 @@ export default function StudyBankPage() {
   async function remove(item: StudyItem) {
     if (!window.confirm('Permanently delete this Study Bank item?\nPractice history will be preserved.')) return
     try {
-      await deleteStudyItem(learnerId, item.id)
+      await deleteStudyItem(learnerId, item.id, item.revision)
       setItems((current) => current.filter((candidate) => candidate.id !== item.id))
     } catch {
       setError('The Study Bank item could not be deleted.')

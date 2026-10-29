@@ -249,7 +249,10 @@ function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }
     if (!contextualSelection(selection) || !studyItem || saveState === 'restoring') return
     setSaveState('restoring')
     try {
-      const restored = await updateStudyItem(selection.learnerId, studyItem.id, { active: true })
+      const restored = await updateStudyItem(selection.learnerId, studyItem.id, {
+        active: true,
+        ...(studyItem.revision ? { expected_revision: studyItem.revision } : {}),
+      })
       setStudyItem(restored)
       setSaveState('saved')
       onStudyItemSaved?.(restored)

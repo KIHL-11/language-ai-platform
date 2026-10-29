@@ -162,6 +162,7 @@ class StudyItem(StudyModel):
     usage: str | None = Field(default=None, max_length=2_000)
     note: str | None = Field(default=None, max_length=2_000)
     review: ReviewState
+    revision: int = Field(default=1, ge=1)
 
     @field_validator("created_at", "updated_at", mode="after")
     @classmethod
@@ -240,6 +241,7 @@ class StudyItemPatch(StudyModel):
     active: bool | None = None
     meaning: str | None = Field(default=None, max_length=1_000)
     note: str | None = Field(default=None, max_length=2_000)
+    expected_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def require_update(self):

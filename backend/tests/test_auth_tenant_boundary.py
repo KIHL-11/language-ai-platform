@@ -91,7 +91,7 @@ def _install_verifier(monkeypatch, verifier):
     )
 
 
-def test_trusted_verifier_establishes_server_owned_identity(monkeypatch):
+def test_cloud_study_bank_fails_closed_without_postgres_repository(monkeypatch):
     observed = []
 
     class FakeStudyBank:
@@ -107,8 +107,9 @@ def test_trusted_verifier_establishes_server_owned_identity(monkeypatch):
         "/api/study-bank/items", params={"user_id": "owner-a"}
     )
 
-    assert response.status_code == 200
-    assert observed == ["owner-a"]
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "cloud_study_bank_storage_not_configured"
+    assert observed == []
 
 
 def test_async_trusted_verifier_is_supported(monkeypatch):
@@ -212,7 +213,7 @@ def test_forged_client_user_id_cannot_read_or_mutate_other_tenant(
     assert response.json()["detail"]["code"] == "identity_mismatch"
 
 
-def test_cloud_study_bank_uses_server_principal_for_scoped_read(monkeypatch):
+def test_cloud_study_bank_never_falls_back_to_personal_store(monkeypatch):
     observed = []
 
     class FakeStudyBank:
@@ -226,9 +227,8 @@ def test_cloud_study_bank_uses_server_principal_for_scoped_read(monkeypatch):
             "/api/study-bank/items", params={"user_id": "owner-a"}
         )
 
-    assert response.status_code == 200
-    assert response.json() == {"items": []}
-    assert observed == ["owner-a"]
+    assert response.status_code == 503
+    assert observed == []
 
 
 @pytest.mark.parametrize(
@@ -389,7 +389,7 @@ def test_study_and_review_resource_ids_are_non_enumerating_and_unchanged(
             },
         )
 
-    assert [update.status_code, delete.status_code, rate.status_code] == [404, 404, 404]
+    assert [update.status_code, delete.status_code, rate.status_code] == [503, 503, 503]
     assert bank.path.read_bytes() == before
     preserved = bank.list_items("owner-b", active=None)[0]
     assert preserved.active is True
@@ -517,4 +517,9 @@ def test_unverifiable_cross_resource_provenance_writes_fail_closed(path, payload
         response = client.post(path, json=payload)
 
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
+    expected = (
+        "cloud_study_bank_storage_not_configured"
+        if path == "/api/study-bank/items/bulk"
+        else "cloud_tenant_storage_not_configured"
+    )
+    assert response.json()["detail"]["code"] == expected
