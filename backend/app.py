@@ -58,6 +58,7 @@ from services.api.speaking_api import router as speaking_router
 from services.api.integration_api import router as integration_router
 from services.api.dictionary_api import router as dictionary_router
 from services.api.ai_chunk_api import router as ai_chunk_router
+from services.api.topic_api import router as topic_router
 
 app.include_router(
     lesson_router,
@@ -101,6 +102,10 @@ app.include_router(
 )
 app.include_router(
     ai_chunk_router,
+    prefix="/api"
+)
+app.include_router(
+    topic_router,
     prefix="/api"
 )
 # 口音 + 性别 → 默认嗓音（用对话级新嗓音，比老的 Aria/Guy 自然很多）

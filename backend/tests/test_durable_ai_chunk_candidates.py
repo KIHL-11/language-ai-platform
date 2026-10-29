@@ -690,6 +690,39 @@ def test_cloud_api_uses_principal_and_persists_acceptance(cloud_candidates):
     assert decision.json()["study_item"]["review"]["review_count"] == 0
 
 
+def test_topic_preview_uses_real_owner_scoped_postgres_study_bank(cloud_candidates):
+    _, _, study, library, candidates = cloud_candidates
+    def topic_item(owner, text):
+        return StudyItemInput(
+            user_id=owner,
+            kind="chunk",
+            source_language="en",
+            target_language="zh-CN",
+            text=text,
+            meaning="topic meaning",
+            provenance=[AiTextStudyProvenance(
+                source_text=f"Use {text} today.",
+                evidence_start=4,
+                evidence_end=4 + len(text),
+            )],
+        )
+    own = study.save_items_for_owner(OWNER_A, [topic_item(OWNER_A, "let's catch up")])[0][0]
+    other = study.save_items_for_owner(OWNER_B, [topic_item(OWNER_B, "next time")])[0][0]
+    with _as_owner(OWNER_A, candidates, study, library):
+        response = client.post(
+            "/api/topics/en-friends-reunion/preview",
+            json={"user_id": OWNER_A, "target_limit": 5},
+        )
+        forged = client.post(
+            "/api/topics/en-friends-reunion/preview",
+            json={"user_id": OWNER_B, "target_limit": 5},
+        )
+    assert response.status_code == 200
+    ids = [item["study_item_id"] for item in response.json()["target_chunks"]]
+    assert ids == [own.id] and other.id not in ids
+    assert forged.status_code == 403
+
+
 def test_cloud_api_rejects_forged_identity_and_missing_storage_before_adapter(
     cloud_candidates, monkeypatch
 ):

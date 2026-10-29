@@ -8,6 +8,7 @@ on:
       - codex/p8-02b1-owner-scoped-library
       - codex/p8-03a-ai-chunk-candidates
       - codex/p8-03b1-study-bank-review-postgres
+      - codex/p8-03b2-durable-ai-chunk-candidates
     paths-ignore:
       - "**/*.md"
   push:
@@ -16,6 +17,7 @@ on:
       - codex/p8-03a-ai-chunk-candidates
       - codex/p8-03b1-study-bank-review-postgres
       - codex/p8-03b2-durable-ai-chunk-candidates
+      - codex/p8-04a-topic-speaking-curriculum
   workflow_dispatch:
 
 permissions:

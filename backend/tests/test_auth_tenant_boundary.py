@@ -287,7 +287,7 @@ def test_library_update_is_not_reachable_in_cloud_before_owner_migration():
     assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
 
 
-def test_speaking_resource_id_is_non_enumerating_across_tenants(monkeypatch):
+def test_cloud_speaking_store_is_fail_closed_before_resource_lookup(monkeypatch):
     class SyntheticSpeakingStore:
         owners = {"session-b": "owner-b"}
 
@@ -302,8 +302,8 @@ def test_speaking_resource_id_is_non_enumerating_across_tenants(monkeypatch):
             "/api/speaking/sessions/session-b", params={"user_id": "owner-a"}
         )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Speaking session not found"
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
 
 
 @pytest.mark.parametrize(
@@ -461,7 +461,8 @@ def test_real_speaking_store_refuses_other_tenant_resource(tmp_path, monkeypatch
             params={"user_id": "owner-a"},
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
     assert sessions.path.read_bytes() == before
 
 
