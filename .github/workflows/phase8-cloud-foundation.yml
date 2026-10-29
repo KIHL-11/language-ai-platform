@@ -5,11 +5,13 @@ on:
     branches:
       - codex/phase8-cloud-foundation-design
       - codex/p8-02a-auth-tenant-boundary
+      - codex/p8-02b1-owner-scoped-library
     paths-ignore:
       - "**/*.md"
   push:
     branches:
       - codex/p8-02b1-owner-scoped-library
+      - codex/p8-03a-ai-chunk-candidates
   workflow_dispatch:
 
 permissions:

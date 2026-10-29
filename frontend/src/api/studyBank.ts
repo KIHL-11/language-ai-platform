@@ -14,6 +14,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isProvenance(value: unknown): boolean {
   if (!isRecord(value)) return false
+  if (value.source_type === 'ai_text') {
+    return typeof value.source_label === 'string' && typeof value.source_text === 'string' &&
+      Number.isInteger(value.evidence_start) && Number(value.evidence_start) >= 0 &&
+      Number.isInteger(value.evidence_end) && Number(value.evidence_end) > Number(value.evidence_start) &&
+      Number(value.evidence_end) <= value.source_text.length
+  }
   if (value.source_type === 'speaking') {
     return typeof value.speaking_session_id === 'string' &&
       Number.isInteger(value.suggestion_index) && Number(value.suggestion_index) >= 0 &&

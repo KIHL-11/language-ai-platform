@@ -129,6 +129,10 @@ def _identity(owner_user_id: str) -> RequestIdentity:
 
 @contextmanager
 def _as_owner(owner_user_id: str, repository):
+    missing = object()
+    previous_repository = getattr(
+        app_module.app.state, "cloud_library_repository", missing
+    )
     app_module.app.state.cloud_library_repository = repository
     app_module.app.dependency_overrides[get_request_identity] = (
         lambda: _identity(owner_user_id)
@@ -137,6 +141,10 @@ def _as_owner(owner_user_id: str, repository):
         yield
     finally:
         app_module.app.dependency_overrides.pop(get_request_identity, None)
+        if previous_repository is missing:
+            delattr(app_module.app.state, "cloud_library_repository")
+        else:
+            app_module.app.state.cloud_library_repository = previous_repository
 
 
 def _create_via_api(owner_user_id: str, repository, value: Lesson | None = None):
