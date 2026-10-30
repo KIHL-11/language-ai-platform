@@ -91,7 +91,7 @@ describe('Topic speaking curriculum', () => {
     expect(await screen.findByText("Let's catch up next time.")).toBeInTheDocument()
     expect(screen.getByText('When should we meet again?')).toBeInTheDocument()
     const body = JSON.parse(String(fetchMock.mock.calls.find(([url]) => String(url).endsWith('/turns'))?.[1]?.body))
-    expect(body).toEqual({ user_id: 'learner', expected_event_count: 0, text: "Let's catch up next time." })
+    expect(body).toMatchObject({ user_id: 'learner', expected_event_count: 0, text: "Let's catch up next time.", topic_version: 1, idempotency_key: 'session-1:turn:0' })
   })
 
   it('shows evidence-grounded feedback without a fluency or CEFR score', async () => {
@@ -117,6 +117,26 @@ describe('Topic speaking curriculum', () => {
     expect(await screen.findByText(/Interrupted · 1 learner turns/)).toBeInTheDocument()
     const finishBody = JSON.parse(String(fetchMock.mock.calls.find(([url]) => String(url).endsWith('/finish'))?.[1]?.body))
     expect(finishBody.interrupted).toBe(true)
+  })
+
+  it('resumes persisted turns and recovers an uncertain turn response', async () => {
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/attempts?')) return Promise.resolve(response({ session_ids: ['session-1'] }))
+      if (String(url).includes('/attempts/session-1?')) return Promise.resolve(response({ state: started, turns: [{ role: 'agent', text: 'Persisted partner prompt' }], feedback: null, status: 'active' }))
+      if (String(url).endsWith('/turns')) return Promise.reject(new Error('response lost'))
+      return original(url,options)
+    })
+    const user = userEvent.setup()
+    render(<TopicSpeakingCurriculum learnerId="learner" onBack={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: 'Preview Meeting an old friend' }))
+    await user.click(await screen.findByRole('button', { name: /Resume or view/ }))
+    expect(await screen.findByText('Persisted partner prompt')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Your response'),'Recently I moved.')
+    await user.click(screen.getByRole('button',{name:'Send finalized turn'}))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be confirmed')
+    await user.click(screen.getByRole('button',{name:'Reload saved attempt'}))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
   })
 
   it('finishes a live attempt as interrupted on unmount', async () => {

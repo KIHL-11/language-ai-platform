@@ -53,18 +53,24 @@ class TopicPreviewResponse(TopicModel):
 class TopicAttemptStartRequest(TopicModel):
     user_id: str = Field(min_length=1, max_length=128)
     target_ids: list[str] = Field(default_factory=list, max_length=5)
+    topic_version: int = Field(default=1, ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class TopicAttemptTurnRequest(TopicModel):
     user_id: str = Field(min_length=1, max_length=128)
     expected_event_count: int = Field(ge=0)
     text: str = Field(min_length=1, max_length=2_000)
+    topic_version: int = Field(default=1, ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class TopicAttemptFinishRequest(TopicModel):
     user_id: str = Field(min_length=1, max_length=128)
     expected_event_count: int = Field(ge=0)
     interrupted: bool = False
+    topic_version: int = Field(default=1, ge=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class TopicAttemptState(TopicModel):

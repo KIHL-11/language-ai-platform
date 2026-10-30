@@ -19,23 +19,40 @@ export async function previewTopic(topicId: string, userId: string): Promise<Top
   }), 'Loading topic preview failed')
 }
 
-export async function startTopicAttempt(topicId: string, userId: string, targetIds: string[]): Promise<TopicAttemptState> {
+export async function startTopicAttempt(topicId: string, userId: string, targetIds: string[], requestKey = crypto.randomUUID(), version = 1): Promise<TopicAttemptState> {
   return json(await fetch(`${API_BASE_URL}/api/topics/${encodeURIComponent(topicId)}/attempts`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId, target_ids: targetIds }),
+    body: JSON.stringify({ user_id: userId, target_ids: targetIds, topic_version: version, idempotency_key: requestKey }),
   }), 'Starting topic practice failed')
 }
 
 export async function sendTopicTurn(topicId: string, state: TopicAttemptState, userId: string, text: string): Promise<{ state: TopicAttemptState; agent_reply: string }> {
   return json(await fetch(`${API_BASE_URL}/api/topics/${encodeURIComponent(topicId)}/attempts/${encodeURIComponent(state.session_id)}/turns`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId, expected_event_count: state.event_count, text }),
+    body: JSON.stringify({ user_id: userId, expected_event_count: state.event_count, text, topic_version: state.topic_version, idempotency_key: `${state.session_id}:turn:${state.event_count}` }),
   }), 'Sending topic turn failed')
 }
 
 export async function finishTopicAttempt(topicId: string, state: TopicAttemptState, userId: string, interrupted: boolean): Promise<{ state: TopicAttemptState; feedback: TopicFeedback }> {
   return json(await fetch(`${API_BASE_URL}/api/topics/${encodeURIComponent(topicId)}/attempts/${encodeURIComponent(state.session_id)}/finish`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId, expected_event_count: state.event_count, interrupted }),
+    body: JSON.stringify({ user_id: userId, expected_event_count: state.event_count, interrupted, topic_version: state.topic_version, idempotency_key: `${state.session_id}:finish:${state.event_count}` }),
   }), 'Finishing topic practice failed')
+}
+
+export interface SavedTopicAttempt {
+  state: TopicAttemptState
+  turns: Array<{ role: 'learner' | 'agent'; text: string }>
+  feedback: TopicFeedback | null
+  status: 'active' | 'completed' | 'interrupted' | 'failed'
+}
+
+export async function listTopicAttempts(topicId: string, userId: string): Promise<string[]> {
+  const result = await json<{ session_ids: string[] }>(await fetch(`${API_BASE_URL}/api/topics/${encodeURIComponent(topicId)}/attempts?user_id=${encodeURIComponent(userId)}`), 'Loading attempts failed')
+  if (!Array.isArray(result.session_ids)) throw new Error('Invalid saved attempt list')
+  return result.session_ids
+}
+
+export async function getTopicAttempt(topicId: string, sessionId: string, userId: string): Promise<SavedTopicAttempt> {
+  return json(await fetch(`${API_BASE_URL}/api/topics/${encodeURIComponent(topicId)}/attempts/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`), 'Loading attempt failed')
 }
