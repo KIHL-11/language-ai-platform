@@ -3,7 +3,7 @@ import unicodedata
 from datetime import datetime, timezone
 
 from services.schemas.speaking import (
-    SpeakingContext, SpeakingCorrection, SpeakingEventRequest, SpeakingTarget,
+    SpeakingContext, SpeakingCorrection, SpeakingTarget,
 )
 from services.schemas.topics import (
     SpeakingTopic, TopicAttemptState, TopicCheckpointResult, TopicFeedback,
@@ -60,7 +60,8 @@ def select_topic_chunks(items, topic: SpeakingTopic, limit: int, now: datetime):
         searchable = _normalized(" ".join((item.text, item.meaning, item.note or "")))
         return sum(1 for keyword in keywords if keyword and keyword in searchable)
 
-    return sorted(items, key=lambda item: (-relevance(item), *_priority(item, now)))[:limit]
+    relevant = [item for item in items if relevance(item) > 0]
+    return sorted(relevant, key=lambda item: (-relevance(item), *_priority(item, now)))[:limit]
 
 
 class TopicCurriculumService:
@@ -145,30 +146,9 @@ class TopicCurriculumService:
     def turn(self, owner: str, topic_id: str, session_id: str, expected: int, text: str):
         topic = get_topic(topic_id)
         session = self._session(owner, session_id, topic)
-        learner = self.sessions.append_event(
-            owner,
-            session.id,
-            SpeakingEventRequest(
-                expected_event_count=expected,
-                type="turn",
-                role="learner",
-                text=text,
-                provider_turn_id=f"topic:{session.id}:{expected}:learner",
-            ),
-        )
-        prompt_index = min(learner.learner_turn_count, len(topic.guided_prompts) - 1)
+        prompt_index = min(session.learner_turn_count + 1, len(topic.guided_prompts) - 1)
         reply = topic.guided_prompts[prompt_index]
-        updated = self.sessions.append_event(
-            owner,
-            session.id,
-            SpeakingEventRequest(
-                expected_event_count=learner.event_count,
-                type="turn",
-                role="agent",
-                text=reply,
-                provider_turn_id=f"topic:{session.id}:{expected}:agent",
-            ),
-        )
+        updated = self.sessions.append_mock_exchange(owner, session.id, expected, text, reply)
         return self._state(updated, topic, "live", reply), reply
 
     def finish(self, owner: str, topic_id: str, session_id: str, expected: int, interrupted: bool):
@@ -224,7 +204,7 @@ class TopicCurriculumService:
         corrections = []
         patterns = (
             ((r"\bi am agree\b", "I agree", "Use ‘agree’ directly without ‘am’."),) if topic.language == "en"
-            else ((r"\bmit das\b", "mit dem", "‘Mit’ takes the dative case."),)
+            else ()
         )
         for turn in turns:
             for pattern, replacement, explanation in patterns:
@@ -250,5 +230,6 @@ class TopicCurriculumService:
                 "Evidence is limited to finalized learner text entered in this mock practice.",
                 "Expression matches do not measure pronunciation, fluency, or CEFR level.",
                 "No Study Bank or Daily Review state was changed.",
+                "Checkpoint term matches are lexical clues only; they do not establish task completion.",
             ],
         )

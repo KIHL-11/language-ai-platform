@@ -121,6 +121,34 @@ class SpeakingSessionStore:
             self._write(sessions)
             return updated
 
+    def append_mock_exchange(self, user_id: str, session_id: str, expected: int, text: str, reply: str) -> SpeakingSession:
+        """Commit a finalized learner turn and deterministic reply together."""
+        with self._lock:
+            sessions = self._read()
+            index, session = self._find(sessions, user_id, session_id)
+            self._check_active(session, expected)
+            if session.provider != "topic-mock":
+                raise ValueError("Mock exchange requires a topic mock session")
+            text, reply = " ".join(text.split()), " ".join(reply.split())
+            if len(session.turns) + 2 > MAX_TURNS:
+                raise ValueError("Speaking transcript turn limit reached")
+            if sum(len(turn.text) for turn in session.turns) + len(text) + len(reply) > MAX_TRANSCRIPT_CHARS:
+                raise ValueError("Speaking transcript character limit reached")
+            sequence = len(session.turns) + 1
+            turns = [*session.turns,
+                SpeakingTurn(sequence=sequence, role="learner", text=text, created_at=self._now()),
+                SpeakingTurn(sequence=sequence + 1, role="agent", text=reply, created_at=self._now()),
+            ]
+            updated = session.model_copy(update={
+                "turns": turns, "event_count": session.event_count + 2,
+                "learner_turn_count": session.learner_turn_count + 1,
+                "agent_turn_count": session.agent_turn_count + 1,
+                "target_usage": record_target_usage(session.target_usage, text, sequence),
+            })
+            sessions[index] = updated
+            self._write(sessions)
+            return updated
+
     @staticmethod
     def _find(sessions, user_id, session_id):
         for index, session in enumerate(sessions):

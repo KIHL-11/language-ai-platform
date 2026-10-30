@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { finishTopicAttempt, listTopics, previewTopic, sendTopicTurn, startTopicAttempt } from '../api/topics'
 import type { LessonLevel, SourceLanguage } from '../types/lesson'
@@ -20,6 +20,18 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const latest = useRef<TopicAttemptState | null>(null)
+  const pending = useRef<Promise<unknown>>(Promise.resolve())
+
+  useEffect(() => () => {
+    void pending.current.catch(() => undefined).then(() => {
+      const current = latest.current
+      if (current?.phase === 'live') {
+        latest.current = null
+        void finishTopicAttempt(current.topic_id, current, learnerId, true).catch(() => undefined)
+      }
+    })
+  }, [learnerId])
 
   useEffect(() => {
     let active = true
@@ -42,7 +54,10 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     if (!preview || !consent) return
     setBusy(true); setError(null)
     try {
-      const value = await startTopicAttempt(preview.topic.topic_id, learnerId, selectedTargets)
+      const request = startTopicAttempt(preview.topic.topic_id, learnerId, selectedTargets)
+      pending.current = request
+      const value = await request
+      latest.current = value
       setState(value); setTranscript([{ role: 'agent', text: value.prompt ?? preview.topic.guided_prompts[0] }])
     } catch (caught) {
       setError((caught as { status?: number }).status === 503
@@ -56,7 +71,10 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     if (!preview || !state || !value) return
     setBusy(true); setError(null)
     try {
-      const result = await sendTopicTurn(preview.topic.topic_id, state, learnerId, value)
+      const request = sendTopicTurn(preview.topic.topic_id, state, learnerId, value)
+      pending.current = request
+      const result = await request
+      latest.current = result.state
       setState(result.state); setTranscript((items) => [...items, { role: 'learner', text: value }, { role: 'agent', text: result.agent_reply }]); setText('')
     } catch { setError('The finalized learner turn was not saved. Please retry.') }
     finally { setBusy(false) }
@@ -66,7 +84,10 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     if (!preview || !state) return
     setBusy(true); setError(null)
     try {
-      const result = await finishTopicAttempt(preview.topic.topic_id, state, learnerId, interrupted)
+      const request = finishTopicAttempt(preview.topic.topic_id, state, learnerId, interrupted)
+      pending.current = request
+      const result = await request
+      latest.current = result.state
       setState(result.state); setFeedback(result.feedback)
     } catch { setError('The attempt ended, but feedback could not be saved.') }
     finally { setBusy(false) }
@@ -75,7 +96,7 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
   if (feedback && preview) return <main className="mx-auto max-w-4xl px-5 py-8">
     <h1 className="text-3xl font-semibold">Topic practice feedback</h1>
     <p className="mt-2">{preview.topic.label} · {feedback.completion === 'interrupted' ? 'Interrupted' : 'Completed'} · {feedback.learner_turn_count} learner turns</p>
-    <section className="mt-6 bg-white p-5"><h2 className="text-xl font-semibold">Task checkpoints</h2><ul className="mt-3 space-y-3">{feedback.checkpoints.map((item) => <li key={item.checkpoint_id}><strong>{item.observed ? 'Observed' : 'Not evidenced'}:</strong> {item.label}{item.evidence && <blockquote className="mt-1 border-l-2 pl-3">“{item.evidence}”</blockquote>}</li>)}</ul></section>
+    <section className="mt-6 bg-white p-5"><h2 className="text-xl font-semibold">Checkpoint lexical clues</h2><p>Term matches are clues, not proof of task completion.</p><ul className="mt-3 space-y-3">{feedback.checkpoints.map((item) => <li key={item.checkpoint_id}><strong>{item.observed ? 'Term observed' : 'No term evidenced'}:</strong> {item.label}{item.evidence && <blockquote className="mt-1 border-l-2 pl-3">“{item.evidence}”</blockquote>}</li>)}</ul></section>
     <section className="mt-5 bg-white p-5"><h2 className="text-xl font-semibold">Expression evidence</h2><ul className="mt-3">{feedback.target_usage.map((target) => <li key={target.study_item_id}>{target.use_count ? '✓ Observed' : '○ Not observed'} — {target.text}{target.evidence[0] && <> — “{target.evidence[0]}”</>}</li>)}</ul></section>
     <section className="mt-5 bg-white p-5"><h2 className="text-xl font-semibold">Grounded corrections</h2>{feedback.corrections.length ? feedback.corrections.map((item, index) => <p key={index}>{item.learner_text} → {item.corrected_text}: {item.short_explanation}</p>) : <p>No deterministic correction was identified.</p>}</section>
     <ul className="mt-5 text-sm text-[#66726e]">{feedback.limitations.map((item) => <li key={item}>{item}</li>)}</ul>

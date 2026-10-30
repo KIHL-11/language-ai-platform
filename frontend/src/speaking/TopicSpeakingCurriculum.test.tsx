@@ -102,7 +102,7 @@ describe('Topic speaking curriculum', () => {
     await user.type(screen.getByLabelText('Your response'), "Let's catch up next time."); await user.click(screen.getByRole('button', { name: 'Send finalized turn' }))
     await user.click(screen.getByRole('button', { name: 'Finish practice' }))
     expect(await screen.findByRole('heading', { name: 'Topic practice feedback' })).toBeInTheDocument()
-    expect(screen.getByText(/Observed:/)).toBeInTheDocument()
+    expect(screen.getByText(/Term observed:/)).toBeInTheDocument()
     expect(screen.getAllByText(/Let's catch up next time/).length).toBeGreaterThan(0)
     expect(screen.getByText(/do not measure pronunciation, fluency, or CEFR/)).toBeInTheDocument()
     expect(document.body.textContent).not.toMatch(/fluency score|CEFR score/i)
@@ -117,6 +117,17 @@ describe('Topic speaking curriculum', () => {
     expect(await screen.findByText(/Interrupted · 1 learner turns/)).toBeInTheDocument()
     const finishBody = JSON.parse(String(fetchMock.mock.calls.find(([url]) => String(url).endsWith('/finish'))?.[1]?.body))
     expect(finishBody.interrupted).toBe(true)
+  })
+
+  it('finishes a live attempt as interrupted on unmount', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<TopicSpeakingCurriculum learnerId="learner" onBack={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: 'Preview Meeting an old friend' }))
+    await user.click(screen.getByRole('checkbox', { name: /ready to start/i }))
+    await user.click(screen.getByRole('button', { name: 'Start mock topic practice' }))
+    await screen.findByLabelText('Your response')
+    unmount()
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, options]) => String(url).endsWith('/finish') && JSON.parse(String(options?.body)).interrupted)).toBe(true))
   })
 
   it('explains the owner-scoped cloud Speaking storage gate', async () => {

@@ -127,7 +127,6 @@ def test_personal_attempt_is_explicit_mock_with_final_evidence_and_no_network(pe
     "topic_id,text,expected",
     [
         ("en-workplace-meeting", "I am agree because the risk is high.", "I agree because the risk is high."),
-        ("de-shared-housing", "Ich spreche mit das Team über den Lärm.", "Ich spreche mit dem Team über den Lärm."),
     ],
 )
 def test_feedback_correction_is_grounded_in_actual_final_turn(personal, topic_id, text, expected):
@@ -144,6 +143,25 @@ def test_feedback_correction_is_grounded_in_actual_final_turn(personal, topic_id
     assert finished["feedback"]["corrections"][0]["corrected_text"] == expected
 
 
+@pytest.mark.parametrize("text", ["mit das Frau", "mit das Kinder", 'Der Titel lautet „mit das“.'])
+def test_german_feedback_does_not_guess_case_corrections(personal, text):
+    from services.topics.service import TopicCurriculumService
+    bank, sessions = personal
+    service = TopicCurriculumService(bank, sessions)
+    state = service.start("learner", "de-shared-housing", [])
+    state, _ = service.turn("learner", "de-shared-housing", state.session_id, 0, text)
+    _, feedback = service.finish("learner", "de-shared-housing", state.session_id, state.event_count, False)
+    assert feedback.corrections == []
+
+
+@pytest.mark.parametrize("language,topic,text", [("en", "en-shopping-return", "I completely disagree"), ("de", "de-shopping-return", "Meiner Meinung nach")])
+def test_unrelated_chunks_are_not_topic_targets(personal, language, topic, text):
+    bank, _ = personal
+    bank.save_items([value(text=text, language=language)])
+    response = client.post(f"/api/topics/{topic}/preview", json={"user_id": "learner"})
+    assert response.json()["target_chunks"] == []
+
+
 def test_interruption_and_stale_or_foreign_attempts_are_safe(personal):
     started = client.post("/api/topics/de-airport-hotel/attempts", json={"user_id": "owner-a", "target_ids": []}).json()
     path = f"/api/topics/de-airport-hotel/attempts/{started['session_id']}"
@@ -152,6 +170,28 @@ def test_interruption_and_stale_or_foreign_attempts_are_safe(personal):
     assert interrupted.status_code == 200
     assert interrupted.json()["feedback"]["completion"] == "interrupted"
     assert client.post(f"{path}/finish", json={"user_id": "owner-a", "expected_event_count": 0, "interrupted": True}).status_code == 409
+
+
+def test_mock_exchange_failure_preserves_both_turns_and_evidence(personal, monkeypatch):
+    bank, sessions = personal
+    target = bank.save_items([value()])[0][0]
+    started = client.post("/api/topics/en-friends-reunion/attempts", json={"user_id": "learner", "target_ids": [target.id]}).json()
+    before = sessions.path.read_bytes()
+    original = sessions._write
+    from services.speaking.store import SpeakingStoreError
+    def fail(_):
+        raise SpeakingStoreError("injected write failure")
+    monkeypatch.setattr(sessions, "_write", fail)
+    path = f"/api/topics/en-friends-reunion/attempts/{started['session_id']}/turns"
+    body = {"user_id": "learner", "expected_event_count": 0, "text": "Let's catch up."}
+    assert client.post(path, json=body).status_code == 500
+    assert sessions.path.read_bytes() == before
+    monkeypatch.setattr(sessions, "_write", original)
+    assert client.post(path, json=body).status_code == 200
+    saved = sessions.get("learner", started["session_id"])
+    assert len(saved.turns) == 2 and saved.target_usage[0].use_count == 1
+    assert client.post(path, json=body).status_code == 409
+    assert sessions.get("learner", started["session_id"]).target_usage[0].use_count == 1
 
 
 def test_inaccessible_or_archived_target_is_non_enumerating(personal):

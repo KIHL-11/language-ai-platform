@@ -15,7 +15,8 @@ Selecting a topic only reads the public catalog. Previewing a topic reads up to
 five active, owner-scoped Study Bank chunks. It does not start a provider,
 request a microphone, or change Study Bank/ReviewState. Topic relevance is a
 deterministic lexical preference followed by the existing Again, Hard, due,
-new, and other-active priority. Fewer or zero targets is valid.
+new, and other-active priority. Only relevance-positive expressions qualify;
+fewer or zero targets is valid.
 
 ## Lifecycle and APIs
 
@@ -45,12 +46,17 @@ interrupted/completed statuses.
 
 Target use is the existing Unicode-normalized exact phrase match over finalized
 learner turns. Checkpoints require deterministic term evidence and retain the
-verbatim learner turn. A very small allow-listed correction set may produce a
+verbatim learner turn. These are lexical clues, not proof of task completion.
+A very small English allow-listed correction set may produce a
 suggestion only when its exact source pattern appears in the learner turn.
 
 The feedback explicitly does **not** measure pronunciation, fluency, or CEFR.
 No attempt rates, archives, restores, or otherwise modifies Study Bank,
 ReviewState, Daily Review, Library, Chunk Memory, or AI Chunk candidates.
+
+Each learner/partner exchange commits under one lock and one atomic JSON write.
+Leaving the workspace best-effort marks the attempt interrupted after pending
+requests settle. Abrupt process termination still cannot guarantee an exit write.
 
 ## Known limitations and next gate
 
