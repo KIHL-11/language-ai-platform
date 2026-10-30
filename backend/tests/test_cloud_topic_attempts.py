@@ -17,6 +17,7 @@ def repository(cloud_candidates):
     dsn,clock,study,library,candidates=cloud_candidates
     _migration(dsn,'0004_owner_scoped_speaking.down.sql')
     _migration(dsn,'0004_owner_scoped_speaking.up.sql')
+    _migration(dsn,'0006_topic_session_json_integrity.up.sql')
     try:
         yield PostgresTopicRepository(dsn,clock), cloud_candidates
     finally:
@@ -61,6 +62,20 @@ def test_versions_and_conflicting_retries(repository):
     with pytest.raises(SpeakingConflictError): repo.start(OWNER_A,'en-friends-reunion',99,[],'start-key-001')
     repo.start(OWNER_A,'en-friends-reunion',1,[],'start-key-001')
     with pytest.raises(SpeakingConflictError): repo.start(OWNER_A,'de-friends-reunion',1,[],'start-key-001')
+
+
+@pytest.mark.parametrize('key',['id','user_id','provider','status','event_count'])
+@pytest.mark.parametrize('operation',['missing','null'])
+def test_direct_sql_cannot_remove_required_session_identity(repository,key,operation):
+    repo,(dsn,*_)=repository
+    sid=repo.start(OWNER_A,'en-friends-reunion',1,[],'start-key-001')['state']['session_id']
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with psycopg.connect(dsn) as connection:
+            if operation=='missing':
+                connection.execute('UPDATE cloud_topic_sessions SET session_json=session_json - %s WHERE owner_user_id=%s AND session_id=%s',(key,OWNER_A,sid))
+            else:
+                connection.execute("UPDATE cloud_topic_sessions SET session_json=jsonb_set(session_json,ARRAY[%s],'null'::jsonb) WHERE owner_user_id=%s AND session_id=%s",(key,OWNER_A,sid))
+    assert repo.get(OWNER_A,'en-friends-reunion',sid)['state']['event_count']==0
 
 
 def test_transaction_failure_rolls_back_exchange(repository):

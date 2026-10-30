@@ -12,6 +12,7 @@ on:
       - codex/p8-04a-topic-speaking-curriculum
       - codex/p8-04b1-owner-scoped-speaking
       - codex/p8-05a-secure-cloud-sessions
+      - codex/p8-05a2-cloud-frontend-session
     paths-ignore:
       - "**/*.md"
   push:
@@ -24,6 +25,7 @@ on:
       - codex/p8-04b1-owner-scoped-speaking
       - codex/p8-05a-secure-cloud-sessions
       - codex/p8-05a2-cloud-frontend-session
+      - codex/p8-feature-complete-integration
   workflow_dispatch:
 
 permissions:
