@@ -6,11 +6,12 @@ import {
   updateStudyItem,
 } from '../api/studyBank'
 import { getStudyPracticeEvidence } from '../api/integration'
-import { getOrCreateLearnerId } from '../session/learnerSession'
+import { getSessionLearnerId } from '../auth/identity'
 import type { SourceLanguage } from '../types/lesson'
 import type { StudyItem, StudyKind } from '../types/studyBank'
 import type { StudyPracticeEvidence } from '../types/integration'
 import AiChunkOrganizer from '../components/AiChunkOrganizer'
+import { cloudAuth } from '../auth/client'
 
 
 function reviewLabel(item: StudyItem): string {
@@ -22,7 +23,7 @@ function reviewLabel(item: StudyItem): string {
 
 
 export default function StudyBankPage() {
-  const [learnerId] = useState(getOrCreateLearnerId)
+  const [learnerId] = useState(getSessionLearnerId)
   const [kind, setKind] = useState<StudyKind>('word')
   const [language, setLanguage] = useState<SourceLanguage | 'all'>('all')
   const [active, setActive] = useState(true)
@@ -44,7 +45,7 @@ export default function StudyBankPage() {
       if (current) {
         setItems(values)
         setError(null)
-        void Promise.all(values.map(async (item) => [item.id, await getStudyPracticeEvidence(learnerId, item.id)] as const))
+        if (cloudAuth.getSnapshot().status === 'personal') void Promise.all(values.map(async (item) => [item.id, await getStudyPracticeEvidence(learnerId, item.id)] as const))
           .then((entries) => { if (current) setEvidence(Object.fromEntries(entries)) })
           .catch(() => { if (current) setEvidence({}) })
       }

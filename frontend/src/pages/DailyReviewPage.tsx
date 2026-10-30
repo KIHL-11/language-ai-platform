@@ -6,7 +6,7 @@ import {
   rateReviewItem,
   ReviewApiError,
 } from '../api/review'
-import { getOrCreateLearnerId } from '../session/learnerSession'
+import { getSessionLearnerId } from '../auth/identity'
 import { formatNextReview } from '../review/formatNextReview'
 import type { SourceLanguage } from '../types/lesson'
 import type { ReviewRating, ReviewSummary } from '../types/review'
@@ -23,7 +23,7 @@ function promptFor(item: StudyItem): string {
 }
 
 export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: SourceLanguage, targetIds: string[]) => void }) {
-  const [learnerId] = useState(getOrCreateLearnerId)
+  const [learnerId] = useState(getSessionLearnerId)
   const [language, setLanguage] = useState<SourceLanguage | 'all'>('all')
   const [kind, setKind] = useState<StudyKind | 'all'>('all')
   const [summary, setSummary] = useState<ReviewSummary | null>(null)

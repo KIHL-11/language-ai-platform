@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import type {
   StudyCandidate,
@@ -102,7 +103,7 @@ export async function listStudyCandidates(
   userId: string,
 ): Promise<StudyCandidate[]> {
   const params = new URLSearchParams({ user_id: userId })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-candidates?${params}`,
   ), 'Loading study candidates failed')
   if (!isRecord(value) || !Array.isArray(value.candidates) || !value.candidates.every(isCandidate)) {
@@ -112,7 +113,7 @@ export async function listStudyCandidates(
 }
 
 export async function saveStudyItems(items: StudyItemInput[]): Promise<StudyItem[]> {
-  const value = await json(await fetch(`${API_BASE_URL}/api/study-bank/items/bulk`, {
+  const value = await json(await apiFetch(`${API_BASE_URL}/api/study-bank/items/bulk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
@@ -142,7 +143,7 @@ export async function getContextualWordStatus(
     sentence_id: String(sentenceId),
     word,
   })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words/status?${params}`,
     { signal },
   ), 'Loading saved-word status failed')
@@ -159,7 +160,7 @@ export async function saveContextualWord(
   sentenceId: number,
   word: string,
 ): Promise<{ item: StudyItem; created: boolean }> {
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words`,
     {
       method: 'POST',
@@ -190,7 +191,7 @@ export async function listStudyItems(filters: StudyListFilters): Promise<StudyIt
   if (filters.language) params.set('language', filters.language)
   if (filters.search?.trim()) params.set('search', filters.search.trim())
   const value = await json(
-    await fetch(`${API_BASE_URL}/api/study-bank/items?${params}`),
+    await apiFetch(`${API_BASE_URL}/api/study-bank/items?${params}`),
     'Loading Words & Chunks failed',
   )
   if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isStudyItem)) {
@@ -205,7 +206,7 @@ export async function updateStudyItem(
   patch: { active?: boolean; meaning?: string; note?: string; expected_revision?: number },
 ): Promise<StudyItem> {
   const params = new URLSearchParams({ user_id: userId })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/study-bank/items/${encodeURIComponent(itemId)}?${params}`,
     {
       method: 'PATCH',
@@ -220,7 +221,7 @@ export async function updateStudyItem(
 export async function deleteStudyItem(userId: string, itemId: string, revision?: number): Promise<void> {
   const params = new URLSearchParams({ user_id: userId })
   if (revision) params.set('expected_revision', String(revision))
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}/api/study-bank/items/${encodeURIComponent(itemId)}?${params}`,
     { method: 'DELETE' },
   )

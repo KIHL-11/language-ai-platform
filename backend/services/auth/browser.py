@@ -18,6 +18,12 @@ router=APIRouter()
 _bootstrap_lock=threading.Lock()
 
 
+@router.get('/deployment')
+def deployment_metadata(response:Response):
+    response.headers['Cache-Control']='no-store'
+    return {'mode':deployment_mode().value}
+
+
 def configure_browser_sessions(app, repository, policy):
     """Trusted bootstrap hook, also used by isolated tests. No HTTP injection."""
     if not isinstance(repository,BrowserSessionRepository) or not isinstance(policy,SessionPolicy):
@@ -67,6 +73,10 @@ class BrowserSessionBoundary(BaseHTTPMiddleware):
                     return JSONResponse({'detail':{'code':'csrf_invalid'}},status_code=403)
                 request.state.browser_principal=principal
             response=await call_next(request)
+            owner=getattr(request.state,'authenticated_user_id',None)
+            if owner is not None:
+                response.headers['X-Authenticated-User']=owner
+                response.headers['Cache-Control']='private, no-store'
             if request.url.path.startswith('/api/account/'):
                 response.headers['Cache-Control']='no-store'
             return response

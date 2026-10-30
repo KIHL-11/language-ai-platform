@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import { createPersonalSession } from '../session/personalSession'
 import type { Lesson, TrainingStage } from '../types/lesson'
@@ -150,7 +151,7 @@ export async function saveLibraryItem(
   lesson: Lesson,
   progress?: LibraryProgress,
 ): Promise<LibraryItem> {
-  const response = await fetch(`${API_BASE_URL}/api/library/items`, {
+  const response = await apiFetch(`${API_BASE_URL}/api/library/items`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ lesson, ...(progress ? { progress } : {}) }),
@@ -162,7 +163,7 @@ export async function saveLibraryItem(
 
 export async function listLibraryItems(): Promise<LibraryItemSummary[]> {
   const value = await jsonResponse(
-    await fetch(`${API_BASE_URL}/api/library/items`),
+    await apiFetch(`${API_BASE_URL}/api/library/items`),
     'Loading My Library failed',
   )
   if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isSummary)) {
@@ -173,7 +174,7 @@ export async function listLibraryItems(): Promise<LibraryItemSummary[]> {
 
 export async function getLibraryItem(itemId: string): Promise<LibraryItem> {
   const value = await jsonResponse(
-    await fetch(`${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}`),
+    await apiFetch(`${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}`),
     'Loading Library Lesson failed',
   )
   if (!isItem(value)) throw new Error('Library Lesson returned an unexpected response.')
@@ -185,7 +186,7 @@ export async function updateLibraryProgress(
   progress: LibraryProgress,
 ): Promise<LibraryItem> {
   const value = await jsonResponse(
-    await fetch(
+    await apiFetch(
       `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/progress`,
       {
         method: 'PATCH',
@@ -204,7 +205,7 @@ export async function updateListeningProgress(
   progress: ListeningProgress,
 ): Promise<LibraryItem> {
   const value = await jsonResponse(
-    await fetch(
+    await apiFetch(
       `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/listening-progress`,
       {
         method: 'PATCH',
@@ -219,7 +220,7 @@ export async function updateListeningProgress(
 }
 
 export async function deleteLibraryItem(itemId: string): Promise<void> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}`,
     { method: 'DELETE' },
   )
@@ -261,7 +262,7 @@ export async function submitShadowingAttempt(
   form.set('client_recording_duration', String(recordingDuration))
   let response: Response
   try {
-    response = await fetch(
+    response = await apiFetch(
       `${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}/shadowing/attempt`,
       { method: 'POST', body: form },
     )
