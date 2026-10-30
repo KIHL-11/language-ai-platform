@@ -8,6 +8,7 @@ from services.schemas.lesson import LessonLevel, SourceLanguage
 
 SpeakingMode = Literal["review_weak", "media", "custom"]
 SpeakingProvider = Literal["gemini-live", "openai-realtime"]
+SpeakingSessionProvider = Literal["gemini-live", "openai-realtime", "topic-mock"]
 SpeakingStatus = Literal["active", "completed", "interrupted", "failed"]
 SpeakingEndReason = Literal["user", "time_limit", "provider", "error", "page_exit"]
 
@@ -109,7 +110,7 @@ class SpeakingSession(SpeakingModel):
     language: SourceLanguage
     level: LessonLevel
     mode: SpeakingMode
-    provider: SpeakingProvider
+    provider: SpeakingSessionProvider
     model: str = Field(min_length=1, max_length=256)
     requested_duration_seconds: Literal[180, 300, 600]
     library_item_id: str | None = Field(default=None, max_length=128)

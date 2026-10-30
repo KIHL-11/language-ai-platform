@@ -13,6 +13,7 @@ import { GeminiProviderError } from '../speaking/geminiLiveProvider'
 import type { SpeakingAgentProvider, SpeakingConnectionStatus, SpeakingTranscriptEvent } from '../speaking/provider'
 import type { LibraryItemSummary } from '../types/library'
 import type { SpeakingContext, SpeakingMode, SpeakingProviderId, SpeakingProviderInfo, SpeakingSession, SpeakingSetup } from '../types/speaking'
+import TopicSpeakingCurriculum from '../speaking/TopicSpeakingCurriculum'
 
 
 export interface SpeakingLaunch {
@@ -68,6 +69,7 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider,
   const [startTextOnly, setStartTextOnly] = useState(false)
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [curriculum, setCurriculum] = useState(false)
   const providerRef = useRef<SpeakingAgentProvider | null>(null)
   const sessionRef = useRef<SpeakingSession | null>(null)
   const queueRef = useRef(Promise.resolve())
@@ -191,6 +193,8 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider,
     void providerRef.current.sendText(value); setText('')
   }
 
+  if (curriculum) return <TopicSpeakingCurriculum learnerId={learnerId} onBack={() => setCurriculum(false)} />
+
   if ((phase === 'review' || phase === 'detail') && session) return <SessionReview learnerId={learnerId} session={session} onBack={() => { sessionRef.current = null; setSession(null); setPhase('setup'); setConnection('idle'); endingRef.current = false }} />
 
   if (phase === 'live' || phase === 'connecting') return <main className="mx-auto max-w-5xl px-5 py-8">
@@ -214,6 +218,7 @@ export default function SpeakingPage({ providerFactory = createSpeakingProvider,
   const chosen = providers.find((provider) => provider.id === providerId)
   return <main className="mx-auto max-w-5xl px-5 py-10">
     <h1 className="text-3xl font-semibold">Speaking</h1><p className="mt-2 text-[#66726e]">Voice-first intelligent conversation with explicit provider control.</p>
+    <button type="button" className="mt-4" onClick={() => setCurriculum(true)}>Browse topic curriculum</button>
     {error && <p role="alert" className="mt-4 text-[#8f1d14]">{error}</p>}
     <section className="mt-7 grid gap-4 bg-white p-6 sm:grid-cols-2">
       <label>Practice mode<select aria-label="Practice mode" value={mode} onChange={(event) => setMode(event.target.value as SpeakingMode)}><option value="review_weak">Review weak expressions</option><option value="media">Discuss saved media</option><option value="custom">Custom scenario</option></select></label>

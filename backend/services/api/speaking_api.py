@@ -70,17 +70,15 @@ def provider_status():
 def speaking_context(
     request: SpeakingContextRequest, identity: IdentityDependency
 ):
-    if request.mode == "media":
-        require_personal_storage(identity)
     user_id = owner_user_id(identity, request.user_id)
+    require_personal_storage(identity)
     return _context(request.model_copy(update={"user_id": user_id}))
 
 
 @router.post("/speaking/sessions", response_model=SpeakingSessionCreateResponse)
 def create_session(request: SpeakingSessionCreate, identity: IdentityDependency):
-    if request.mode == "media":
-        require_personal_storage(identity)
     user_id = owner_user_id(identity, request.user_id)
+    require_personal_storage(identity)
     scoped_request = request.model_copy(update={"user_id": user_id})
     context = _context(SpeakingContextRequest(**scoped_request.model_dump(exclude={"provider", "duration_seconds"})))
     try:
@@ -100,6 +98,7 @@ def recent_sessions(
     limit: Annotated[int, Query(ge=1, le=10)] = 10,
 ):
     user_id = owner_user_id(identity, user_id)
+    require_personal_storage(identity)
     try:
         return SpeakingSessionList(sessions=speaking_store.list_recent(user_id, limit))
     except SpeakingStoreError as exc:
@@ -113,6 +112,7 @@ def get_session(
     identity: IdentityDependency,
 ):
     user_id = owner_user_id(identity, user_id)
+    require_personal_storage(identity)
     try:
         return speaking_store.get(user_id, session_id)
     except KeyError as exc:
@@ -129,6 +129,7 @@ def append_event(
     identity: IdentityDependency,
 ):
     user_id = owner_user_id(identity, user_id)
+    require_personal_storage(identity)
     try:
         return speaking_store.append_event(user_id, session_id, request)
     except KeyError as exc:
@@ -149,6 +150,7 @@ def finish_session(
     identity: IdentityDependency,
 ):
     user_id = owner_user_id(identity, user_id)
+    require_personal_storage(identity)
     try:
         return speaking_store.finish(user_id, session_id, request.expected_event_count, request.status, request.end_reason)
     except KeyError as exc:
@@ -164,12 +166,11 @@ def execute_tool(
     session_id: str, request: ToolRequest, identity: IdentityDependency
 ):
     user_id = owner_user_id(identity, request.user_id)
+    require_personal_storage(identity)
     try:
         session = speaking_store.get(user_id, session_id)
         if session.event_count != request.expected_event_count or session.status != "active":
             raise SpeakingConflictError("Speaking session state is stale")
-        if request.name == "get_media_context":
-            require_personal_storage(identity)
         result = ToolDispatcher(study_bank, library_store).execute(
             request.name, request.arguments, user_id=user_id,
             language=session.language, library_item_id=session.library_item_id,

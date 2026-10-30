@@ -66,6 +66,19 @@ describe('Speaking Page', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('client-token'))).toBe(false)
   })
 
+  it('opens the topic curriculum without connecting a provider', async () => {
+    const factory = vi.fn(() => new FakeProvider())
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => String(url).includes('/api/topics?')
+      ? Promise.resolve(response({ catalog_version: 1, topics: [] }))
+      : routes(url, options))
+    const user = userEvent.setup()
+    render(<SpeakingPage providerFactory={factory} />)
+    await user.click(await screen.findByRole('button', { name: 'Browse topic curriculum' }))
+    expect(await screen.findByRole('heading', { name: 'Topic speaking curriculum' })).toBeInTheDocument()
+    expect(factory).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('client-token'))).toBe(false)
+  })
+
   it('supports modes, language, level, media, target deselection, and explicit start ordering', async () => {
     const user = userEvent.setup()
     const provider = new FakeProvider(); const factory = vi.fn(() => provider)
