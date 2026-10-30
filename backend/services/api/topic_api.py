@@ -13,12 +13,26 @@ from services.schemas.topics import (
 from services.speaking.store import SpeakingConflictError, SpeakingStoreError
 from services.study_bank.owner_repository import OwnerScopedStudyBankRepository
 from services.topics.catalog import CATALOG_VERSION, get_topic, list_topics
+from services.topics.postgres import PostgresTopicRepository
 from services.topics.service import (
     TopicCurriculumService, TopicStorageUnavailable, TopicTargetUnavailable,
 )
 
 
 router = APIRouter()
+
+
+def _cloud_repository(request, identity):
+    repository = getattr(request.app.state, 'cloud_topic_repository', None)
+    if not isinstance(repository, PostgresTopicRepository):
+        require_personal_storage(identity)
+    return repository
+
+
+def _request_key(body):
+    if body.idempotency_key is None:
+        raise HTTPException(status_code=422, detail='Cloud topic writes require an idempotency key')
+    return body.idempotency_key
 
 
 def _controlled(operation):
@@ -100,6 +114,10 @@ def start_topic_attempt(
     http_request: Request,
 ):
     owner = owner_user_id(identity, body.user_id)
+    if identity.mode is DeploymentMode.CLOUD:
+        repository = _cloud_repository(http_request, identity)
+        result = _controlled(lambda: repository.start(owner,topic_id,body.topic_version,body.target_ids,_request_key(body)))
+        return result['state']
     service = _service(http_request, identity, attempt=True)
     return _controlled(lambda: service.start(owner, topic_id, body.target_ids))
 
@@ -116,6 +134,10 @@ def topic_attempt_turn(
     http_request: Request,
 ):
     owner = owner_user_id(identity, body.user_id)
+    if identity.mode is DeploymentMode.CLOUD:
+        repository = _cloud_repository(http_request, identity)
+        result = _controlled(lambda: repository.mutate(owner,topic_id,session_id,body.topic_version,body.expected_event_count,_request_key(body),text=body.text))
+        return TopicAttemptTurnResponse(state=result['state'], agent_reply=result['turns'][-1]['text'])
     service = _service(http_request, identity, attempt=True)
     state, reply = _controlled(
         lambda: service.turn(owner, topic_id, session_id, body.expected_event_count, body.text)
@@ -135,6 +157,10 @@ def finish_topic_attempt(
     http_request: Request,
 ):
     owner = owner_user_id(identity, body.user_id)
+    if identity.mode is DeploymentMode.CLOUD:
+        repository = _cloud_repository(http_request, identity)
+        result = _controlled(lambda: repository.mutate(owner,topic_id,session_id,body.topic_version,body.expected_event_count,_request_key(body),finish=True,interrupted=body.interrupted))
+        return TopicAttemptFinishResponse(state=result['state'],feedback=result['feedback'])
     service = _service(http_request, identity, attempt=True)
     state, feedback = _controlled(
         lambda: service.finish(
@@ -142,3 +168,21 @@ def finish_topic_attempt(
         )
     )
     return TopicAttemptFinishResponse(state=state, feedback=feedback)
+
+
+@router.get('/topics/{topic_id}/attempts')
+def list_topic_attempts(topic_id: str, user_id: str, identity: IdentityDependency, http_request: Request):
+    owner = owner_user_id(identity,user_id)
+    if identity.mode is not DeploymentMode.CLOUD:
+        return {'session_ids': []}
+    repository = _cloud_repository(http_request,identity)
+    return {'session_ids': _controlled(lambda: repository.list(owner,topic_id))}
+
+
+@router.get('/topics/{topic_id}/attempts/{session_id}')
+def get_topic_attempt(topic_id: str, session_id: str, user_id: str, identity: IdentityDependency, http_request: Request):
+    owner = owner_user_id(identity,user_id)
+    if identity.mode is not DeploymentMode.CLOUD:
+        raise HTTPException(status_code=404, detail='Topic resource not found')
+    repository = _cloud_repository(http_request,identity)
+    return _controlled(lambda: repository.get(owner,topic_id,session_id))

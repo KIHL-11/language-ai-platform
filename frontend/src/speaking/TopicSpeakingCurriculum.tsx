@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { finishTopicAttempt, listTopics, previewTopic, sendTopicTurn, startTopicAttempt } from '../api/topics'
+import { finishTopicAttempt, listTopics, previewTopic, sendTopicTurn, startTopicAttempt, listTopicAttempts, getTopicAttempt } from '../api/topics'
 import type { LessonLevel, SourceLanguage } from '../types/lesson'
 import type { SpeakingTopic, TopicAttemptState, TopicFeedback, TopicPreview } from '../types/topics'
 
@@ -22,6 +22,8 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
   const [error, setError] = useState<string | null>(null)
   const latest = useRef<TopicAttemptState | null>(null)
   const pending = useRef<Promise<unknown>>(Promise.resolve())
+  const startKey = useRef(crypto.randomUUID())
+  const [savedAttempts, setSavedAttempts] = useState<string[]>([])
 
   useEffect(() => () => {
     void pending.current.catch(() => undefined).then(() => {
@@ -46,6 +48,8 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     try {
       const value = await previewTopic(topic.topic_id, learnerId)
       setPreview(value); setSelectedTargets(value.target_chunks.map((target) => target.study_item_id)); setConsent(false)
+      startKey.current = crypto.randomUUID()
+      setSavedAttempts(await listTopicAttempts(topic.topic_id,learnerId).catch(() => []))
     } catch { setError('The topic preview or your saved expressions could not be loaded.') }
     finally { setBusy(false) }
   }
@@ -54,7 +58,7 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     if (!preview || !consent) return
     setBusy(true); setError(null)
     try {
-      const request = startTopicAttempt(preview.topic.topic_id, learnerId, selectedTargets)
+      const request = startTopicAttempt(preview.topic.topic_id, learnerId, selectedTargets, startKey.current, preview.topic.version)
       pending.current = request
       const value = await request
       latest.current = value
@@ -76,7 +80,7 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
       const result = await request
       latest.current = result.state
       setState(result.state); setTranscript((items) => [...items, { role: 'learner', text: value }, { role: 'agent', text: result.agent_reply }]); setText('')
-    } catch { setError('The finalized learner turn was not saved. Please retry.') }
+    } catch { setError('The turn outcome could not be confirmed. Reload the saved attempt before continuing.') }
     finally { setBusy(false) }
   }
 
@@ -89,7 +93,17 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
       const result = await request
       latest.current = result.state
       setState(result.state); setFeedback(result.feedback)
-    } catch { setError('The attempt ended, but feedback could not be saved.') }
+    } catch { setError('The finish outcome could not be confirmed. Reload the saved attempt.') }
+    finally { setBusy(false) }
+  }
+
+  async function resume(sessionId: string) {
+    if (!preview) return
+    setBusy(true); setError(null)
+    try {
+      const saved = await getTopicAttempt(preview.topic.topic_id,sessionId,learnerId)
+      latest.current=saved.state; setState(saved.state); setTranscript(saved.turns); setFeedback(saved.feedback)
+    } catch { setError('The saved attempt could not be loaded.') }
     finally { setBusy(false) }
   }
 
@@ -109,7 +123,7 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     <section aria-label="Mock conversation" className="mt-6 space-y-3 bg-white p-5">{transcript.map((turn, index) => <p key={index}><strong>{turn.role === 'learner' ? 'You' : 'Partner'}:</strong> {turn.text}</p>)}</section>
     <label className="mt-5 block" htmlFor="topic-response">Your response</label><textarea id="topic-response" value={text} onChange={(event) => setText(event.target.value)} maxLength={2000} rows={4} className="w-full border p-3" />
     <div className="mt-3 flex flex-wrap gap-3"><button type="button" disabled={busy || !text.trim()} onClick={() => void send()}>Send finalized turn</button><button type="button" disabled={busy} onClick={() => void finish(false)}>Finish practice</button><button type="button" disabled={busy} onClick={() => void finish(true)}>Interrupt practice</button></div>
-    {error && <p role="alert" className="mt-3 text-[#8f1d14]">{error}</p>}
+    {error && <div><p role="alert" className="mt-3 text-[#8f1d14]">{error}</p><button type="button" disabled={busy} onClick={() => void resume(state.session_id)}>Reload saved attempt</button></div>}
   </main>
 
   return <main className="mx-auto max-w-5xl px-5 py-8">
@@ -118,6 +132,7 @@ export default function TopicSpeakingCurriculum({ learnerId, onBack }: Props) {
     <p className="mt-2 text-[#66726e]">Choose a reviewed scenario. B1/B2/C1 labels describe presentation difficulty; they are not assessments.</p>
     <div className="mt-6 flex gap-4"><label>Language<select aria-label="Topic language" value={language} onChange={(event) => { setLanguage(event.target.value as SourceLanguage); setTopics([]); setPreview(null); setConsent(false); setError(null) }}><option value="en">English</option><option value="de">German</option></select></label><label>Level<select aria-label="Topic level" value={level} onChange={(event) => { setLevel(event.target.value as LessonLevel); setTopics([]); setPreview(null); setConsent(false); setError(null) }}><option>B1</option><option>B2</option><option>C1</option></select></label></div>
     {error && <p role="alert" className="mt-4 text-[#8f1d14]">{error}</p>}
+    {preview && savedAttempts.length > 0 && <section aria-label="Saved topic attempts"><h2>Saved attempts</h2>{savedAttempts.map((id) => <button key={id} type="button" disabled={busy} onClick={() => void resume(id)}>Resume or view {id.slice(0,8)}</button>)}</section>}
     {!preview ? <section aria-label="Available topics" className="mt-6 grid gap-4 md:grid-cols-2">{topics.map((topic) => <article key={topic.topic_id} className="bg-white p-5"><p className="text-sm">{topic.language.toUpperCase()} · {topic.level}</p><h2 className="mt-1 text-xl font-semibold">{topic.label}</h2><p className="mt-2">{topic.scenario}</p><button type="button" disabled={busy} className="mt-4" onClick={() => void choose(topic)}>Preview {topic.label}</button></article>)}</section> : <section className="mt-6 bg-white p-6"><button type="button" onClick={() => { setPreview(null); setConsent(false) }}>← Topics</button><h2 className="mt-3 text-2xl font-semibold">{preview.topic.label}</h2><p className="mt-2"><strong>Goal:</strong> {preview.topic.goal}</p><p className="mt-2"><strong>Your role:</strong> {preview.topic.learner_role}</p><p><strong>Partner:</strong> {preview.topic.partner_role}</p><h3 className="mt-4 font-semibold">Task checkpoints</h3><ul>{preview.topic.success_criteria.map((item) => <li key={item.id}>{item.label}</li>)}</ul><h3 className="mt-4 font-semibold">Your active saved chunks</h3>{preview.target_chunks.length ? <ul>{preview.target_chunks.map((target) => <li key={target.study_item_id}><label><input type="checkbox" checked={selectedTargets.includes(target.study_item_id)} onChange={() => setSelectedTargets((items) => items.includes(target.study_item_id) ? items.filter((id) => id !== target.study_item_id) : [...items, target.study_item_id])} /> {target.text}</label></li>)}</ul> : <p>No active saved chunks match this preview. Practice can continue without targets.</p>}<p className="mt-4 text-sm">{preview.evidence_notice}</p><label className="mt-4 block"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /> I am ready to start this local mock practice.</label><button type="button" disabled={busy || !consent} className="mt-4" onClick={() => void start()}>Start mock topic practice</button></section>}
   </main>
 }
