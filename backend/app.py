@@ -38,6 +38,8 @@ MEDIA = BASE / "media"
 FRONTEND_DIST = BASE.parent / "frontend" / "dist"
 MEDIA.mkdir(exist_ok=True)
 app = FastAPI(title="英语听说训练器")
+from services.auth.browser import BrowserSessionBoundary, router as account_router
+app.include_router(account_router,prefix='/api')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -47,6 +49,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+app.add_middleware(BrowserSessionBoundary)
 from services.api.lesson_api import router as lesson_router
 from services.api.chunk_api import router as chunk_router
 from services.api.realtime_api import router as realtime_router

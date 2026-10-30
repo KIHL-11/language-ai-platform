@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Annotated, Protocol, runtime_checkable
 
 from fastapi import Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 
 class DeploymentMode(str, Enum):
@@ -103,7 +104,7 @@ async def get_request_identity(
             },
         )
     try:
-        principal = verifier(request)
+        principal = await run_in_threadpool(verifier,request)
         if inspect.isawaitable(principal):
             principal = await principal
     except InvalidAuthentication as exc:
