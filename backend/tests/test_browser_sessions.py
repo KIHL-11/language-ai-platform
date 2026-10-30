@@ -116,6 +116,20 @@ def test_real_session_tenant_routes(sessions):
     assert b.get(f'/api/topics/en-friends-reunion/attempts/{sid}',params={'user_id':OWNER_B}).status_code==404
 
 
+def test_deployment_metadata_and_private_response_identity_binding(sessions):
+    repo,*_=sessions
+    client,token=browser(repo,OWNER_A)
+    config=client.get('/api/deployment')
+    assert config.json()=={'mode':'cloud'}
+    assert config.headers['cache-control']=='no-store'
+    assert client.get('/api/library/items').headers['x-authenticated-user']==OWNER_A
+    token_b=repo.issue_for_verified_account(OWNER_B)
+    client.cookies.set(COOKIE_NAME,token_b,domain='learn.example',path='/')
+    response=client.get('/api/library/items')
+    assert response.status_code==200
+    assert response.headers['x-authenticated-user']==OWNER_B
+
+
 def test_concurrent_rotation_and_cloud_cors(sessions):
     from concurrent.futures import ThreadPoolExecutor
     repo,*_=sessions

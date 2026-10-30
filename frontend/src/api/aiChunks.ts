@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import type { SourceLanguage } from '../types/lesson'
 import type { AiChunkBatch, CandidateDecisionResult, CandidateEdit } from '../types/aiChunks'
@@ -16,7 +17,7 @@ export async function generateChunkSuggestions(
   language: SourceLanguage,
   text: string,
 ): Promise<AiChunkBatch> {
-  return responseJson<AiChunkBatch>(await fetch(`${API_BASE_URL}/api/ai/chunk-suggestions`, {
+  return responseJson<AiChunkBatch>(await apiFetch(`${API_BASE_URL}/api/ai/chunk-suggestions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -37,7 +38,7 @@ export async function decideChunkSuggestion(
   action: 'accept' | 'edit_and_accept' | 'reject',
   edit?: CandidateEdit,
 ): Promise<CandidateDecisionResult> {
-  return responseJson<CandidateDecisionResult>(await fetch(
+  return responseJson<CandidateDecisionResult>(await apiFetch(
     `${API_BASE_URL}/api/ai/chunk-suggestions/${encodeURIComponent(batchId)}/decisions`,
     {
       method: 'POST',

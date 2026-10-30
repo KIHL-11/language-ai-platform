@@ -125,6 +125,7 @@ async def get_request_identity(
             status_code=401,
             detail={"code": "authentication_required", "message": "Authentication is required."},
         )
+    request.state.authenticated_user_id = principal.user_id
     return RequestIdentity(mode=mode, principal=principal)
 
 

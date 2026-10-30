@@ -11,6 +11,7 @@ on:
       - codex/p8-03b2-durable-ai-chunk-candidates
       - codex/p8-04a-topic-speaking-curriculum
       - codex/p8-04b1-owner-scoped-speaking
+      - codex/p8-05a-secure-cloud-sessions
     paths-ignore:
       - "**/*.md"
   push:
@@ -22,6 +23,7 @@ on:
       - codex/p8-04a-topic-speaking-curriculum
       - codex/p8-04b1-owner-scoped-speaking
       - codex/p8-05a-secure-cloud-sessions
+      - codex/p8-05a2-cloud-frontend-session
   workflow_dispatch:
 
 permissions:
