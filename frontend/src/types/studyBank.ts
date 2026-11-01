@@ -43,7 +43,15 @@ export interface SpeakingStudyProvenance {
   evidence_text: string | null
 }
 
-export type StudyProvenance = MediaStudyProvenance | SpeakingStudyProvenance
+export interface AiTextStudyProvenance {
+  source_type: 'ai_text'
+  source_label: string
+  source_text: string
+  evidence_start: number
+  evidence_end: number
+}
+
+export type StudyProvenance = MediaStudyProvenance | SpeakingStudyProvenance | AiTextStudyProvenance
 
 export interface StudyItemInput {
   user_id: string
@@ -67,6 +75,7 @@ export interface StudyItem extends StudyItemInput {
   created_at: string
   updated_at: string
   review: ReviewState
+  revision?: number
 }
 
 export interface StudyCandidate {

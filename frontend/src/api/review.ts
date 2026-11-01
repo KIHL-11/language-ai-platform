@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import { isStudyItem } from './studyBank'
 import type { ReviewFilters, ReviewRating, ReviewRatingResult, ReviewSummary } from '../types/review'
@@ -35,7 +36,7 @@ function params(filters: ReviewFilters): URLSearchParams {
 
 export async function getReviewSummary(filters: Omit<ReviewFilters, 'kind'>): Promise<ReviewSummary> {
   const value = await responseJson(
-    await fetch(`${API_BASE_URL}/api/review/summary?${params(filters)}`),
+    await apiFetch(`${API_BASE_URL}/api/review/summary?${params(filters)}`),
     'Loading Daily Review summary failed',
   )
   if (!isRecord(value) || !['due_words', 'due_chunks', 'new_words', 'new_chunks', 'active_words', 'active_chunks']
@@ -47,7 +48,7 @@ export async function getReviewSummary(filters: Omit<ReviewFilters, 'kind'>): Pr
 
 export async function getReviewQueue(filters: ReviewFilters): Promise<StudyItem[]> {
   const value = await responseJson(
-    await fetch(`${API_BASE_URL}/api/review/queue?${params(filters)}`),
+    await apiFetch(`${API_BASE_URL}/api/review/queue?${params(filters)}`),
     'Loading Daily Review queue failed',
   )
   if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isStudyItem)) {
@@ -62,7 +63,7 @@ export async function rateReviewItem(
   rating: ReviewRating,
   expectedReviewCount: number,
 ): Promise<ReviewRatingResult> {
-  const value = await responseJson(await fetch(
+  const value = await responseJson(await apiFetch(
     `${API_BASE_URL}/api/review/items/${encodeURIComponent(itemId)}/rate`,
     {
       method: 'POST',

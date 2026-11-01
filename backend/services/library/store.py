@@ -149,6 +149,51 @@ def source_key_for_lesson(lesson: Lesson) -> str:
     )
 
 
+def summary_for_item(item: LibraryItem) -> LibraryItemSummary:
+    """Build the stable lightweight summary shared by local and cloud stores."""
+
+    progress = item.progress
+    complete = len(progress.completed_stages) == len(progress.training_order)
+    started = (
+        progress.is_training
+        or progress.stage_index > 0
+        or progress.sentence_index > 0
+        or bool(progress.completed_stages)
+    )
+    status = "complete" if complete else "in_progress" if started else "not_started"
+    duration = max((sentence.end for sentence in item.lesson.sentences), default=0.0)
+    return LibraryItemSummary(
+        id=item.id,
+        lesson_id=item.lesson.id,
+        title=item.lesson.title,
+        source_url=item.lesson.source_url,
+        source_language=item.lesson.source_language,
+        target_language=item.lesson.target_language,
+        level=item.lesson.level,
+        source=item.lesson.source,
+        sentence_count=len(item.lesson.sentences),
+        duration_seconds=duration or None,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        progress_status=status,
+        audio_available=item.persistent_audio.status == "available",
+        last_position_seconds=item.listening_progress.last_position_seconds,
+        has_listening_progress=item.listening_progress.last_position_seconds > 0,
+        shadowing_attempt_count=sum(
+            value.attempt_count for value in item.shadowing_progress.sentences.values()
+        ),
+        shadowing_target_sentence_count=sum(
+            value.target_hit_count > 0
+            for value in item.shadowing_progress.sentences.values()
+        ),
+        shadowing_stable_sentence_count=sum(
+            value.consecutive_target_hits >= 3
+            for value in item.shadowing_progress.sentences.values()
+        ),
+        shadowing_last_practiced_at=item.shadowing_progress.last_practiced_at,
+    )
+
+
 class LearningLibraryStore:
     def __init__(
         self,
@@ -173,7 +218,7 @@ class LearningLibraryStore:
             return sorted(items, key=lambda item: item.updated_at, reverse=True)
 
     def list_summaries(self) -> list[LibraryItemSummary]:
-        return [self._summary(item) for item in self.list_items()]
+        return [summary_for_item(item) for item in self.list_items()]
 
     def get_item(self, item_id: str) -> LibraryItem:
         with self._lock:
@@ -591,41 +636,4 @@ class LearningLibraryStore:
 
     @staticmethod
     def _summary(item: LibraryItem) -> LibraryItemSummary:
-        progress = item.progress
-        complete = len(progress.completed_stages) == len(progress.training_order)
-        started = (
-            progress.is_training
-            or progress.stage_index > 0
-            or progress.sentence_index > 0
-            or bool(progress.completed_stages)
-        )
-        status = "complete" if complete else "in_progress" if started else "not_started"
-        duration = max((sentence.end for sentence in item.lesson.sentences), default=0.0)
-        return LibraryItemSummary(
-            id=item.id,
-            lesson_id=item.lesson.id,
-            title=item.lesson.title,
-            source_url=item.lesson.source_url,
-            source_language=item.lesson.source_language,
-            target_language=item.lesson.target_language,
-            level=item.lesson.level,
-            source=item.lesson.source,
-            sentence_count=len(item.lesson.sentences),
-            duration_seconds=duration or None,
-            created_at=item.created_at,
-            updated_at=item.updated_at,
-            progress_status=status,
-            audio_available=item.persistent_audio.status == "available",
-            last_position_seconds=item.listening_progress.last_position_seconds,
-            has_listening_progress=item.listening_progress.last_position_seconds > 0,
-            shadowing_attempt_count=sum(
-                value.attempt_count for value in item.shadowing_progress.sentences.values()
-            ),
-            shadowing_target_sentence_count=sum(
-                value.target_hit_count > 0 for value in item.shadowing_progress.sentences.values()
-            ),
-            shadowing_stable_sentence_count=sum(
-                value.consecutive_target_hits >= 3 for value in item.shadowing_progress.sentences.values()
-            ),
-            shadowing_last_practiced_at=item.shadowing_progress.last_practiced_at,
-        )
+        return summary_for_item(item)

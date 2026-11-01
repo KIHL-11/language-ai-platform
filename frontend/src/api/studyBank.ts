@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import type {
   StudyCandidate,
@@ -14,6 +15,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isProvenance(value: unknown): boolean {
   if (!isRecord(value)) return false
+  if (value.source_type === 'ai_text') {
+    return typeof value.source_label === 'string' && typeof value.source_text === 'string' &&
+      Number.isInteger(value.evidence_start) && Number(value.evidence_start) >= 0 &&
+      Number.isInteger(value.evidence_end) && Number(value.evidence_end) > Number(value.evidence_start) &&
+      Number(value.evidence_end) <= value.source_text.length
+  }
   if (value.source_type === 'speaking') {
     return typeof value.speaking_session_id === 'string' &&
       Number.isInteger(value.suggestion_index) && Number(value.suggestion_index) >= 0 &&
@@ -63,6 +70,7 @@ export function isStudyItem(value: unknown): value is StudyItem {
     isNullableString(value.example) && isNullableString(value.usage) &&
     isNullableString(value.note) &&
     Array.isArray(value.provenance) && value.provenance.every(isProvenance) &&
+    (value.revision === undefined || (Number.isInteger(value.revision) && Number(value.revision) >= 1)) &&
     isReviewState(value.review)
 }
 
@@ -95,7 +103,7 @@ export async function listStudyCandidates(
   userId: string,
 ): Promise<StudyCandidate[]> {
   const params = new URLSearchParams({ user_id: userId })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-candidates?${params}`,
   ), 'Loading study candidates failed')
   if (!isRecord(value) || !Array.isArray(value.candidates) || !value.candidates.every(isCandidate)) {
@@ -105,7 +113,7 @@ export async function listStudyCandidates(
 }
 
 export async function saveStudyItems(items: StudyItemInput[]): Promise<StudyItem[]> {
-  const value = await json(await fetch(`${API_BASE_URL}/api/study-bank/items/bulk`, {
+  const value = await json(await apiFetch(`${API_BASE_URL}/api/study-bank/items/bulk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items }),
@@ -135,7 +143,7 @@ export async function getContextualWordStatus(
     sentence_id: String(sentenceId),
     word,
   })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words/status?${params}`,
     { signal },
   ), 'Loading saved-word status failed')
@@ -152,7 +160,7 @@ export async function saveContextualWord(
   sentenceId: number,
   word: string,
 ): Promise<{ item: StudyItem; created: boolean }> {
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/library/items/${encodeURIComponent(libraryItemId)}/study-bank/words`,
     {
       method: 'POST',
@@ -183,7 +191,7 @@ export async function listStudyItems(filters: StudyListFilters): Promise<StudyIt
   if (filters.language) params.set('language', filters.language)
   if (filters.search?.trim()) params.set('search', filters.search.trim())
   const value = await json(
-    await fetch(`${API_BASE_URL}/api/study-bank/items?${params}`),
+    await apiFetch(`${API_BASE_URL}/api/study-bank/items?${params}`),
     'Loading Words & Chunks failed',
   )
   if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isStudyItem)) {
@@ -195,10 +203,10 @@ export async function listStudyItems(filters: StudyListFilters): Promise<StudyIt
 export async function updateStudyItem(
   userId: string,
   itemId: string,
-  patch: { active?: boolean; meaning?: string; note?: string },
+  patch: { active?: boolean; meaning?: string; note?: string; expected_revision?: number },
 ): Promise<StudyItem> {
   const params = new URLSearchParams({ user_id: userId })
-  const value = await json(await fetch(
+  const value = await json(await apiFetch(
     `${API_BASE_URL}/api/study-bank/items/${encodeURIComponent(itemId)}?${params}`,
     {
       method: 'PATCH',
@@ -210,9 +218,10 @@ export async function updateStudyItem(
   return value
 }
 
-export async function deleteStudyItem(userId: string, itemId: string): Promise<void> {
+export async function deleteStudyItem(userId: string, itemId: string, revision?: number): Promise<void> {
   const params = new URLSearchParams({ user_id: userId })
-  const response = await fetch(
+  if (revision) params.set('expected_revision', String(revision))
+  const response = await apiFetch(
     `${API_BASE_URL}/api/study-bank/items/${encodeURIComponent(itemId)}?${params}`,
     { method: 'DELETE' },
   )

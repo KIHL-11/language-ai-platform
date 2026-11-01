@@ -102,10 +102,28 @@ class SpeakingStudyProvenance(StudyModel):
     evidence_text: str | None = Field(default=None, max_length=2_000)
 
 
+class AiTextStudyProvenance(StudyModel):
+    """Immutable evidence snapshot for an explicitly submitted text passage."""
+
+    source_type: Literal["ai_text"] = "ai_text"
+    source_label: str = Field(default="Manual learning text", min_length=1, max_length=200)
+    source_text: str = Field(min_length=1, max_length=6_000)
+    evidence_start: int = Field(ge=0)
+    evidence_end: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_evidence_range(self):
+        if self.evidence_end <= self.evidence_start:
+            raise ValueError("AI text evidence end must be after start")
+        if self.evidence_end > len(self.source_text):
+            raise ValueError("AI text evidence range exceeds source text")
+        return self
+
+
 # Backward-compatible name used by media curation call sites and fixtures.
 StudyProvenance = MediaStudyProvenance
 StudyProvenanceRecord = Annotated[
-    MediaStudyProvenance | SpeakingStudyProvenance,
+    MediaStudyProvenance | SpeakingStudyProvenance | AiTextStudyProvenance,
     Field(discriminator="source_type"),
 ]
 
@@ -144,6 +162,7 @@ class StudyItem(StudyModel):
     usage: str | None = Field(default=None, max_length=2_000)
     note: str | None = Field(default=None, max_length=2_000)
     review: ReviewState
+    revision: int = Field(default=1, ge=1)
 
     @field_validator("created_at", "updated_at", mode="after")
     @classmethod
@@ -222,6 +241,7 @@ class StudyItemPatch(StudyModel):
     active: bool | None = None
     meaning: str | None = Field(default=None, max_length=1_000)
     note: str | None = Field(default=None, max_length=2_000)
+    expected_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def require_update(self):

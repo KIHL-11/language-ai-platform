@@ -21,7 +21,7 @@ export interface SpeakingContext {
 }
 export interface SpeakingSession {
   id: string; user_id: string; language: SourceLanguage; level: LessonLevel; mode: SpeakingMode
-  provider: SpeakingProviderId; model: string; requested_duration_seconds: 180 | 300 | 600
+  provider: SpeakingProviderId | 'topic-mock'; model: string; requested_duration_seconds: 180 | 300 | 600
   library_item_id: string | null; media_title_snapshot: string | null; goal: string | null
   started_at: string; ended_at: string | null; status: SpeakingStatus; event_count: number
   target_chunks: SpeakingTarget[]; support_words: SpeakingWord[]; learner_turn_count: number; agent_turn_count: number
