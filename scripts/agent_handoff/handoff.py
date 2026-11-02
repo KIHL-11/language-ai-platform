@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Cross-agent handoff tool: snapshot, verify and sot-check.
 
+    python3 scripts/agent_handoff/handoff.py lease acquire --agent codex
     python3 scripts/agent_handoff/handoff.py snapshot --agent codex --notes notes.json
-    python3 scripts/agent_handoff/handoff.py verify docs/handoffs/<record>.md
-    python3 scripts/agent_handoff/handoff.py sot-check
+    python3 scripts/agent_handoff/handoff.py verify docs/handoffs/<record>.md --agent claude --verify-ci
+    python3 scripts/agent_handoff/handoff.py sot-check --issue 75
 
 Exit codes: 0 = PASS, 1 = WARN (drift to review), 2 = BLOCK (do not continue).
 
@@ -23,9 +24,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+# Never leave __pycache__ in the worktree being inspected: it would make the
+# tree look dirty and turn a delivered handoff into "not pushed".
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ghread  # noqa: E402
 import gitinfo  # noqa: E402
+import lease  # noqa: E402
 import record as rec  # noqa: E402
 
 OK, INFO, WARN, BLOCK = "OK", "INFO", "WARN", "BLOCK"
@@ -38,7 +44,13 @@ EVIDENCE_REQUIRED_STATUSES = {"completed", "complete", "done", "implemented"}
 KNOWN_TRACKER_STATUSES = EVIDENCE_REQUIRED_STATUSES | {
     "pending", "in progress", "blocked", "in review", "deferred",
 }
-EVIDENCE_RE = re.compile(r"https?://\S+|#\d+|\b[0-9a-f]{7,40}\b")
+# Completed rows need something checkable: a CI run, PR or commit link, or a commit SHA.
+# A bare "#123" is not enough (it usually names the task issue itself).
+EVIDENCE_RE = re.compile(
+    r"https://github\.com/[\w.-]+/[\w.-]+/(?:actions/runs/\d+|pull/\d+|commit/[0-9a-f]{7,40})"
+    r"|\b[0-9a-f]{7,40}\b"
+)
+TOOL_PATH = "scripts/agent_handoff"
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]")
 
 
@@ -127,6 +139,10 @@ def build_snapshot(repo: str, agent: str, notes: dict[str, Any], remote: str = "
         raise ValueError("branch name is not acceptable for a handoff record")
     if not rec.REMOTE_RE.match(remote) or remote not in gitinfo.remotes(repo):
         raise ValueError(f"remote '{clean(remote)}' is not configured")
+    holder = lease.read(repo)
+    if holder is not None and holder.get("agent") != agent:
+        raise ValueError(f"worktree is leased by '{clean(holder.get('agent'))}'; "
+                         "only the lease holder may write a handoff from it")
 
     head = gitinfo.head_sha(repo)
     dirty = gitinfo.porcelain_paths(repo)
@@ -159,6 +175,8 @@ def build_snapshot(repo: str, agent: str, notes: dict[str, Any], remote: str = "
         raise ValueError("record would be invalid:\n  " + "\n  ".join(errors))
 
     warnings: list[str] = []
+    if holder is None:
+        warnings.append("no worktree lease is held; run `lease acquire` when you start writing")
     if dirty:
         warnings.append(f"{len(dirty)} uncommitted path(s) recorded as NOT delivered")
     if not remote_has_head:
@@ -215,9 +233,13 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         return 2
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
-    print(f"Handoff written: {target.relative_to(top).as_posix()}")
-    print("Commit and push it to the task branch, then the next agent runs:")
-    print(f"  python3 scripts/agent_handoff/handoff.py verify {target.relative_to(top).as_posix()}")
+    rel = target.relative_to(top).as_posix()
+    print(f"Handoff written: {rel}")
+    print("Next: commit and push it, then release the lease:")
+    print(f"  git add {rel} && git commit -m 'handoff: {data['agent']}' && git push")
+    print(f"  python3 scripts/agent_handoff/handoff.py lease release --agent {data['agent']}")
+    print("The next agent, in its own worktree, runs:")
+    print(f"  python3 scripts/agent_handoff/handoff.py verify {rel} --agent <name> --verify-ci")
     return 0
 
 
@@ -225,9 +247,13 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def verify_record(repo: str, record_path: str, offline: bool = False, max_age_days: int = 7,
-                  now: datetime | None = None) -> tuple[Report, dict | None]:
+                  now: datetime | None = None, agent: str | None = None, verify_ci: bool = False,
+                  fetch: ghread.Fetcher = ghread.gh_get) -> tuple[Report, dict | None]:
     report = Report()
-    path = Path(record_path).resolve()
+    path = Path(record_path)
+    if not path.is_absolute():
+        path = Path(repo) / path  # relative record paths are relative to --repo, not the shell cwd
+    path = path.resolve()
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -253,7 +279,15 @@ def verify_record(repo: str, record_path: str, offline: bool = False, max_age_da
     # Receiver workspace.
     branch = gitinfo.current_branch(repo)
     head = gitinfo.head_sha(repo)
-    dirty = [p for p in gitinfo.porcelain_paths(repo) if p != record_rel]
+    porcelain = gitinfo.porcelain_paths(repo)
+    if record_rel is not None and record_rel in porcelain:
+        if gitinfo.is_tracked(repo, record_rel):
+            report.add(BLOCK, "RECORD_MODIFIED",
+                       "the record differs from its committed version; verify the committed record only")
+        else:
+            report.add(WARN, "RECORD_UNCOMMITTED",
+                       "the record itself is not committed, so the next agent cannot receive it yet")
+    dirty = [p for p in porcelain if p != record_rel]
     if dirty:
         report.add(BLOCK, "RECEIVER_DIRTY",
                    f"this worktree has {len(dirty)} uncommitted path(s); start from a clean worktree: "
@@ -261,6 +295,12 @@ def verify_record(repo: str, record_path: str, offline: bool = False, max_age_da
     if branch != data["branch"]:
         report.add(WARN, "BRANCH_MISMATCH",
                    f"worktree is on {clean(branch or 'detached HEAD')}, record is for {data['branch']}")
+
+    holder = lease.read(repo)
+    if holder is not None and (agent is None or holder.get("agent") != agent):
+        report.add(BLOCK, "LEASE_HELD",
+                   f"this worktree is leased by '{clean(holder.get('agent'))}' since "
+                   f"{clean(holder.get('acquired_at'))}; another agent may still be writing here")
 
     # Recorded commit versus the receiver's HEAD.
     recorded = data["head_sha"]
@@ -293,8 +333,9 @@ def verify_record(repo: str, record_path: str, offline: bool = False, max_age_da
                    f"{len(data['uncommitted'])} path(s) were uncommitted at handoff; they are NOT delivered "
                    "and are not in Git: " + ", ".join(clean(p) for p in data["uncommitted"][:10]))
 
-    _verify_tests(report, repo, data, head)
-    _verify_freshness(report, top, path, data, max_age_days, now or rec.utc_now())
+    _verify_tool_integrity(report, repo, data["remote"]["name"])
+    _verify_tests(report, repo, data, head, verify_ci, fetch)
+    _verify_freshness(report, repo, top, path, data, max_age_days, now or rec.utc_now())
 
     if data["open_questions"]:
         report.add(WARN, "OPEN_QUESTIONS",
@@ -339,7 +380,13 @@ def _verify_remote(report: Report, repo: str, data: dict, remote: str, offline: 
     recorded_remote = data["remote"]["sha"]
     if recorded_remote and recorded_remote != tip:
         if known_tip and gitinfo.has_commit(repo, recorded_remote) and gitinfo.is_ancestor(repo, recorded_remote, tip):
-            report.add(INFO, "REMOTE_ADVANCED", f"{remote}/{data['branch']} moved forward since the handoff")
+            changed = gitinfo.changed_paths(repo, recorded_remote, tip)
+            if only_handoff_changes(changed):
+                report.add(INFO, "REMOTE_ADVANCED", f"{remote}/{data['branch']} gained only handoff records")
+            else:
+                report.add(WARN, "REMOTE_ADVANCED_CODE",
+                           f"{len(changed)} file(s) were pushed to {remote}/{data['branch']} after the handoff; "
+                           "someone else may still be writing to this branch")
         elif known_tip and gitinfo.has_commit(repo, recorded_remote):
             report.add(BLOCK, "REMOTE_REWRITTEN",
                        f"{remote}/{data['branch']} no longer contains the recorded remote commit (history rewritten)")
@@ -347,27 +394,86 @@ def _verify_remote(report: Report, repo: str, data: dict, remote: str, offline: 
             report.add(WARN, "REMOTE_TIP_UNKNOWN", "cannot compare the recorded remote commit; fetch and re-verify")
 
 
-def _verify_tests(report: Report, repo: str, data: dict, head: str) -> None:
+def _verify_tool_integrity(report: Report, repo: str, remote: str) -> None:
+    """Flag a branch that changes the handoff tools themselves.
+
+    A previous agent could edit the verifier on its branch so it always passes.
+    This check only helps when verify runs from a trusted checkout (see
+    AGENT-RUNBOOK.md); a tampered copy could skip it.
+    """
+    base = None
+    for ref in (f"refs/remotes/{remote}/HEAD", f"refs/remotes/{remote}/main"):
+        base = gitinfo.resolve_ref(repo, ref)
+        if base:
+            break
+    if base is None:
+        report.add(INFO, "TOOL_BASE_UNKNOWN", f"no {remote}/HEAD or {remote}/main to compare the handoff tools with")
+        return
+    changed = gitinfo.changed_since_merge_base(repo, base, "HEAD", TOOL_PATH)
+    if changed:
+        report.add(WARN, "TOOL_CHANGED_ON_BRANCH",
+                   f"{len(changed)} handoff tool file(s) differ from {remote}'s default branch; run verify from "
+                   "a trusted checkout, not from the branch being verified")
+
+
+def _verify_tests(report: Report, repo: str, data: dict, head: str, verify_ci: bool,
+                  fetch: ghread.Fetcher) -> None:
+    """Two separate questions per test entry.
+
+    1. SHA consistency: was the claim made for the code that is checked out now?
+    2. Result authenticity: did the run really succeed? A matching SHA proves
+       nothing about the result; only a verified CI run does (``verify_ci``).
+    """
     if not data["tests"]:
         if data["completed"]:
             report.add(WARN, "TEST_EVIDENCE_MISSING", "completed work is listed without test evidence")
         return
+
+    expected_repo = None
+    if verify_ci:
+        try:
+            expected_repo = ghread.repo_from_remote_url(gitinfo.remote_url(repo, data["remote"]["name"]))
+        except gitinfo.GitError:
+            expected_repo = None
+
+    verified_at_head = 0
     for test in data["tests"]:
         label = clean(test["command"])
         sha = test["sha"]
         if sha == head:
-            report.add(OK, "TEST_EVIDENCE_CURRENT", f"'{label}' was recorded at HEAD")
+            covers_head = True
         elif not gitinfo.has_commit(repo, sha) or not gitinfo.is_ancestor(repo, sha, head):
+            covers_head = False
             report.add(WARN, "TEST_EVIDENCE_FOREIGN",
                        f"'{label}' was recorded at {sha[:12]}, which is not in this branch's history")
-        elif only_handoff_changes(gitinfo.changed_paths(repo, sha, head)):
-            report.add(OK, "TEST_EVIDENCE_CURRENT", f"'{label}' covers HEAD (only handoff records changed since)")
         else:
-            report.add(WARN, "TEST_EVIDENCE_STALE",
-                       f"'{label}' was recorded at {sha[:12]}; code changed since, re-run before relying on it")
+            covers_head = only_handoff_changes(gitinfo.changed_paths(repo, sha, head))
+            if not covers_head:
+                report.add(WARN, "TEST_EVIDENCE_STALE",
+                           f"'{label}' was recorded at {sha[:12]}; code changed since, re-run before relying on it")
+        if covers_head:
+            report.add(OK, "TEST_SHA_CURRENT",
+                       f"'{label}' claims to cover HEAD (SHA only; the result itself is a claim)")
+
+        if not verify_ci or not test.get("url"):
+            continue
+        verified, why = ghread.check_run(test["url"], sha, expected_repo, fetch)
+        if verified is True:
+            report.add(OK, "CI_VERIFIED", f"'{label}': {why}")
+            verified_at_head += 1 if covers_head else 0
+        elif verified is False:
+            report.add(BLOCK, "CI_EVIDENCE_MISMATCH", f"'{label}': {clean(why)}")
+        else:
+            report.add(WARN, "CI_UNVERIFIABLE", f"'{label}': {clean(why)}")
+
+    if verified_at_head == 0:
+        hint = "" if verify_ci else "; run verify with --verify-ci to check CI run URLs"
+        report.add(WARN, "TEST_RESULT_UNVERIFIED",
+                   "no successful CI run is verified for the current code; recorded results are the previous "
+                   f"agent's claims - re-run the tests before relying on them{hint}")
 
 
-def _verify_freshness(report: Report, top: Path, path: Path, data: dict, max_age_days: int,
+def _verify_freshness(report: Report, repo: str, top: Path, path: Path, data: dict, max_age_days: int,
                       now: datetime) -> None:
     created = rec.parse_timestamp(data["created_at"])
     if created > now + timedelta(minutes=5):
@@ -376,9 +482,21 @@ def _verify_freshness(report: Report, top: Path, path: Path, data: dict, max_age
         report.add(WARN, "RECORD_STALE", f"record is older than {max_age_days} days")
 
     others = load_other_records(top, path)
-    newer = [name for name, other in others
-             if other["supersedes"] == path.name
-             or (other["branch"] == data["branch"] and other["created_at"] > data["created_at"])]
+
+    def is_newer(other: dict) -> bool:
+        if other["supersedes"] == path.name:
+            return True
+        if other["branch"] != data["branch"]:
+            return False
+        if other["created_at"] != data["created_at"]:
+            return other["created_at"] > data["created_at"]
+        # Same second: fall back to history - a record taken on a later commit is newer.
+        return (other["head_sha"] != data["head_sha"]
+                and gitinfo.has_commit(repo, other["head_sha"])
+                and gitinfo.has_commit(repo, data["head_sha"])
+                and gitinfo.is_ancestor(repo, data["head_sha"], other["head_sha"]))
+
+    newer = [name for name, other in others if is_newer(other)]
     if newer:
         report.add(WARN, "RECORD_SUPERSEDED", "a newer record exists for this branch: " + ", ".join(newer))
     if data["supersedes"] and not (top / rec.HANDOFF_DIR / data["supersedes"]).is_file():
@@ -429,7 +547,8 @@ def print_verify(report: Report, data: dict | None, record_path: str, repo: str)
 def cmd_verify(args: argparse.Namespace) -> int:
     try:
         report, data = verify_record(args.repo, args.record, offline=args.offline,
-                                     max_age_days=args.max_age_days)
+                                     max_age_days=args.max_age_days, agent=args.agent,
+                                     verify_ci=args.verify_ci)
     except gitinfo.GitError as exc:
         print(f"verify: {exc}", file=sys.stderr)
         return 2
@@ -443,7 +562,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- sot-check
 
 
-def check_tracker(report: Report, tracker: Path, label: str) -> None:
+def check_tracker(report: Report, tracker: Path, label: str) -> list[str]:
+    """Check status rows; return the normalised statuses found."""
+    statuses: list[str] = []
     status_column: int | None = None
     for number, line in enumerate(tracker.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
@@ -458,14 +579,52 @@ def check_tracker(report: Report, tracker: Path, label: str) -> None:
         if status_column is None or status_column >= len(cells) or set(stripped) <= set("|-: "):
             continue
         status = re.sub(r"[*_`]", "", cells[status_column]).strip().lower()
+        statuses.append(status)
         if status not in KNOWN_TRACKER_STATUSES:
             report.add(WARN, "TRACKER_STATUS_UNKNOWN", f"{label}:{number}: unrecognised status '{clean(status)}'")
         elif status in EVIDENCE_REQUIRED_STATUSES and not EVIDENCE_RE.search(line):
             report.add(BLOCK, "STATUS_WITHOUT_EVIDENCE",
-                       f"{label}:{number}: '{clean(status)}' needs a CI run, PR/issue or commit reference")
+                       f"{label}:{number}: '{clean(status)}' needs a CI run, PR or commit link, or a commit SHA")
+    return statuses
 
 
-def sot_check(repo: str, trackers: list[str]) -> Report:
+def check_issue(report: Report, repo: str, issue: int, tracker_statuses: dict[str, list[str]],
+                tracker_texts: dict[str, str], fetch: ghread.Fetcher) -> None:
+    """Read-only comparison of trackers with the live state of their GitHub Issue."""
+    try:
+        target = ghread.repo_from_remote_url(gitinfo.remote_url(repo, "origin"))
+    except gitinfo.GitError:
+        target = None
+    if target is None:
+        report.add(WARN, "ISSUE_UNCHECKED", "origin is not a GitHub repository")
+        return
+    try:
+        state = ghread.issue_state(target[0], target[1], issue, fetch)
+    except ghread.GitHubReadError as exc:
+        report.add(WARN, "ISSUE_UNCHECKED", f"cannot read issue #{issue}: {clean(exc)}")
+        return
+    report.add(INFO, "ISSUE_STATE",
+               f"#{issue} is {state['state']} (updated {clean(state['updated_at'])}): {clean(state['title'])}")
+    for label, statuses in tracker_statuses.items():
+        master = re.search(r"Master:\s*Issue\s*#(\d+)", tracker_texts[label])
+        if master and int(master.group(1)) != issue:
+            report.add(WARN, "TRACKER_ISSUE_MISMATCH", f"{label} names Issue #{master.group(1)} as its master")
+        if not statuses:
+            continue
+        open_rows = [s for s in statuses if s not in EVIDENCE_REQUIRED_STATUSES]
+        if state["state"] == "closed" and open_rows:
+            report.add(WARN, "ISSUE_CLOSED_TRACKER_OPEN",
+                       f"#{issue} is closed but {label} still has {len(open_rows)} unfinished row(s)")
+        elif state["state"] == "open" and not open_rows:
+            report.add(WARN, "TRACKER_DONE_ISSUE_OPEN",
+                       f"every row in {label} is complete but #{issue} is still open")
+        else:
+            report.add(OK, "ISSUE_TRACKER_CONSISTENT",
+                       f"#{issue} {state['state']}; {label}: {len(open_rows)} of {len(statuses)} row(s) unfinished")
+
+
+def sot_check(repo: str, trackers: list[str], issue: int | None = None,
+              fetch: ghread.Fetcher = ghread.gh_get) -> Report:
     report = Report()
     top = Path(gitinfo.toplevel(repo))
     directory = top / rec.HANDOFF_DIR
@@ -497,19 +656,25 @@ def sot_check(repo: str, trackers: list[str]) -> Report:
         report.add(BLOCK, "DECISION_CONFLICT", conflict)
     report.add(OK, "HANDOFF_RECORDS", f"{len(records)} record(s) checked in {rec.HANDOFF_DIR}/")
 
+    tracker_statuses: dict[str, list[str]] = {}
+    tracker_texts: dict[str, str] = {}
     for tracker in trackers:
         path = top / tracker
         if path.is_file():
-            check_tracker(report, path, tracker)
+            tracker_statuses[tracker] = check_tracker(report, path, tracker)
+            tracker_texts[tracker] = path.read_text(encoding="utf-8")
             report.add(OK, "TRACKER_CHECKED", tracker)
         else:
             report.add(WARN, "TRACKER_MISSING", f"{tracker} not found")
+
+    if issue is not None:
+        check_issue(report, repo, issue, tracker_statuses, tracker_texts, fetch)
     return report
 
 
 def cmd_sot_check(args: argparse.Namespace) -> int:
     try:
-        report = sot_check(args.repo, args.tracker)
+        report = sot_check(args.repo, args.tracker, args.issue)
     except gitinfo.GitError as exc:
         print(f"sot-check: {exc}", file=sys.stderr)
         return 2
@@ -517,6 +682,24 @@ def cmd_sot_check(args: argparse.Namespace) -> int:
         print(f"{finding.level:<5}  {finding.code:<24} {finding.message}")
     print(f"RESULT: {report.result} (exit {report.exit_code})")
     return report.exit_code
+
+
+def cmd_lease(args: argparse.Namespace) -> int:
+    try:
+        if args.action == "acquire":
+            held = lease.acquire(args.repo, args.agent)
+            print(f"lease held by {held['agent']} since {held['acquired_at']}")
+        elif args.action == "release":
+            released = lease.release(args.repo, args.agent, force=args.force)
+            print("lease released" if released else "no lease was held")
+        else:
+            holder = lease.read(args.repo)
+            print("no lease held" if holder is None
+                  else f"lease held by {clean(holder.get('agent'))} since {clean(holder.get('acquired_at'))}")
+    except (lease.LeaseError, gitinfo.GitError) as exc:
+        print(f"lease: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 # --------------------------------------------------------------------------- cli
@@ -540,13 +723,25 @@ def build_parser() -> argparse.ArgumentParser:
     ver.add_argument("record")
     ver.add_argument("--offline", action="store_true", help="use remote-tracking refs instead of ls-remote")
     ver.add_argument("--max-age-days", type=int, default=7)
+    ver.add_argument("--agent", help="the receiving agent; a worktree lease held by anyone else blocks")
+    ver.add_argument("--verify-ci", action="store_true",
+                     help="check test URLs against GitHub Actions (read-only `gh api` GET requests)")
     ver.add_argument("--json", action="store_true")
     ver.set_defaults(func=cmd_verify)
 
     sot = sub.add_parser("sot-check", help="check handoff records and trackers for conflicts")
     sot.add_argument("--tracker", action="append",
                      help="tracker Markdown to check (repeatable; default: the Phase 8 tracker)")
+    sot.add_argument("--issue", type=int,
+                     help="also compare the trackers with this GitHub Issue (read-only `gh api` GET)")
     sot.set_defaults(func=cmd_sot_check)
+
+    lse = sub.add_parser("lease", help="single-writer lease for this worktree")
+    lse.add_argument("action", choices=("acquire", "release", "status"))
+    lse.add_argument("--agent", default="", help="codex, claude, gemini, ...")
+    lse.add_argument("--force", action="store_true",
+                     help="operator only: release a lease left behind by a crashed session")
+    lse.set_defaults(func=cmd_lease)
     return parser
 
 

@@ -12,7 +12,7 @@ import subprocess
 
 READ_ONLY_SUBCOMMANDS = frozenset({
     "rev-parse", "symbolic-ref", "status", "ls-remote", "merge-base",
-    "cat-file", "diff", "remote",
+    "cat-file", "diff", "remote", "ls-files",
 })
 NETWORK_TIMEOUT = 60
 LOCAL_TIMEOUT = 30
@@ -51,6 +51,15 @@ def _git(repo: str, *args: str, ok_codes: tuple[int, ...] = (0,), timeout: int =
         message = result.stderr.strip().splitlines()[-1:] or ["no error output"]
         raise GitError(f"git {args[0]} exited {result.returncode}: {message[0]}")
     return result
+
+
+def git_dir(repo: str) -> str:
+    """This worktree's private git directory (per-worktree, never committed)."""
+    return _git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()
+
+
+def remote_url(repo: str, remote: str) -> str:
+    return _git(repo, "remote", "get-url", remote).stdout.strip()
 
 
 def toplevel(repo: str) -> str:
@@ -115,6 +124,22 @@ def has_commit(repo: str, sha: str) -> bool:
 
 def is_ancestor(repo: str, ancestor: str, descendant: str) -> bool:
     result = _git(repo, "merge-base", "--is-ancestor", ancestor, descendant, ok_codes=(0, 1))
+    return result.returncode == 0
+
+
+def resolve_ref(repo: str, ref: str) -> str | None:
+    result = _git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", ok_codes=(0, 1))
+    return result.stdout.strip() or None
+
+
+def changed_since_merge_base(repo: str, base: str, head: str, pathspec: str) -> list[str]:
+    """Paths under ``pathspec`` changed on ``head`` since it forked from ``base``."""
+    out = _git(repo, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--", pathspec).stdout
+    return sorted(path for path in out.split("\0") if path)
+
+
+def is_tracked(repo: str, path: str) -> bool:
+    result = _git(repo, "ls-files", "--error-unmatch", "--", path, ok_codes=(0, 1))
     return result.returncode == 0
 
 

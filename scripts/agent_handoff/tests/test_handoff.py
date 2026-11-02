@@ -47,6 +47,8 @@ def verify(repo, path, **kwargs):
 
 
 def test_clean_pushed_handoff_passes_in_a_second_clone(repo):
+    import lease
+    lease.acquire(str(repo.path), "codex")
     head = repo.head()
     data, warnings = snapshot(
         repo,
@@ -60,10 +62,12 @@ def test_clean_pushed_handoff_passes_in_a_second_clone(repo):
 
     receiver = repo.clone("receiver")
     report = verify(receiver, receiver.path / path.relative_to(repo.path))
-    assert report.result == "PASS", report.findings
+    # Git facts all line up, but a local test claim alone can never make the handoff PASS.
+    assert report.result == "WARN", report.findings
+    assert {f.code for f in report.findings if f.level == "WARN"} == {"TEST_RESULT_UNVERIFIED"}
     assert ("OK", "HEAD_MATCH") in codes(report)
     assert ("OK", "REMOTE_CONTAINS_HEAD") in codes(report)
-    assert ("OK", "TEST_EVIDENCE_CURRENT") in codes(report)
+    assert ("OK", "TEST_SHA_CURRENT") in codes(report)
 
 
 def test_cli_verify_reports_task_continuity_and_exit_code(repo):
@@ -241,7 +245,7 @@ def test_test_evidence_states(repo):
     path = write_record(repo, data)
     report = verify(repo, path)
     messages = {f.code: f.message for f in report.findings if f.code.startswith("TEST_")}
-    assert ("OK", "TEST_EVIDENCE_CURRENT") in codes(report)
+    assert ("OK", "TEST_SHA_CURRENT") in codes(report)
     assert ("WARN", "TEST_EVIDENCE_STALE") in codes(report) and "pytest stale" in messages["TEST_EVIDENCE_STALE"]
     assert ("WARN", "TEST_EVIDENCE_FOREIGN") in codes(report)
 

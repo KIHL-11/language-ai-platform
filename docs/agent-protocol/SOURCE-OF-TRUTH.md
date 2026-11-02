@@ -40,4 +40,8 @@ Recorded here so no agent resolves it silently:
 - The Issue #75 checkpoint comment from 2026-10-30 still says no integration PR
   exists. That comment predates the merge; updating it is the owner's call.
 - No tracker row may move to Completed/Done/Implemented without an evidence
-  reference. `handoff.py sot-check` enforces this for the tracker.
+  reference (a CI run, PR or commit link, or a commit SHA; a bare `#75` does not
+  count). `handoff.py sot-check` enforces this for the tracker.
+- Read-only check on 2026-11-02 (`handoff.py sot-check --issue 75`): Issue #75
+  open, last updated 2026-10-30; tracker 7 of 7 rows unfinished; consistent.
+  Neither the Issue nor the tracker was modified.

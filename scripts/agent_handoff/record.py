@@ -53,10 +53,23 @@ MAX_TEXT = 500
 MAX_ITEMS = 100
 
 # Public-safety patterns. Labels are reported; matched text never is.
+# This is a best-effort tripwire for common mistakes, not a guarantee that a
+# record holds no personal data. Coverage limits are listed in
+# docs/agent-protocol/HANDOFF-PROTOCOL-v1.md ("Sensitive-content scan").
 UNSAFE_PATTERNS = (
     ("absolute user path", re.compile(r"(?<![\w.])/(?:Users|home)/[^/\s]+")),
-    ("absolute user path", re.compile(r"\b[A-Za-z]:\\+Users\\+", re.IGNORECASE)),
+    ("absolute user path", re.compile(r"(?<![\w.])/root(?:/|\b)")),
+    ("absolute user path", re.compile(r"(?<![\w.])/mnt/[a-z]/Users/", re.IGNORECASE)),
+    ("absolute user path", re.compile(r"\b[A-Za-z]:[\\/]+Users[\\/]+", re.IGNORECASE)),
+    ("home-relative path", re.compile(r"(?<![\w.~])~[/\\][^\s]")),
+    ("home-relative path", re.compile(r"\$HOME\b|%USERPROFILE%", re.IGNORECASE)),
     ("macOS temp path", re.compile(r"/(?:private/)?var/folders/")),
+    ("email address", re.compile(
+        r"\b[A-Za-z0-9._%+-]+@(?!(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|org|net)|example|invalid|test)\b)"
+        r"(?!users\.noreply\.github\.com\b)(?!noreply\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+    )),
+    ("JSON web token", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("session transcript reference", re.compile(r"\.claude/projects/|\.codex/sessions/|\.gemini/tmp/")),
     ("OpenAI-style key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")),
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
     ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
