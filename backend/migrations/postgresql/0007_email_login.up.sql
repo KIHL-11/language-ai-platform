@@ -14,10 +14,13 @@ CREATE TABLE cloud_external_identities (
 CREATE INDEX cloud_external_identities_owner ON cloud_external_identities(owner_user_id,provider);
 
 -- One-time login codes. Only a digest of the code is stored; a challenge is
--- closed when consumed, superseded by a resend, or locked by failed attempts.
+-- closed when consumed, superseded by a resend from the same browser, or
+-- locked by failed attempts. client_binding is a digest of the requesting
+-- browser's pre-auth cookie; only that browser can redeem the code.
 CREATE TABLE cloud_email_login_challenges (
  challenge_id UUID PRIMARY KEY,
  email VARCHAR(254) NOT NULL CHECK(email ~ '^[^@[:space:]A-Z]+@[a-z0-9.-]+$'),
+ client_binding CHAR(64) NOT NULL CHECK(client_binding ~ '^[0-9a-f]{64}$'),
  code_hash CHAR(64) NOT NULL CHECK(code_hash ~ '^[0-9a-f]{64}$'),
  created_at TIMESTAMPTZ NOT NULL,
  expires_at TIMESTAMPTZ NOT NULL,

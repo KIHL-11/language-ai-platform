@@ -9,7 +9,11 @@ approved. Master tracker: Issue #75, Workstream A.
 1. `POST /api/account/email/start {email}` normalizes the address, applies the
    resend throttle, stores a challenge and hands a six-digit code to the
    configured mail adapter. Response: `challenge_id`, `expires_in`, `resend_after`.
-2. `POST /api/account/email/verify {challenge_id, code}` consumes the challenge
+   It also sets `__Host-language_ai_login`, a random HttpOnly/Secure/SameSite=Strict
+   pre-auth cookie (10 min). The challenge stores only its digest.
+2. `POST /api/account/email/verify {challenge_id, code}` only succeeds from the
+   browser holding that pre-auth cookie, so a phished code and challenge id cannot
+   be redeemed elsewhere. It consumes the challenge
    and, in the same transaction, maps the verified address to an internal account
    (creating `cloud_users` + `cloud_external_identities` on first login) and
    issues a browser session using the P8-05A cookie. A session cookie presented
@@ -29,9 +33,10 @@ Neither request accepts a user id; extra fields are rejected (422).
 | --- | --- |
 | Code | 6 digits from `secrets`, stored only as a SHA-256 digest bound to the challenge id |
 | Lifetime | 10 minutes, single use |
-| Failed attempts | 5 per challenge, then the challenge is closed |
+| Failed attempts | 5 per challenge, then the challenge is closed; 10 per address per rolling day, then no new codes until the day window passes |
 | Resend | 60 s between codes per address; 5 codes per address per rolling hour (429 + `Retry-After`) |
-| Superseding | a new code closes every earlier open code for that address |
+| Superseding | a new code closes earlier open codes **from the same browser** only, and only after it was delivered |
+| Wrong browser | rejected without counting a failed attempt, so another client cannot lock a learner's code |
 
 Start and verify take a per-address PostgreSQL advisory lock, so concurrent
 requests cannot bypass the throttle or create two accounts for one address.
@@ -78,10 +83,11 @@ Email login is disabled unless explicitly configured. In addition to the P8-05A
 | Variable | Meaning |
 | --- | --- |
 | `CLOUD_EMAIL_DELIVERY` | unset: disabled. `sandbox-directory`: local staging outbox. Anything else fails closed (503). |
-| `CLOUD_EMAIL_SANDBOX_DIR` | absolute directory; each code is written as a 0600 text file |
+| `CLOUD_EMAIL_SANDBOX_DIR` | absolute directory private to the service user (no group/other bits); each code is written as a 0600 text file |
+| `LANGUAGE_AI_STAGING` | must be `1` for `sandbox-directory` |
 
-`sandbox-directory` is refused unless the origin host is `localhost`,
-`*.localhost` or `*.test`, so a misconfigured deployment cannot write real
+`sandbox-directory` is refused unless `LANGUAGE_AI_STAGING=1` and the origin host
+is `localhost`, `*.localhost` or `*.test`, so a misconfigured deployment cannot write real
 users' codes to disk. Tests use the in-memory `SandboxMailbox`, which no HTTP
 route can read.
 
@@ -89,7 +95,7 @@ route can read.
 
 Run the backend with `LANGUAGE_AI_DEPLOYMENT_MODE=cloud`, a disposable
 PostgreSQL with migrations 0001–0007, `CLOUD_SESSION_ORIGIN=https://app.localhost:<port>`
-behind a local TLS terminator, `CLOUD_EMAIL_DELIVERY=sandbox-directory` and a
+behind a local TLS terminator, `LANGUAGE_AI_STAGING=1`, `CLOUD_EMAIL_DELIVERY=sandbox-directory` and a
 scratch `CLOUD_EMAIL_SANDBOX_DIR`. Request a code in the browser and read it from
 the newest file in that directory. Use synthetic addresses only.
 
@@ -104,6 +110,11 @@ data-processing decision for sending addresses to that provider.
 
 - WeChat OAuth with simulated provider responses; account link/unlink with
   fresh proof for both identities.
-- Per-client-IP / global send limits (needs the trusted-proxy decision from
-  Workstream F) and purge of old challenges.
+- Per-client-IP and global send/guess limits (needs the trusted-proxy decision
+  from Workstream F). Until then two risks stay open: (a) code spraying across
+  many addresses is bounded only per address (10 guesses/day against 10^6
+  codes); (b) anyone can exhaust one address's hourly code quota, delaying that
+  learner's sign-in, and fill their inbox. Existing codes are not invalidated.
+- Purge of old challenges and staging outbox files.
+- Notify other open tabs after sign-in (logout already broadcasts).
 - Production mail adapter once credentials are approved.

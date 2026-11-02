@@ -8,7 +8,7 @@ import app as app_module
 from services.auth.browser import configure_email_login
 from services.auth.email_login import (
     DirectoryMailbox, EmailLoginRejected, EmailLoginService, InvalidEmailAddress, SandboxMailbox,
-    mailer_from_environment, normalize_email,
+    LOGIN_COOKIE_NAME, mailer_from_environment, new_client_binding, normalize_email,
 )
 from services.auth.identity import InvalidAuthentication
 from services.auth.sessions import COOKIE_NAME, BrowserSessionRepository, SessionUnavailable, csrf_token
@@ -91,8 +91,11 @@ def test_code_is_single_use_expires_and_locks_after_failed_attempts(email_login)
     browser = client()
     challenge = start(browser).json()['challenge_id']
     code = mailbox.latest(EMAIL).code
+    binding = browser.cookies.get(LOGIN_COOKIE_NAME)
     assert verify(browser, challenge, code).status_code == 200
-    assert verify(client(), challenge, code).status_code == 400
+    assert LOGIN_COOKIE_NAME not in browser.cookies
+    with pytest.raises(EmailLoginRejected):
+        email_login[3].verify(challenge, code, binding)
 
     clock.advance(minutes=2)
     challenge = start(browser).json()['challenge_id']
@@ -150,6 +153,10 @@ def test_login_endpoints_require_same_origin_and_accept_no_identity_claims(email
                           headers={'Origin': 'https://evil.example'})
     assert cross.status_code == 403 and COOKIE_NAME not in cross.cookies
     assert verify(browser, challenge, code).status_code == 200
+    # The CSRF exemption covers exactly the two login paths.
+    anonymous = client()
+    for path in ('/api/account/email/start/', '/api/account/email', '/api/account/logout', '/api/account/sessions/revoke-all'):
+        assert anonymous.post(path, json={'email': EMAIL}, headers={'Origin': ORIGIN}).status_code in (401, 403)
 
 
 def test_provider_state_when_email_delivery_is_not_configured(sessions):  # noqa: F811
@@ -184,21 +191,79 @@ def test_login_replaces_pre_login_session_and_revoke_all_signs_out_everywhere(em
 
 
 def test_concurrent_verification_consumes_once_and_creates_one_account(email_login):
-    repo, _, mailbox, service = email_login
-    challenge = service.start(EMAIL).challenge_id
-    code = mailbox.latest(EMAIL).code
+    repo, clock, mailbox, service = email_login
+    first, second = new_client_binding(), new_client_binding()
+    a = service.start(EMAIL, first).challenge_id
+    code_a = mailbox.latest(EMAIL).code
+    clock.advance(seconds=61)
+    b = service.start(EMAIL, second).challenge_id
+    code_b = mailbox.latest(EMAIL).code
+    attempts = [(a, code_a, first), (b, code_b, second)] * 3
 
-    def attempt(_):
+    def attempt(args):
         try:
-            return service.verify(challenge, code)
+            return service.verify(*args)
         except EmailLoginRejected:
             return None
-    with ThreadPoolExecutor(4) as pool:
-        results = list(pool.map(attempt, range(4)))
-    assert sum(result is not None for result in results) == 1
+    with ThreadPoolExecutor(6) as pool:
+        results = [result for result in pool.map(attempt, attempts) if result is not None]
+    assert len(results) == 2 and len({result.owner_user_id for result in results}) == 1
+    assert sorted(result.created_account for result in results) == [False, True]
     with psycopg.connect(repo.dsn) as connection:
         assert connection.execute("SELECT count(*) FROM cloud_users WHERE user_id LIKE 'u\\_%'").fetchone()[0] == 1
-        assert connection.execute('SELECT count(*) FROM cloud_browser_sessions').fetchone()[0] == 1
+
+
+def test_concurrent_wrong_guesses_are_all_counted(email_login):
+    repo, _, mailbox, service = email_login
+    binding = new_client_binding()
+    challenge = service.start(EMAIL, binding).challenge_id
+    code = mailbox.latest(EMAIL).code
+
+    def guess(_):
+        with pytest.raises(EmailLoginRejected):
+            service.verify(challenge, wrong(code), binding)
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(guess, range(8)))
+    with psycopg.connect(repo.dsn) as connection:
+        failed, closed = connection.execute('SELECT failed_attempts, closed_at FROM cloud_email_login_challenges').fetchone()
+    assert failed == 5 and closed is not None
+    with pytest.raises(EmailLoginRejected):
+        service.verify(challenge, code, binding)
+
+
+def test_code_is_bound_to_the_requesting_browser(email_login):
+    repo, clock, mailbox, service = email_login
+    victim = client()
+    challenge = start(victim).json()['challenge_id']
+    code = mailbox.latest(EMAIL).code
+    attacker = client()
+    clock.advance(seconds=61)
+    assert start(attacker).status_code == 202  # does not supersede the victim's code
+    stolen = attacker.post('/api/account/email/verify', json={'challenge_id': challenge, 'code': code},
+                           headers={'Origin': ORIGIN})
+    assert stolen.status_code == 400 and COOKIE_NAME not in attacker.cookies
+    with psycopg.connect(repo.dsn) as connection:
+        assert connection.execute('SELECT failed_attempts FROM cloud_email_login_challenges WHERE challenge_id=%s',
+                                  (challenge,)).fetchone()[0] == 0
+    assert verify(victim, challenge, code).status_code == 200
+    with pytest.raises(EmailLoginRejected):
+        service.verify(challenge, code, 'not-a-binding')
+
+
+def test_daily_failed_attempt_cap_blocks_new_codes(email_login):
+    _, clock, mailbox, service = email_login
+    binding = new_client_binding()
+    for _ in range(2):
+        challenge = service.start(EMAIL, binding).challenge_id
+        code = mailbox.latest(EMAIL).code
+        for _ in range(5):
+            with pytest.raises(EmailLoginRejected):
+                service.verify(challenge, wrong(code), binding)
+        clock.advance(hours=1, seconds=1)
+    response = start(client())
+    assert response.status_code == 429 and response.json()['detail']['retry_after'] > 3600
+    clock.advance(days=1)
+    assert start(client()).status_code == 202
 
 
 def test_delivery_failure_closes_challenge_and_storage_failure_issues_nothing(email_login):
@@ -207,19 +272,24 @@ def test_delivery_failure_closes_challenge_and_storage_failure_issues_nothing(em
     class BrokenMailer:
         def send_login_code(self, **_):
             raise OSError('smtp down')
+    binding = new_client_binding()
+    service = EmailLoginService(repo, mailbox)
+    kept = service.start(EMAIL, binding).challenge_id
+    clock.advance(seconds=61)
     broken = EmailLoginService(repo, BrokenMailer())
     with pytest.raises(SessionUnavailable):
-        broken.start(EMAIL)
+        broken.start(EMAIL, binding)
     with psycopg.connect(repo.dsn) as connection:
-        assert connection.execute('SELECT count(*) FROM cloud_email_login_challenges WHERE closed_at IS NULL').fetchone()[0] == 0
+        open_ids = [str(row[0]) for row in connection.execute(
+            'SELECT challenge_id FROM cloud_email_login_challenges WHERE closed_at IS NULL')]
+    assert open_ids == [kept]  # the code already in the inbox still works
 
     clock.advance(minutes=2)
-    service = EmailLoginService(repo, mailbox)
-    challenge = service.start(EMAIL).challenge_id
+    challenge = service.start(EMAIL, binding).challenge_id
     with psycopg.connect(repo.dsn) as connection:
         connection.execute('ALTER TABLE cloud_browser_sessions ADD CONSTRAINT inject_no_session CHECK(false) NOT VALID')
     with pytest.raises(SessionUnavailable):
-        service.verify(challenge, mailbox.latest(EMAIL).code)
+        service.verify(challenge, mailbox.latest(EMAIL).code, binding)
     with psycopg.connect(repo.dsn) as connection:
         assert connection.execute('SELECT count(*) FROM cloud_external_identities').fetchone()[0] == 0
         assert connection.execute('SELECT closed_at FROM cloud_email_login_challenges WHERE challenge_id=%s',
@@ -238,7 +308,8 @@ def test_minimum_privilege_auth_role_can_log_in_without_learning_data(email_logi
         connection.execute('GRANT INSERT ON cloud_users TO email_auth_test')
     runtime = BrowserSessionRepository(make_conninfo(repo.dsn, user='email_auth_test', password='synthetic-test'), repo.clock)
     service = EmailLoginService(runtime, mailbox)
-    login_result = service.verify(service.start(EMAIL).challenge_id, mailbox.latest(EMAIL).code)
+    binding = new_client_binding()
+    login_result = service.verify(service.start(EMAIL, binding).challenge_id, mailbox.latest(EMAIL).code, binding)
     assert runtime.verify(login_result.session_token).user_id == login_result.owner_user_id
     assert service.email_for(login_result.owner_user_id) == EMAIL
     with runtime._connect() as connection:
@@ -250,8 +321,8 @@ def test_database_rejects_unnormalized_subjects(email_login):
     repo, *_ = email_login
     with psycopg.connect(repo.dsn) as connection:
         with pytest.raises(psycopg.errors.CheckViolation):
-            connection.execute("INSERT INTO cloud_email_login_challenges(challenge_id,email,code_hash,created_at,expires_at) "
-                               "VALUES(gen_random_uuid(),'Upper@example.test',repeat('a',64),now(),now()+interval '1 minute')")
+            connection.execute("INSERT INTO cloud_email_login_challenges(challenge_id,email,client_binding,code_hash,created_at,expires_at) "
+                               "VALUES(gen_random_uuid(),'Upper@example.test',repeat('a',64),repeat('a',64),now(),now()+interval '1 minute')")
 
 
 @pytest.mark.parametrize('value', ['', 'plain', 'a@b', 'a b@example.test', 'ünï@example.test', 'a@-bad.test',
@@ -273,6 +344,10 @@ def test_sandbox_directory_delivery_is_local_only(tmp_path, monkeypatch):
         mailer_from_environment('https://localhost')
     monkeypatch.setenv('CLOUD_EMAIL_DELIVERY', 'sandbox-directory')
     monkeypatch.setenv('CLOUD_EMAIL_SANDBOX_DIR', str(tmp_path / 'outbox'))
+    monkeypatch.delenv('LANGUAGE_AI_STAGING', raising=False)
+    with pytest.raises(SessionUnavailable):
+        mailer_from_environment('https://localhost')
+    monkeypatch.setenv('LANGUAGE_AI_STAGING', '1')
     with pytest.raises(SessionUnavailable):
         mailer_from_environment('https://learn.example')
     mailer = mailer_from_environment('https://app.localhost:8443')
@@ -281,6 +356,9 @@ def test_sandbox_directory_delivery_is_local_only(tmp_path, monkeypatch):
     mailer.send_login_code(email=EMAIL, code='123456', expires_at=datetime(2026, 11, 3, tzinfo=timezone.utc))
     [written] = (tmp_path / 'outbox').iterdir()
     assert written.stat().st_mode & 0o777 == 0o600 and 'Code: 123456' in written.read_text()
+    (tmp_path / 'outbox').chmod(0o755)
+    with pytest.raises(OSError):
+        mailer.send_login_code(email=EMAIL, code='123456', expires_at=datetime(2026, 11, 3, tzinfo=timezone.utc))
     monkeypatch.setenv('CLOUD_EMAIL_SANDBOX_DIR', 'relative/outbox')
     with pytest.raises(SessionUnavailable):
         mailer_from_environment('https://localhost')

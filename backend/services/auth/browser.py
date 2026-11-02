@@ -10,7 +10,8 @@ from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from services.auth.email_login import (
-    EmailLoginRejected, EmailLoginService, EmailLoginThrottled, InvalidEmailAddress, mailer_from_environment,
+    CODE_LIFETIME, LOGIN_COOKIE_NAME, BINDING_PATTERN, EmailLoginRejected, EmailLoginService, EmailLoginThrottled,
+    InvalidEmailAddress, mailer_from_environment, new_client_binding,
 )
 from services.auth.identity import DeploymentMode, IdentityDependency, InvalidAuthentication, deployment_mode
 from services.auth.sessions import (
@@ -186,11 +187,14 @@ def account_providers(request:Request,response:Response):
 @router.post('/account/email/start',status_code=202)
 def start_email_login(request:Request,response:Response,body:EmailStartRequest):
     service=_email_service(request)
-    try: challenge=service.start(body.email)
+    binding=request.cookies.get(LOGIN_COOKIE_NAME,'')
+    if not BINDING_PATTERN.fullmatch(binding): binding=new_client_binding()
+    try: challenge=service.start(body.email,binding)
     except InvalidEmailAddress as exc: raise HTTPException(status_code=422,detail={'code':'email_invalid','message':'Enter a valid email address.'}) from exc
     except EmailLoginThrottled as exc:
         raise HTTPException(status_code=429,detail={'code':'email_login_throttled','retry_after':exc.retry_after},headers={'Retry-After':str(exc.retry_after)}) from exc
     except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    response.set_cookie(LOGIN_COOKIE_NAME,binding,secure=True,httponly=True,samesite='strict',path='/',max_age=int(CODE_LIFETIME.total_seconds()))
     now=service.sessions._now()
     return {'challenge_id':challenge.challenge_id,'expires_in':int((challenge.expires_at-now).total_seconds()),
             'resend_after':int((challenge.resend_after-now).total_seconds())}
@@ -200,13 +204,14 @@ def start_email_login(request:Request,response:Response,body:EmailStartRequest):
 def verify_email_login(request:Request,response:Response,body:EmailVerifyRequest):
     service=_email_service(request)
     previous=request.cookies.get(COOKIE_NAME,'')
-    try: login=service.verify(body.challenge_id,body.code)
+    try: login=service.verify(body.challenge_id,body.code,request.cookies.get(LOGIN_COOKIE_NAME,''))
     except EmailLoginRejected as exc: raise HTTPException(status_code=400,detail={'code':'email_code_invalid','message':'The code is invalid or has expired.'}) from exc
     except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
     if previous:  # never keep a pre-login session alive alongside the new one
         try: service.sessions.revoke(previous)
         except (InvalidAuthentication,SessionUnavailable): pass
     _cookie(response,login.session_token)
+    response.delete_cookie(LOGIN_COOKIE_NAME,path='/',secure=True,httponly=True,samesite='strict')
     return {'user_id':login.owner_user_id,'csrf_token':csrf_token(login.session_token),'created_account':login.created_account}
 
 
