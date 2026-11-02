@@ -1,0 +1,109 @@
+# P8-05B1: verified email one-time-code login
+
+Status: implemented with synthetic/sandbox verification only. No real email is
+sent, no mail provider credentials exist, and nothing here is production
+approved. Master tracker: Issue #75, Workstream A.
+
+## Flow
+
+1. `POST /api/account/email/start {email}` normalizes the address, applies the
+   resend throttle, stores a challenge and hands a six-digit code to the
+   configured mail adapter. Response: `challenge_id`, `expires_in`, `resend_after`.
+2. `POST /api/account/email/verify {challenge_id, code}` consumes the challenge
+   and, in the same transaction, maps the verified address to an internal account
+   (creating `cloud_users` + `cloud_external_identities` on first login) and
+   issues a browser session using the P8-05A cookie. A session cookie presented
+   with the verify request is revoked, so pre-login sessions never survive.
+3. `GET /api/account/providers` reports `{email, wechat}` so the UI can show a
+   provider-not-configured state. `wechat` is always `false` in this stage.
+4. `POST /api/account/sessions/revoke-all` (session + CSRF) signs the account out
+   on every browser. Together with email login this is the recovery path for a
+   lost or shared device.
+
+Neither request accepts a user id; extra fields are rejected (422).
+`POST /api/account/login` keeps returning 503.
+
+## Limits
+
+| Control | Value |
+| --- | --- |
+| Code | 6 digits from `secrets`, stored only as a SHA-256 digest bound to the challenge id |
+| Lifetime | 10 minutes, single use |
+| Failed attempts | 5 per challenge, then the challenge is closed |
+| Resend | 60 s between codes per address; 5 codes per address per rolling hour (429 + `Retry-After`) |
+| Superseding | a new code closes every earlier open code for that address |
+
+Start and verify take a per-address PostgreSQL advisory lock, so concurrent
+requests cannot bypass the throttle or create two accounts for one address.
+Failed-attempt counts are committed before the rejection is returned.
+
+Addresses are trimmed and lower-cased; ASCII only (no IDN yet). Provider aliases
+(dots, `+tag`) are **not** folded: each is a separate identity. Responses do not
+reveal whether an address already has an account; a 429 does reveal that a code
+was requested for that address recently.
+
+## Browser boundary
+
+The two login paths are sessionless, so no CSRF token can exist. The session
+boundary middleware still requires HTTPS on the configured host, an exact
+`Origin` header and no cross-site `Sec-Fetch-Site`; responses are `no-store`.
+The frontend shows the email form only when the server reports the provider as
+configured, then confirms the HttpOnly cookie through `/api/account/me`.
+
+## Database and privileges (migration 0007)
+
+- `cloud_external_identities(provider, subject)` → `owner_user_id`; provider is
+  constrained to `email` until another verifier ships. Subjects must already be
+  normalized (DB check).
+- `cloud_email_login_challenges` holds the address, code digest, expiry, failed
+  attempts and `closed_at`.
+
+The auth role from P8-05A additionally needs:
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON cloud_email_login_challenges, cloud_external_identities TO <auth_role>;
+GRANT INSERT ON cloud_users TO <auth_role>;
+```
+
+This widens the P8-05A ADR, which kept account provisioning out of the auth
+role: verified email login is now the approved provisioner. The role still has
+no access to learning tables (tested with a NOSUPERUSER/NOBYPASSRLS role).
+Expired/closed challenges are not purged yet; see Remaining work.
+
+## Configuration
+
+Email login is disabled unless explicitly configured. In addition to the P8-05A
+`CLOUD_SESSION_DATABASE_URL` and `CLOUD_SESSION_ORIGIN`:
+
+| Variable | Meaning |
+| --- | --- |
+| `CLOUD_EMAIL_DELIVERY` | unset: disabled. `sandbox-directory`: local staging outbox. Anything else fails closed (503). |
+| `CLOUD_EMAIL_SANDBOX_DIR` | absolute directory; each code is written as a 0600 text file |
+
+`sandbox-directory` is refused unless the origin host is `localhost`,
+`*.localhost` or `*.test`, so a misconfigured deployment cannot write real
+users' codes to disk. Tests use the in-memory `SandboxMailbox`, which no HTTP
+route can read.
+
+### Local staging
+
+Run the backend with `LANGUAGE_AI_DEPLOYMENT_MODE=cloud`, a disposable
+PostgreSQL with migrations 0001–0007, `CLOUD_SESSION_ORIGIN=https://app.localhost:<port>`
+behind a local TLS terminator, `CLOUD_EMAIL_DELIVERY=sandbox-directory` and a
+scratch `CLOUD_EMAIL_SANDBOX_DIR`. Request a code in the browser and read it from
+the newest file in that directory. Use synthetic addresses only.
+
+### Real provider (not authorized yet)
+
+A production adapter must implement `LoginCodeMailer.send_login_code` and needs
+an approved provider account and credentials (server-side only), a verified
+sending domain with SPF/DKIM/DMARC, a bounce/complaint policy and the
+data-processing decision for sending addresses to that provider.
+
+## Remaining work in Workstream A
+
+- WeChat OAuth with simulated provider responses; account link/unlink with
+  fresh proof for both identities.
+- Per-client-IP / global send limits (needs the trusted-proxy decision from
+  Workstream F) and purge of old challenges.
+- Production mail adapter once credentials are approved.

@@ -48,13 +48,13 @@ describe('Cloud session integration', () => {
     expect(personal).not.toHaveBeenCalled()
   })
 
-  it('keeps missing sessions gated and public login unavailable', async () => {
+  it('keeps missing sessions gated and shows no sign-in form without a configured provider', async () => {
     const mock = routes()
     mock.mockImplementation((url: string) => Promise.resolve(url === '/api/deployment' ? json({ mode: 'cloud' }) : json({}, 401)))
     render(<CloudSessionProvider><p>Personal data must not mount</p></CloudSessionProvider>)
     expect(await screen.findByText('Your session is missing or expired.')).toBeInTheDocument()
     expect(screen.queryByText('Personal data must not mount')).not.toBeInTheDocument()
-    expect(screen.getByText(/Public login is unavailable/)).toBeInTheDocument()
+    expect(await screen.findByText(/Email sign-in is not configured/)).toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   })
 
