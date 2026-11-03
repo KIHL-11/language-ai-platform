@@ -17,6 +17,9 @@ COOKIE_NAME = '__Host-language_ai_session'
 TOKEN_PATTERN = re.compile(r'^[A-Za-z0-9_-]{43}$')
 ABSOLUTE_LIFETIME = timedelta(hours=12)
 IDLE_LIFETIME = timedelta(minutes=30)
+# How long a fresh email proof (login or explicit re-check) unlocks linking and
+# unlinking sign-in methods. Rotation does not carry it over.
+REAUTH_LIFETIME = timedelta(minutes=10)
 
 
 class SessionUnavailable(RuntimeError):
@@ -71,11 +74,27 @@ class BrowserSessionRepository:
                 return self.issue_in_transaction(connection,owner,self._now())
         except psycopg.Error as exc: raise SessionUnavailable('Session storage unavailable') from exc
 
-    def issue_in_transaction(self, connection, owner, now):
-        """Issue inside a trusted caller's transaction (verified login mapping)."""
+    def issue_in_transaction(self, connection, owner, now, *, reauthenticated=False, replaces=''):
+        """Issue inside a trusted caller's transaction (verified login mapping).
+
+        ``replaces`` is the browser's previous session token, revoked in the same
+        transaction so a pre-login session can never outlive the login.
+        """
+        if isinstance(replaces,str) and TOKEN_PATTERN.fullmatch(replaces):
+            connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE token_hash=%s AND revoked_at IS NULL',(now,digest(replaces)))
         token=secrets.token_urlsafe(32)
-        connection.execute('INSERT INTO cloud_browser_sessions(session_id,owner_user_id,token_hash,created_at,expires_at,last_seen_at) VALUES(%s,%s,%s,%s,%s,%s)',(str(uuid.uuid4()),owner,digest(token),now,now+ABSOLUTE_LIFETIME,now))
+        session_id=str(uuid.uuid4())
+        connection.execute('INSERT INTO cloud_browser_sessions(session_id,owner_user_id,token_hash,created_at,expires_at,last_seen_at) VALUES(%s,%s,%s,%s,%s,%s)',(session_id,owner,digest(token),now,now+ABSOLUTE_LIFETIME,now))
+        if reauthenticated:
+            connection.execute('UPDATE cloud_browser_sessions SET reauthenticated_at=%s WHERE session_id=%s',(now,session_id))
         return token
+
+    def session_in_transaction(self, connection, token):
+        """Lock and return the valid session row for ``token`` plus the current time."""
+        return self._row(connection,token)
+
+    def revoke_others_in_transaction(self, connection, owner, keep_session_id, now):
+        connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND session_id<>%s AND revoked_at IS NULL',(now,owner,keep_session_id))
 
     def _row(self, connection, token):
         if not isinstance(token,str) or not TOKEN_PATTERN.fullmatch(token):

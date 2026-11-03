@@ -11,7 +11,11 @@ from starlette.concurrency import run_in_threadpool
 
 from services.auth.email_login import (
     CODE_LIFETIME, LOGIN_COOKIE_NAME, BINDING_PATTERN, EmailLoginRejected, EmailLoginService, EmailLoginThrottled,
-    InvalidEmailAddress, mailer_from_environment, new_client_binding,
+    InvalidEmailAddress, code_key_from_environment, mailer_from_environment, new_client_binding,
+)
+from services.auth.external_identity import (
+    ExternalLoginRejected, IdentityConflict, IdentityNotLinked, ReauthenticationRequired, WeChatAccountService,
+    account_identities, wechat_from_environment,
 )
 from services.auth.identity import DeploymentMode, IdentityDependency, InvalidAuthentication, deployment_mode
 from services.auth.sessions import (
@@ -22,7 +26,9 @@ from services.auth.sessions import (
 router=APIRouter()
 _bootstrap_lock=threading.Lock()
 # Sessionless by definition: same-origin is enforced, CSRF tokens cannot exist yet.
-LOGIN_PATHS=frozenset({'/api/account/email/start','/api/account/email/verify'})
+# WeChat completion carries its own browser-bound, single-use state; a link
+# completion is additionally checked against the session that started it.
+LOGIN_PATHS=frozenset({'/api/account/email/start','/api/account/email/verify','/api/account/wechat/start','/api/account/wechat/complete'})
 
 
 @router.get('/deployment')
@@ -47,6 +53,13 @@ def configure_email_login(app, service):
     app.state.email_login_service=service
 
 
+def configure_wechat_login(app, service):
+    """Trusted bootstrap hook for a WeChat verifier (tests: simulated only). No HTTP injection."""
+    if not isinstance(service,WeChatAccountService) or service.sessions is not getattr(app.state,'browser_session_repository',None):
+        raise ValueError('Invalid WeChat login configuration')
+    app.state.wechat_account_service=service
+
+
 def _bootstrap(app):
     with _bootstrap_lock:
         if getattr(app.state,'browser_session_policy',None) is not None: return
@@ -56,9 +69,11 @@ def _bootstrap(app):
         if not dsn or not origin: raise SessionUnavailable('Incomplete cloud session configuration')
         policy=SessionPolicy(origin)
         mailer=mailer_from_environment(policy.origin)
+        code_key=code_key_from_environment() if mailer is not None else None
+        wechat_from_environment()
         repository=BrowserSessionRepository(dsn)
         configure_browser_sessions(app,repository,policy)
-        if mailer is not None: configure_email_login(app,EmailLoginService(repository,mailer))
+        if mailer is not None: configure_email_login(app,EmailLoginService(repository,mailer,code_key=code_key))
 
 
 class BrowserSessionBoundary(BaseHTTPMiddleware):
@@ -174,14 +189,15 @@ class EmailStartRequest(BaseModel):
 class EmailVerifyRequest(BaseModel):
     model_config=ConfigDict(extra='forbid')
     challenge_id:str=Field(min_length=36,max_length=36)
-    code:str=Field(pattern=r'^[0-9]{6}$')
+    code:str=Field(min_length=6,max_length=32,pattern=r'^[0-9A-Za-z -]+$')  # six digits, or a long code
 
 
 @router.get('/account/providers')
 def account_providers(request:Request,response:Response):
     response.headers['Cache-Control']='no-store'
     cloud=deployment_mode() is DeploymentMode.CLOUD
-    return {'email':cloud and isinstance(getattr(request.app.state,'email_login_service',None),EmailLoginService),'wechat':False}
+    return {'email':cloud and isinstance(getattr(request.app.state,'email_login_service',None),EmailLoginService),
+            'wechat':cloud and isinstance(getattr(request.app.state,'wechat_account_service',None),WeChatAccountService)}
 
 
 @router.post('/account/email/start',status_code=202)
@@ -203,13 +219,10 @@ def start_email_login(request:Request,response:Response,body:EmailStartRequest):
 @router.post('/account/email/verify')
 def verify_email_login(request:Request,response:Response,body:EmailVerifyRequest):
     service=_email_service(request)
-    previous=request.cookies.get(COOKIE_NAME,'')
-    try: login=service.verify(body.challenge_id,body.code,request.cookies.get(LOGIN_COOKIE_NAME,''))
+    # The previous session is revoked in the login transaction, or no session is issued.
+    try: login=service.verify(body.challenge_id,body.code,request.cookies.get(LOGIN_COOKIE_NAME,''),replaces=request.cookies.get(COOKIE_NAME,''))
     except EmailLoginRejected as exc: raise HTTPException(status_code=400,detail={'code':'email_code_invalid','message':'The code is invalid or has expired.'}) from exc
     except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
-    if previous:  # never keep a pre-login session alive alongside the new one
-        try: service.sessions.revoke(previous)
-        except (InvalidAuthentication,SessionUnavailable): pass
     _cookie(response,login.session_token)
     response.delete_cookie(LOGIN_COOKIE_NAME,path='/',secure=True,httponly=True,samesite='strict')
     return {'user_id':login.owner_user_id,'csrf_token':csrf_token(login.session_token),'created_account':login.created_account}
@@ -223,3 +236,123 @@ def revoke_all_sessions(request:Request,identity:IdentityDependency):
     response=Response(status_code=204)
     response.delete_cookie(COOKIE_NAME,path='/',secure=True,httponly=True,samesite='strict')
     return response
+
+
+def _throttled(exc):
+    return HTTPException(status_code=429,detail={'code':'email_login_throttled','retry_after':exc.retry_after},headers={'Retry-After':str(exc.retry_after)})
+
+
+@router.post('/account/reauth/email/start',status_code=202)
+def start_email_reauth(request:Request,identity:IdentityDependency):
+    service=_email_service(request)
+    try: challenge=service.start_reauth(request.cookies.get(COOKIE_NAME,''))
+    except EmailLoginRejected as exc: raise HTTPException(status_code=422,detail={'code':'email_identity_missing'}) from exc
+    except InvalidAuthentication as exc: raise HTTPException(status_code=401,detail='Invalid session') from exc
+    except EmailLoginThrottled as exc: raise _throttled(exc) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    now=service.sessions._now()
+    return {'challenge_id':challenge.challenge_id,'email':challenge.email,'expires_in':int((challenge.expires_at-now).total_seconds()),
+            'resend_after':int((challenge.resend_after-now).total_seconds())}
+
+
+@router.post('/account/reauth/email/verify')
+def verify_email_reauth(request:Request,body:EmailVerifyRequest,identity:IdentityDependency):
+    service=_email_service(request)
+    try: until=service.verify_reauth(body.challenge_id,body.code,request.cookies.get(COOKIE_NAME,''))
+    except EmailLoginRejected as exc: raise HTTPException(status_code=400,detail={'code':'email_code_invalid','message':'The code is invalid or has expired.'}) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    return {'reauthenticated_for':int((until-service.sessions._now()).total_seconds())}
+
+
+def _wechat_service(request):
+    _repository(request)
+    service=getattr(request.app.state,'wechat_account_service',None)
+    if not isinstance(service,WeChatAccountService):
+        raise HTTPException(status_code=503,detail={'code':'login_provider_not_configured','message':'WeChat sign-in is not configured.'})
+    return service
+
+
+def _account_error(exc):
+    if isinstance(exc,ReauthenticationRequired):
+        return HTTPException(status_code=428,detail={'code':'reauthentication_required','message':'Confirm your email address first.'})
+    if isinstance(exc,IdentityConflict):
+        status=409 if exc.code in ('identity_conflict','provider_already_linked') else 422
+        return HTTPException(status_code=status,detail={'code':exc.code})
+    if isinstance(exc,IdentityNotLinked):
+        return HTTPException(status_code=409,detail={'code':'wechat_not_linked','message':'Sign in with email, then link WeChat in account settings.'})
+    if isinstance(exc,InvalidAuthentication):
+        return HTTPException(status_code=401,detail='Invalid session')
+    if isinstance(exc,ExternalLoginRejected):
+        return HTTPException(status_code=400,detail={'code':'wechat_callback_invalid','message':'The WeChat sign-in could not be confirmed.'})
+    return HTTPException(status_code=503,detail={'code':'wechat_login_unavailable'})
+
+
+class WeChatCompleteRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    code:str=Field(min_length=8,max_length=128)
+    state:str=Field(min_length=43,max_length=43)
+
+
+class LinkRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    confirm:str=Field(max_length=32)
+
+
+class UnlinkRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    provider:str=Field(max_length=32)
+    confirm:str=Field(max_length=32)
+
+
+def _login_binding(request,response):
+    binding=request.cookies.get(LOGIN_COOKIE_NAME,'')
+    if not BINDING_PATTERN.fullmatch(binding): binding=new_client_binding()
+    response.set_cookie(LOGIN_COOKIE_NAME,binding,secure=True,httponly=True,samesite='strict',path='/',max_age=int(CODE_LIFETIME.total_seconds()))
+    return binding
+
+
+@router.post('/account/wechat/start')
+def start_wechat_login(request:Request,response:Response):
+    service=_wechat_service(request)
+    try: url=service.start_login(_login_binding(request,response))
+    except (SessionUnavailable,EmailLoginRejected) as exc: raise _account_error(exc) from exc
+    return {'authorization_url':url}
+
+
+@router.post('/account/wechat/link/start')
+def start_wechat_link(request:Request,response:Response,body:LinkRequest,identity:IdentityDependency):
+    service=_wechat_service(request)
+    try: url=service.start_link(request.cookies.get(COOKIE_NAME,''),_login_binding(request,response),body.confirm)
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
+    return {'authorization_url':url}
+
+
+@router.post('/account/wechat/complete')
+def complete_wechat(request:Request,response:Response,body:WeChatCompleteRequest):
+    service=_wechat_service(request)
+    try: login=service.complete(body.code,body.state,request.cookies.get(LOGIN_COOKIE_NAME,''),request.cookies.get(COOKIE_NAME,''))
+    except (ExternalLoginRejected,IdentityConflict,IdentityNotLinked,ReauthenticationRequired,InvalidAuthentication,SessionUnavailable) as exc:
+        raise _account_error(exc) from exc
+    response.delete_cookie(LOGIN_COOKIE_NAME,path='/',secure=True,httponly=True,samesite='strict')
+    if login is None: return {'purpose':'link'}
+    _cookie(response,login.session_token)
+    return {'purpose':'login','user_id':login.owner_user_id,'csrf_token':csrf_token(login.session_token)}
+
+
+@router.get('/account/identities')
+def identities(request:Request,identity:IdentityDependency):
+    repository=_repository(request)
+    try: linked,remaining=account_identities(repository,request.cookies.get(COOKIE_NAME,''))
+    except InvalidAuthentication as exc: raise HTTPException(status_code=401,detail='Invalid session') from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail='Session unavailable') from exc
+    return {'identities':[{'provider':item.provider,'label':item.label,'linked_at':item.linked_at.isoformat()} for item in linked],
+            'reauthenticated_for':remaining,
+            'wechat_available':isinstance(getattr(request.app.state,'wechat_account_service',None),WeChatAccountService)}
+
+
+@router.post('/account/identities/unlink',status_code=204)
+def unlink_identity(request:Request,body:UnlinkRequest,identity:IdentityDependency):
+    service=_wechat_service(request)
+    try: service.unlink(request.cookies.get(COOKIE_NAME,''),body.provider,body.confirm)
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
+    return Response(status_code=204)

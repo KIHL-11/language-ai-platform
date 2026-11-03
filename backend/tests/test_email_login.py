@@ -18,21 +18,25 @@ from test_durable_ai_chunk_candidates import _migration, cloud_candidates  # noq
 
 ORIGIN = 'https://learn.example'
 EMAIL = 'learner.one@example.test'
+CODE_KEY = bytes(range(32))  # synthetic; production reads CLOUD_AUTH_CODE_KEY
 
 
 @pytest.fixture
 def email_login(sessions):  # noqa: F811
     repo, clock, *_ = sessions
+    _migration(repo.dsn, '0008_account_identity.down.sql')
     _migration(repo.dsn, '0007_email_login.down.sql')
     _migration(repo.dsn, '0007_email_login.up.sql')
+    _migration(repo.dsn, '0008_account_identity.up.sql')
     mailbox = SandboxMailbox()
-    service = EmailLoginService(repo, mailbox)
+    service = EmailLoginService(repo, mailbox, code_key=CODE_KEY)
     configure_email_login(app_module.app, service)
     try:
         yield repo, clock, mailbox, service
     finally:
         if hasattr(app_module.app.state, 'email_login_service'):
             delattr(app_module.app.state, 'email_login_service')
+        _migration(repo.dsn, '0008_account_identity.down.sql')
         _migration(repo.dsn, '0007_email_login.down.sql')
 
 
@@ -271,26 +275,76 @@ def test_daily_cap_also_stops_guessing_on_codes_issued_earlier(email_login):
     with psycopg.connect(repo.dsn) as connection:
         assert connection.execute('SELECT sum(failed_attempts) FROM cloud_email_login_challenges').fetchone()[0] == 10
         first_failure = connection.execute('SELECT min(created_at) FROM cloud_email_login_challenges').fetchone()[0]
-    clock.advance(hours=1)
-    response = start(client())
-    expected = (first_failure + timedelta(days=1) - clock()).total_seconds()
-    assert response.status_code == 429 and abs(response.json()['detail']['retry_after'] - expected) <= 2
+    assert first_failure is not None
 
 
-def test_daily_failed_attempt_cap_blocks_new_codes(email_login):
+def test_capped_address_gets_an_unguessable_code_instead_of_a_lockout(email_login):
     _, clock, mailbox, service = email_login
-    binding = new_client_binding()
-    for _ in range(2):
-        challenge = service.start(EMAIL, binding).challenge_id
+    attacker = new_client_binding()
+    for _ in range(2):  # an attacker spends the address's daily failures with their own codes
+        challenge = service.start(EMAIL, attacker).challenge_id
         code = mailbox.latest(EMAIL).code
         for _ in range(5):
             with pytest.raises(EmailLoginRejected):
-                service.verify(challenge, wrong(code), binding)
+                service.verify(challenge, wrong(code), attacker)
         clock.advance(hours=1, seconds=1)
-    response = start(client())
-    assert response.status_code == 429 and response.json()['detail']['retry_after'] > 3600
-    clock.advance(days=1)
-    assert start(client()).status_code == 202
+    guessed = service.start(EMAIL, attacker).challenge_id
+    assert len(mailbox.latest(EMAIL).code) == 12
+    for guess in ('000000', 'AAAAAAAAAAAA', '222222222222', 'ZZZZ-ZZZZ-ZZZZ', 'abcdefghjkmn'):
+        with pytest.raises(EmailLoginRejected):
+            service.verify(guessed, guess, attacker)
+    clock.advance(seconds=61)
+    learner = client()
+    started = start(learner)
+    assert started.status_code == 202  # no 24 h lockout for the learner
+    code = mailbox.latest(EMAIL).code
+    assert len(code) == 12 and code.isalnum() and code.isupper()
+    typed = '-'.join(code[i:i + 4] for i in range(0, 12, 4)).lower()
+    assert verify(learner, started.json()['challenge_id'], typed).status_code == 200
+    clock.advance(days=1, hours=1)
+    service.start(EMAIL, new_client_binding())
+    assert len(mailbox.latest(EMAIL).code) == 6  # back to six digits once failures leave the window
+
+
+def test_failed_pre_login_revocation_issues_no_session(email_login):
+    repo, clock, mailbox, _ = email_login
+    browser, _ = login(mailbox)
+    old = browser.cookies.get(COOKIE_NAME)
+    clock.advance(minutes=2)
+    challenge = start(browser).json()['challenge_id']
+    with psycopg.connect(repo.dsn) as connection:
+        connection.execute('ALTER TABLE cloud_browser_sessions ADD CONSTRAINT inject_no_revoke CHECK(revoked_at IS NULL) NOT VALID')
+    try:
+        failed = verify(browser, challenge, mailbox.latest(EMAIL).code)
+    finally:
+        with psycopg.connect(repo.dsn) as connection:
+            connection.execute('ALTER TABLE cloud_browser_sessions DROP CONSTRAINT inject_no_revoke')
+    assert failed.status_code == 503 and browser.cookies.get(COOKIE_NAME) == old
+    with psycopg.connect(repo.dsn) as connection:
+        assert connection.execute('SELECT count(*) FROM cloud_browser_sessions').fetchone()[0] == 1
+        assert connection.execute('SELECT closed_at FROM cloud_email_login_challenges WHERE challenge_id=%s',
+                                  (challenge,)).fetchone()[0] is None  # the code can be retried
+    assert verify(browser, challenge, mailbox.latest(EMAIL).code).status_code == 200
+    with pytest.raises(InvalidAuthentication):
+        repo.verify(old)
+
+
+def test_codes_are_keyed_digests_not_plain_hashes(email_login):
+    repo, _, mailbox, service = email_login
+    import hashlib
+    binding = new_client_binding()
+    challenge = service.start(EMAIL, binding).challenge_id
+    code = mailbox.latest(EMAIL).code
+    with psycopg.connect(repo.dsn) as connection:
+        stored = connection.execute('SELECT code_hash FROM cloud_email_login_challenges').fetchone()[0]
+    for prefix in ('language-ai-email-code-v1', 'language-ai-email-code-v2'):
+        assert stored != hashlib.sha256(f'{prefix}:{challenge}:{code}'.encode()).hexdigest()
+    other_key = EmailLoginService(repo, mailbox, code_key=bytes(32))
+    with pytest.raises(EmailLoginRejected):
+        other_key.verify(challenge, code, binding)  # a database copy without the key cannot check guesses
+    assert service.verify(challenge, code, binding).owner_user_id
+    with pytest.raises(ValueError):
+        EmailLoginService(repo, mailbox, code_key=b'short')
 
 
 def test_delivery_failure_closes_challenge_and_storage_failure_issues_nothing(email_login):
@@ -300,10 +354,10 @@ def test_delivery_failure_closes_challenge_and_storage_failure_issues_nothing(em
         def send_login_code(self, **_):
             raise OSError('smtp down')
     binding = new_client_binding()
-    service = EmailLoginService(repo, mailbox)
+    service = EmailLoginService(repo, mailbox, code_key=CODE_KEY)
     kept = service.start(EMAIL, binding).challenge_id
     clock.advance(seconds=61)
-    broken = EmailLoginService(repo, BrokenMailer())
+    broken = EmailLoginService(repo, BrokenMailer(), code_key=CODE_KEY)
     with pytest.raises(SessionUnavailable):
         broken.start(EMAIL, binding)
     with psycopg.connect(repo.dsn) as connection:
@@ -334,7 +388,7 @@ def test_minimum_privilege_auth_role_can_log_in_without_learning_data(email_logi
                            'cloud_external_identities TO email_auth_test')
         connection.execute('GRANT INSERT ON cloud_users TO email_auth_test')
     runtime = BrowserSessionRepository(make_conninfo(repo.dsn, user='email_auth_test', password='synthetic-test'), repo.clock)
-    service = EmailLoginService(runtime, mailbox)
+    service = EmailLoginService(runtime, mailbox, code_key=CODE_KEY)
     binding = new_client_binding()
     login_result = service.verify(service.start(EMAIL, binding).challenge_id, mailbox.latest(EMAIL).code, binding)
     assert runtime.verify(login_result.session_token).user_id == login_result.owner_user_id

@@ -4,8 +4,13 @@ The browser proves control of a mailbox by returning a six-digit code that was
 delivered through a trusted mail adapter. Only then is the normalized address
 mapped to an internal account and a browser session issued, in one transaction.
 No HTTP path accepts a user id, and no adapter here sends real email.
+
+Codes are stored as HMAC digests under a server-side key that is never in the
+database, so a database copy alone does not let anyone recover open codes.
 """
 import hashlib
+import hmac
+import stat
 import os
 import re
 import secrets
@@ -13,14 +18,15 @@ import threading
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
 import psycopg
 
-from services.auth.sessions import BrowserSessionRepository, SessionUnavailable
+from services.auth.identity import InvalidAuthentication
+from services.auth.sessions import REAUTH_LIFETIME, BrowserSessionRepository, SessionUnavailable
 
 
 CODE_LIFETIME = timedelta(minutes=10)
@@ -35,6 +41,13 @@ EMAIL_PATTERN = re.compile(
     r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
 CODE_PATTERN = re.compile(r'^[0-9]{6}$')
+# Issued instead of six digits once an address reached its daily failed-attempt
+# cap: about 59 bits, so the cap no longer has to lock the learner out.
+LONG_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'
+LONG_CODE_LENGTH = 12
+LONG_CODE_PATTERN = re.compile(f'^[{LONG_CODE_ALPHABET}]{{{LONG_CODE_LENGTH}}}$')
+MIN_CODE_KEY_BYTES = 32
+OUTBOX_NAME = re.compile(r'^(\d{8}T\d{6}Z)-[0-9a-f]{32}\.txt$')
 
 
 class EmailLoginRejected(RuntimeError):
@@ -79,8 +92,32 @@ def _binding_digest(binding):
     return hashlib.sha256(f'language-ai-login-binding-v1:{binding}'.encode('ascii')).hexdigest()
 
 
-def code_digest(challenge_id, code):
-    return hashlib.sha256(f'language-ai-email-code-v1:{challenge_id}:{code}'.encode('ascii')).hexdigest()
+def _session_binding(token):
+    if not isinstance(token, str) or not BINDING_PATTERN.fullmatch(token):
+        raise EmailLoginRejected('Invalid code')
+    return hashlib.sha256(f'language-ai-reauth-binding-v1:{token}'.encode('ascii')).hexdigest()
+
+
+def code_digest(key, challenge_id, code):
+    return hmac.new(key, f'language-ai-email-code-v2:{challenge_id}:{code}'.encode('ascii'), hashlib.sha256).hexdigest()
+
+
+def _new_code(long):
+    if long:
+        return ''.join(secrets.choice(LONG_CODE_ALPHABET) for _ in range(LONG_CODE_LENGTH))
+    return f'{secrets.randbelow(1_000_000):06d}'
+
+
+def normalize_code(value):
+    """Six digits, or a long code typed with any case, spaces or dashes; None if neither."""
+    if not isinstance(value, str) or len(value) > 32:
+        return None
+    compact = value.replace('-', '').replace(' ', '').upper()
+    return compact if CODE_PATTERN.fullmatch(compact) or LONG_CODE_PATTERN.fullmatch(compact) else None
+
+
+def format_code(code):
+    return code if len(code) == 6 else '-'.join(code[i:i + 4] for i in range(0, len(code), 4))
 
 
 class LoginCodeMailer(Protocol):
@@ -123,11 +160,35 @@ class DirectoryMailbox:
         status = self.directory.stat()
         if status.st_mode & 0o077 or status.st_uid != os.getuid():
             raise OSError('Sandbox mail directory must be private to the service user')
-        target = self.directory / f'{expires_at:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.txt'
+        target = self.directory / f'{expires_at.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.txt'
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
-            handle.write(f'To: {email}\nSubject: Language AI sign-in code\n\nCode: {code}\n'
+            handle.write(f'To: {email}\nSubject: Language AI sign-in code\n\nCode: {format_code(code)}\n'
                          f'Expires: {expires_at.isoformat()}\n')
+
+    def purge(self, now, *, grace=timedelta(hours=1), limit=1000):
+        """Delete at most ``limit`` outbox files whose code expired before ``now - grace``.
+
+        Touches only regular files this adapter could have written (exact name
+        pattern, owned by the service user); never follows symlinks.
+        """
+        if not self.directory.exists():
+            return 0
+        status = self.directory.lstat()
+        if not stat.S_ISDIR(status.st_mode) or status.st_mode & 0o077 or status.st_uid != os.getuid():
+            raise OSError('Sandbox mail directory must be private to the service user')
+        cutoff, removed = now - grace, 0
+        for entry in os.scandir(self.directory):
+            if removed >= limit:
+                break
+            match = OUTBOX_NAME.fullmatch(entry.name)
+            if match is None or not entry.is_file(follow_symlinks=False):
+                continue
+            expires = datetime.strptime(match.group(1), '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+            if expires < cutoff and entry.stat(follow_symlinks=False).st_uid == os.getuid():
+                os.unlink(entry.path)
+                removed += 1
+        return removed
 
 
 def _email_lock(connection, email):
@@ -164,40 +225,64 @@ class VerifiedLogin:
     created_account: bool
 
 
+@dataclass(frozen=True)
+class ReauthChallenge:
+    challenge_id: str
+    expires_at: datetime
+    resend_after: datetime
+    email: str
+
+
 class EmailLoginService:
     """Trusted account service; runs on the auth database role, not tenant RLS."""
 
-    def __init__(self, sessions, mailer):
-        if not isinstance(sessions, BrowserSessionRepository) or not callable(getattr(mailer, 'send_login_code', None)):
+    def __init__(self, sessions, mailer, *, code_key):
+        if (not isinstance(sessions, BrowserSessionRepository) or not callable(getattr(mailer, 'send_login_code', None))
+                or not isinstance(code_key, bytes) or len(code_key) < MIN_CODE_KEY_BYTES):
             raise ValueError('Invalid email login configuration')
-        self.sessions, self.mailer = sessions, mailer
+        self.sessions, self.mailer, self._code_key = sessions, mailer, code_key
 
     def start(self, raw_email, binding):
         """Issue a code bound to ``binding``; only that browser can redeem it."""
-        email = normalize_email(raw_email)
-        bound = _binding_digest(binding)
+        return self._issue(normalize_email(raw_email), _binding_digest(binding), 'login', None)
+
+    def start_reauth(self, session_token):
+        """Send a re-check code to the signed-in account's own address only."""
+        bound = _session_binding(session_token)
+        try:
+            with self.sessions._connect() as connection:
+                row, _ = self.sessions.session_in_transaction(connection, session_token)
+                email = self._email_in(connection, row['owner_user_id'])
+        except psycopg.Error as exc:
+            raise SessionUnavailable('Login storage unavailable') from exc
+        if email is None:
+            raise EmailLoginRejected('No email identity')
+        issued = self._issue(email, bound, 'reauth', row['owner_user_id'])
+        return ReauthChallenge(issued.challenge_id, issued.expires_at, issued.resend_after, email)
+
+    def _issue(self, email, bound, purpose, owner):
         now = self.sessions._now()
         challenge_id = str(uuid.uuid4())
-        code = f'{secrets.randbelow(1_000_000):06d}'
         try:
             with self.sessions._connect() as connection:
                 _email_lock(connection, email)
                 recent = connection.execute(
                     'SELECT count(*) AS n, max(created_at) AS latest, min(created_at) AS oldest FROM cloud_email_login_challenges '
                     'WHERE email=%s AND created_at > %s', (email, now - timedelta(hours=1))).fetchone()
-                capped_until = _daily_cap_reset(connection, email, now)
-                if capped_until is not None:
-                    throttled = capped_until
-                elif recent['latest'] is not None and recent['latest'] + RESEND_INTERVAL > now:
+                # At the daily guess cap, keep the learner able to sign in with a
+                # code nobody can guess instead of refusing new codes for a day.
+                code = _new_code(long=_daily_cap_reset(connection, email, now) is not None)
+                if recent['latest'] is not None and recent['latest'] + RESEND_INTERVAL > now:
                     throttled = recent['latest'] + RESEND_INTERVAL
                 elif recent['n'] >= HOURLY_CHALLENGE_LIMIT:
                     throttled = recent['oldest'] + timedelta(hours=1)
                 else:
                     throttled = None
                     connection.execute(
-                        'INSERT INTO cloud_email_login_challenges(challenge_id,email,client_binding,code_hash,created_at,expires_at) '
-                        'VALUES(%s,%s,%s,%s,%s,%s)',
-                        (challenge_id, email, bound, code_digest(challenge_id, code), now, now + CODE_LIFETIME))
+                        'INSERT INTO cloud_email_login_challenges(challenge_id,email,client_binding,code_hash,created_at,expires_at,'
+                        'purpose,owner_user_id,code_format) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                        (challenge_id, email, bound, code_digest(self._code_key, challenge_id, code), now, now + CODE_LIFETIME,
+                         purpose, owner, 'long' if len(code) != 6 else 'short'))
         except psycopg.Error as exc:
             raise SessionUnavailable('Login storage unavailable') from exc
         if throttled is not None:
@@ -225,14 +310,43 @@ class EmailLoginService:
         except psycopg.Error:
             pass  # An unsent challenge still expires on its own.
 
-    def verify(self, challenge_id, code, binding):
-        """Consume the challenge and issue a session for the mapped account."""
+    def verify(self, challenge_id, code, binding, *, replaces=''):
+        """Consume the challenge and issue a session for the mapped account.
+
+        ``replaces`` (the browser's previous session token) is revoked in the
+        same transaction; if that fails, no session is issued at all.
+        """
         bound = _binding_digest(binding)
+
+        def accept(connection, row, now):
+            owner, created = self._map_identity(connection, row['email'], now)
+            return VerifiedLogin(owner, self.sessions.issue_in_transaction(
+                connection, owner, now, reauthenticated=True, replaces=replaces), created)
+        return self._consume(challenge_id, code, bound, 'login', accept)
+
+    def verify_reauth(self, challenge_id, code, session_token):
+        """Mark the requesting session as having freshly proven its email address."""
+        bound = _session_binding(session_token)
+
+        def accept(connection, row, now):
+            try:
+                session, _ = self.sessions.session_in_transaction(connection, session_token)
+            except InvalidAuthentication as exc:
+                raise EmailLoginRejected('Invalid code') from exc
+            if session['owner_user_id'] != row['owner_user_id'] or self._email_in(connection, row['owner_user_id']) != row['email']:
+                raise EmailLoginRejected('Invalid code')
+            connection.execute('UPDATE cloud_browser_sessions SET reauthenticated_at=%s WHERE session_id=%s',
+                               (now, session['session_id']))
+            return now + REAUTH_LIFETIME
+        return self._consume(challenge_id, code, bound, 'reauth', accept)
+
+    def _consume(self, challenge_id, code, bound, purpose, accept):
         try:
             challenge_id = str(uuid.UUID(str(challenge_id)))
         except ValueError as exc:
             raise EmailLoginRejected('Invalid code') from exc
-        if not isinstance(code, str) or not CODE_PATTERN.fullmatch(code):
+        code = normalize_code(code)
+        if code is None:
             raise EmailLoginRejected('Invalid code')
         try:
             with self.sessions._connect() as connection:
@@ -244,29 +358,27 @@ class EmailLoginService:
                 row = connection.execute('SELECT * FROM cloud_email_login_challenges WHERE challenge_id=%s FOR UPDATE',
                                          (challenge_id,)).fetchone()
                 now = self.sessions._now()
-                if row['closed_at'] is not None or row['expires_at'] <= now:
+                if row['closed_at'] is not None or row['expires_at'] <= now or row['purpose'] != purpose:
                     raise EmailLoginRejected('Invalid code')
                 if not secrets.compare_digest(row['client_binding'], bound):
                     raise EmailLoginRejected('Invalid code')  # not counted: another browser cannot lock it
-                if _daily_cap_reset(connection, row['email'], now) is not None:
-                    raise EmailLoginRejected('Invalid code')  # cap covers codes issued before it was reached
-                if not secrets.compare_digest(row['code_hash'], code_digest(challenge_id, code)):
+                if row['code_format'] == 'short' and _daily_cap_reset(connection, row['email'], now) is not None:
+                    raise EmailLoginRejected('Invalid code')  # cap covers short codes issued before it was reached
+                if not secrets.compare_digest(row['code_hash'], code_digest(self._code_key, challenge_id, code)):
                     failed = row['failed_attempts'] + 1
                     connection.execute(
                         'UPDATE cloud_email_login_challenges SET failed_attempts=%s, closed_at=%s WHERE challenge_id=%s',
                         (failed, now if failed >= MAX_FAILED_ATTEMPTS else None, challenge_id))
-                    rejected = True
+                    result = None
                 else:
-                    rejected = False
                     connection.execute('UPDATE cloud_email_login_challenges SET closed_at=%s WHERE challenge_id=%s',
                                        (now, challenge_id))
-                    owner, created = self._map_identity(connection, row['email'], now)
-                    token = self.sessions.issue_in_transaction(connection, owner, now)
+                    result = accept(connection, row, now)
         except psycopg.Error as exc:
             raise SessionUnavailable('Login storage unavailable') from exc
-        if rejected:  # raised after commit so the failed attempt is counted
+        if result is None:  # raised after commit so the failed attempt is counted
             raise EmailLoginRejected('Invalid code')
-        return VerifiedLogin(owner, token, created)
+        return result
 
     def _map_identity(self, connection, email, now):
         mapped = connection.execute(
@@ -282,15 +394,29 @@ class EmailLoginService:
             (email, owner, now, now))
         return owner, True
 
+    @staticmethod
+    def _email_in(connection, owner):
+        row = connection.execute(
+            "SELECT subject FROM cloud_external_identities WHERE provider='email' AND owner_user_id=%s", (owner,)).fetchone()
+        return row['subject'] if row else None
+
     def email_for(self, owner):
         try:
             with self.sessions._connect() as connection:
-                row = connection.execute(
-                    "SELECT subject FROM cloud_external_identities WHERE provider='email' AND owner_user_id=%s ORDER BY created_at LIMIT 1",
-                    (owner,)).fetchone()
+                return self._email_in(connection, owner)
         except psycopg.Error as exc:
             raise SessionUnavailable('Login storage unavailable') from exc
-        return row['subject'] if row else None
+
+
+def code_key_from_environment():
+    """Server-side HMAC key for login codes: CLOUD_AUTH_CODE_KEY, hex, >= 32 bytes."""
+    try:
+        key = bytes.fromhex(os.getenv('CLOUD_AUTH_CODE_KEY', '').strip())
+    except ValueError as exc:
+        raise SessionUnavailable('CLOUD_AUTH_CODE_KEY must be hex') from exc
+    if len(key) < MIN_CODE_KEY_BYTES:
+        raise SessionUnavailable('CLOUD_AUTH_CODE_KEY must hold at least 32 random bytes')
+    return key
 
 
 def mailer_from_environment(origin):
