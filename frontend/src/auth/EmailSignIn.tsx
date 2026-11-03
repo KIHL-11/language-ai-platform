@@ -5,9 +5,15 @@ import type { EmailChallenge } from './client'
 
 type Step = { kind: 'checking' } | { kind: 'not-configured' } | { kind: 'email' } | { kind: 'code'; email: string; challenge: EmailChallenge }
 
+function wait(seconds: number): string {
+  if (seconds < 120) return `${seconds} seconds`
+  if (seconds < 7200) return `${Math.ceil(seconds / 60)} minutes`
+  return `about ${Math.ceil(seconds / 3600)} hours`
+}
+
 function message(error: unknown): string {
   if (error instanceof CloudAuthError) {
-    if (error.status === 429) return `Too many codes requested. Try again in ${error.message.replace('retry:', '')} seconds.`
+    if (error.status === 429) return `Too many codes requested. Try again in ${wait(Number(error.message.replace('retry:', '')))}.`
     if (error.message === 'email-invalid') return 'Enter a valid email address.'
     if (error.message === 'code-invalid') return 'That code is invalid or has expired. Check the latest email or request a new code.'
   }

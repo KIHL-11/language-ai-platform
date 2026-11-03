@@ -33,7 +33,7 @@ Neither request accepts a user id; extra fields are rejected (422).
 | --- | --- |
 | Code | 6 digits from `secrets`, stored only as a SHA-256 digest bound to the challenge id |
 | Lifetime | 10 minutes, single use |
-| Failed attempts | 5 per challenge, then the challenge is closed; 10 per address per rolling day, then no new codes until the day window passes |
+| Failed attempts | 5 per challenge, then the challenge is closed; 10 per address per rolling day, after which no new codes are issued **and no open code is accepted** until enough failures leave the window (`Retry-After` reports exactly when) |
 | Resend | 60 s between codes per address; 5 codes per address per rolling hour (429 + `Retry-After`) |
 | Superseding | a new code closes earlier open codes **from the same browser** only, and only after it was delivered |
 | Wrong browser | rejected without counting a failed attempt, so another client cannot lock a learner's code |
@@ -114,7 +114,13 @@ data-processing decision for sending addresses to that provider.
   from Workstream F). Until then two risks stay open: (a) code spraying across
   many addresses is bounded only per address (10 guesses/day against 10^6
   codes); (b) anyone can exhaust one address's hourly code quota, delaying that
-  learner's sign-in, and fill their inbox. Existing codes are not invalidated.
+  learner's sign-in, and fill their inbox; (c) **accepted for now, owner
+  decision:** anyone can spend an address's 10 daily failed attempts with their
+  own codes and block new sign-ins for that address for up to 24 hours
+  (existing sessions keep working). This is the price of bounding brute force
+  per address; per-IP limits are the real fix.
+- A pre-login session whose revocation hits a storage error after sign-in stays
+  valid server-side until its idle/absolute expiry (the browser cookie is replaced).
 - Purge of old challenges and staging outbox files.
 - Notify other open tabs after sign-in (logout already broadcasts).
 - Production mail adapter once credentials are approved.

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import psycopg
 import pytest
@@ -153,10 +154,12 @@ def test_login_endpoints_require_same_origin_and_accept_no_identity_claims(email
                           headers={'Origin': 'https://evil.example'})
     assert cross.status_code == 403 and COOKIE_NAME not in cross.cookies
     assert verify(browser, challenge, code).status_code == 200
-    # The CSRF exemption covers exactly the two login paths.
-    anonymous = client()
+    # The CSRF exemption covers exactly the two login paths: a signed-in browser
+    # without a CSRF token is refused everywhere else.
     for path in ('/api/account/email/start/', '/api/account/email', '/api/account/logout', '/api/account/sessions/revoke-all'):
-        assert anonymous.post(path, json={'email': EMAIL}, headers={'Origin': ORIGIN}).status_code in (401, 403)
+        refused = browser.post(path, json={'email': EMAIL}, headers={'Origin': ORIGIN})
+        assert refused.status_code == 403 and refused.json()['detail']['code'] == 'csrf_invalid'
+    assert browser.get('/api/account/me').status_code == 200
 
 
 def test_provider_state_when_email_delivery_is_not_configured(sessions):  # noqa: F811
@@ -245,9 +248,33 @@ def test_code_is_bound_to_the_requesting_browser(email_login):
     with psycopg.connect(repo.dsn) as connection:
         assert connection.execute('SELECT failed_attempts FROM cloud_email_login_challenges WHERE challenge_id=%s',
                                   (challenge,)).fetchone()[0] == 0
-    assert verify(victim, challenge, code).status_code == 200
     with pytest.raises(EmailLoginRejected):
-        service.verify(challenge, code, 'not-a-binding')
+        service.verify(challenge, code, new_client_binding())  # well-formed, but not the victim's cookie
+    assert verify(victim, challenge, code).status_code == 200
+
+
+def test_daily_cap_also_stops_guessing_on_codes_issued_earlier(email_login):
+    repo, clock, mailbox, service = email_login
+    issued = []
+    for _ in range(5):  # one fresh browser per code: nothing supersedes anything
+        binding = new_client_binding()
+        challenge = service.start(EMAIL, binding).challenge_id
+        issued.append((challenge, mailbox.latest(EMAIL).code, binding))
+        clock.advance(seconds=61)
+    for challenge, code, binding in issued:
+        for _ in range(5):
+            with pytest.raises(EmailLoginRejected):
+                service.verify(challenge, wrong(code), binding)
+    challenge, code, binding = issued[-1]
+    with pytest.raises(EmailLoginRejected):
+        service.verify(challenge, code, binding)  # even the right code, once the address is capped
+    with psycopg.connect(repo.dsn) as connection:
+        assert connection.execute('SELECT sum(failed_attempts) FROM cloud_email_login_challenges').fetchone()[0] == 10
+        first_failure = connection.execute('SELECT min(created_at) FROM cloud_email_login_challenges').fetchone()[0]
+    clock.advance(hours=1)
+    response = start(client())
+    expected = (first_failure + timedelta(days=1) - clock()).total_seconds()
+    assert response.status_code == 429 and abs(response.json()['detail']['retry_after'] - expected) <= 2
 
 
 def test_daily_failed_attempt_cap_blocks_new_codes(email_login):
@@ -362,3 +389,14 @@ def test_sandbox_directory_delivery_is_local_only(tmp_path, monkeypatch):
     monkeypatch.setenv('CLOUD_EMAIL_SANDBOX_DIR', 'relative/outbox')
     with pytest.raises(SessionUnavailable):
         mailer_from_environment('https://localhost')
+
+
+def test_personal_desktop_exposes_no_cloud_login(monkeypatch):
+    monkeypatch.setenv('LANGUAGE_AI_DEPLOYMENT_MODE', 'personal')
+    local = TestClient(app_module.app)
+    assert local.get('/api/account/providers').json() == {'email': False, 'wechat': False}
+    assert local.post('/api/account/email/start', json={'email': EMAIL}).status_code == 503
+    assert local.post('/api/account/email/verify', json={'challenge_id': '0' * 36, 'code': '123456'}).status_code == 503
+    assert local.post('/api/account/sessions/revoke-all').status_code == 503
+    assert local.get('/api/deployment').json() == {'mode': 'personal'}
+    assert LOGIN_COOKIE_NAME not in local.cookies and COOKIE_NAME not in local.cookies

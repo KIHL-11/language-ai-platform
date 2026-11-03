@@ -135,6 +135,21 @@ def _email_lock(connection, email):
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('language-ai-email:' || %s, 0))", (email,))
 
 
+def _daily_cap_reset(connection, email, now):
+    """When the address falls back under the daily failed-attempt cap; None if it is under it now."""
+    rows = connection.execute(
+        'SELECT created_at, failed_attempts FROM cloud_email_login_challenges WHERE email=%s AND created_at > %s '
+        'AND failed_attempts > 0 ORDER BY created_at', (email, now - timedelta(days=1))).fetchall()
+    total = sum(row['failed_attempts'] for row in rows)
+    for row in rows:
+        if total < DAILY_FAILED_ATTEMPT_LIMIT:
+            break
+        total -= row['failed_attempts']  # oldest failures leave the rolling window first
+        if total < DAILY_FAILED_ATTEMPT_LIMIT:
+            return row['created_at'] + timedelta(days=1)
+    return None
+
+
 @dataclass(frozen=True)
 class EmailChallenge:
     challenge_id: str
@@ -170,11 +185,9 @@ class EmailLoginService:
                 recent = connection.execute(
                     'SELECT count(*) AS n, max(created_at) AS latest, min(created_at) AS oldest FROM cloud_email_login_challenges '
                     'WHERE email=%s AND created_at > %s', (email, now - timedelta(hours=1))).fetchone()
-                failures = connection.execute(
-                    'SELECT coalesce(sum(failed_attempts),0) AS n, min(created_at) FILTER (WHERE failed_attempts>0) AS oldest '
-                    'FROM cloud_email_login_challenges WHERE email=%s AND created_at > %s', (email, now - timedelta(days=1))).fetchone()
-                if failures['n'] >= DAILY_FAILED_ATTEMPT_LIMIT:
-                    throttled = failures['oldest'] + timedelta(days=1)
+                capped_until = _daily_cap_reset(connection, email, now)
+                if capped_until is not None:
+                    throttled = capped_until
                 elif recent['latest'] is not None and recent['latest'] + RESEND_INTERVAL > now:
                     throttled = recent['latest'] + RESEND_INTERVAL
                 elif recent['n'] >= HOURLY_CHALLENGE_LIMIT:
@@ -235,6 +248,8 @@ class EmailLoginService:
                     raise EmailLoginRejected('Invalid code')
                 if not secrets.compare_digest(row['client_binding'], bound):
                     raise EmailLoginRejected('Invalid code')  # not counted: another browser cannot lock it
+                if _daily_cap_reset(connection, row['email'], now) is not None:
+                    raise EmailLoginRejected('Invalid code')  # cap covers codes issued before it was reached
                 if not secrets.compare_digest(row['code_hash'], code_digest(challenge_id, code)):
                     failed = row['failed_attempts'] + 1
                     connection.execute(
