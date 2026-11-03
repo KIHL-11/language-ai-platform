@@ -1,7 +1,7 @@
 export type AuthState =
   | { status: 'loading' | 'unavailable' | 'expired' | 'csrf-invalid' | 'logged-out' | 'logout-unconfirmed'; generation: number }
   | { status: 'personal'; generation: number }
-  | { status: 'authenticated'; userId: string; generation: number }
+  | { status: 'authenticated'; userId: string; email: string | null; generation: number }
 
 export class CloudAuthError extends Error {
   readonly status: number
@@ -46,11 +46,11 @@ export class CloudAuthClient {
       const response = await fetch('/api/account/me', { credentials: 'same-origin', redirect: 'error', cache: 'no-store', signal: this.controller.signal })
       if (generation !== this.state.generation) return
       if (!response.ok) { this.clear(response.status === 401 ? 'expired' : 'unavailable'); return }
-      const value = await response.json() as { user_id?: unknown; csrf_token?: unknown }
+      const value = await response.json() as { user_id?: unknown; csrf_token?: unknown; email?: unknown }
       if (generation !== this.state.generation) return
       if (typeof value.user_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.user_id) || typeof value.csrf_token !== 'string' || !/^[a-f0-9]{64}$/.test(value.csrf_token)) throw new Error('Invalid account')
       this.csrf = value.csrf_token
-      this.publish({ status: 'authenticated', userId: value.user_id, generation })
+      this.publish({ status: 'authenticated', userId: value.user_id, email: typeof value.email === 'string' ? value.email : null, generation })
     } catch { if (generation === this.state.generation) this.clear('unavailable') }
   }
   async request(input: string, init?: RequestInit): Promise<Response> {
@@ -107,11 +107,56 @@ export class CloudAuthClient {
       confirmed = true
     } finally { if (generation === this.state.generation) this.clear(confirmed ? 'logged-out' : 'logout-unconfirmed') }
   }
+  async revokeAll() {
+    const generation = this.state.generation
+    let confirmed = false
+    try {
+      const response = await this.request('/api/account/sessions/revoke-all', { method: 'POST' })
+      if (!response.ok) throw new CloudAuthError(response.status, 'Sign-out everywhere not confirmed')
+      confirmed = true
+    } finally { if (generation === this.state.generation) this.clear(confirmed ? 'logged-out' : 'logout-unconfirmed') }
+  }
   async rotate() {
     const response = await this.request('/api/account/session/rotate', { method: 'POST' })
     if (!response.ok) throw new CloudAuthError(response.status, 'Rotation not confirmed')
     await this.refresh()
   }
+}
+
+export type EmailChallenge = { challengeId: string; expiresIn: number; resendAfter: number }
+export type LoginProviders = { email: boolean; wechat: boolean }
+
+// Sessionless sign-in calls. The browser sends Origin on these POSTs and the
+// server enforces it; no CSRF token exists until the session is issued.
+async function loginPost(path: string, body: unknown): Promise<Response> {
+  return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+}
+
+export async function loginProviders(): Promise<LoginProviders> {
+  const response = await fetch('/api/account/providers', { credentials: 'omit', cache: 'no-store', redirect: 'error' })
+  if (!response.ok) return { email: false, wechat: false }
+  const value = await response.json() as Partial<LoginProviders>
+  return { email: value.email === true, wechat: value.wechat === true }
+}
+
+export async function startEmailLogin(email: string): Promise<EmailChallenge> {
+  const response = await loginPost('/api/account/email/start', { email })
+  if (response.status === 429) {
+    const value = await response.json().catch(() => ({})) as { detail?: { retry_after?: unknown } }
+    const retry = Number(value.detail?.retry_after ?? response.headers.get('Retry-After'))
+    throw new CloudAuthError(429, `retry:${Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : 60}`)
+  }
+  if (!response.ok) throw new CloudAuthError(response.status, response.status === 422 ? 'email-invalid' : 'unavailable')
+  const value = await response.json() as { challenge_id?: unknown; expires_in?: unknown; resend_after?: unknown }
+  if (typeof value.challenge_id !== 'string' || !/^[0-9a-f-]{36}$/.test(value.challenge_id) || typeof value.expires_in !== 'number' || typeof value.resend_after !== 'number') throw new CloudAuthError(503, 'unavailable')
+  return { challengeId: value.challenge_id, expiresIn: value.expires_in, resendAfter: value.resend_after }
+}
+
+export async function verifyEmailLogin(challengeId: string, code: string): Promise<void> {
+  const response = await loginPost('/api/account/email/verify', { challenge_id: challengeId, code })
+  if (!response.ok) throw new CloudAuthError(response.status, response.status === 400 || response.status === 422 ? 'code-invalid' : 'unavailable')
+  // The session cookie is HttpOnly; confirm it through the normal account check.
+  await cloudAuth.refresh()
 }
 
 export const cloudAuth = new CloudAuthClient()
