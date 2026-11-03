@@ -10,6 +10,7 @@ from services.library.access import LibraryAccessDependency
 from services.library.owner_repository import OwnerScopedLibraryRepository
 from services.library.postgres import (
     CloudLibraryUnavailableError,
+    MediaIntegrityError,
     OwnerNotProvisionedError,
 )
 from services.library.store import (
@@ -17,6 +18,7 @@ from services.library.store import (
     LibraryConflictError,
     LibraryStoreError,
 )
+from services.library.verified_response import VerifiedAudioResponse
 from services.schemas.library import (
     LibraryItem,
     LibraryListResponse,
@@ -53,6 +55,14 @@ def _store_error(operation):
             detail={
                 "code": "cloud_owner_not_provisioned",
                 "message": "The authenticated cloud account is not provisioned.",
+            },
+        ) from exc
+    except MediaIntegrityError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "cloud_media_integrity_failed",
+                "message": "Library audio failed an integrity check.",
             },
         ) from exc
     except CloudLibraryUnavailableError as exc:
@@ -217,7 +227,7 @@ def get_library_audio(item_id: str, access: LibraryAccessDependency):
         audio = _store_error(
             lambda: repository.audio_for_owner(owner_user_id, item_id)
         )
-        return FileResponse(audio.path, media_type=audio.content_type)
+        return VerifiedAudioResponse(audio)
     path, content_type = _store_error(lambda: library_store.audio_path(item_id))
     return FileResponse(path, media_type=content_type)
 

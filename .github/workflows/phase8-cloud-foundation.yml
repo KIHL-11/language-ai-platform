@@ -26,6 +26,7 @@ on:
       - codex/p8-05a-secure-cloud-sessions
       - codex/p8-05a2-cloud-frontend-session
       - codex/p8-feature-complete-integration
+      - claude/p8-b1-library-reliability
   workflow_dispatch:
 
 permissions:

@@ -61,7 +61,8 @@ therefore writes a unique object first, commits metadata second, deletes the new
 object if the database write fails, and removes the replaced object only after a
 successful commit. Delete writes a cleanup-outbox row before cascading the
 authorization metadata; successful cleanup acknowledges that row, while failure
-retains it with an attempt counter for a future bounded retry worker. The orphan
+retains it with an attempt counter; the B-1 worker retries it
+(`docs/P8-B1-LIBRARY-RELIABILITY.md`). The orphan
 is inaccessible but remains auditable. No raw filesystem path appears in an API
 response.
 
