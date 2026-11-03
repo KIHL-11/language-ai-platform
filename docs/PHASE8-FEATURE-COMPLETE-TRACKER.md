@@ -8,7 +8,7 @@ This is a development tracker, not owner acceptance or production approval.
 | Workstream | Delivery | Status | Evidence / gate |
 | --- | --- | --- | --- |
 | F foundation | strict session JSONB checks; dependency inventory | In progress | synthetic direct-SQL negative tests; fresh audit pending |
-| A | email challenges, verified subject mapping, sandbox mail, simulated WeChat flow, account UX | In progress | P8-05B1 email login + sign-in UX (docs/P8-05B-EMAIL-LOGIN.md); P8-05B2 simulated WeChat, link/unlink, purge, lockout/HMAC fixes (docs/P8-05B2-ACCOUNT-IDENTITY.md); pending: per-IP/global limits (needs F trusted proxy), real mail/WeChat adapters (need credentials + owner approval) |
+| A | email challenges, verified subject mapping, sandbox mail, simulated WeChat flow, account UX | In progress | P8-05B1 email login + sign-in UX (docs/P8-05B-EMAIL-LOGIN.md); P8-05B2 simulated WeChat, link/unlink, purge, lockout/HMAC fixes (docs/P8-05B2-ACCOUNT-IDENTITY.md); P8-05B3 add/change email, session purge + maintenance role (docs/P8-05B3-EMAIL-MANAGEMENT.md); pending: per-IP/global limits (needs F trusted proxy), real mail/WeChat adapters (need credentials + owner approval) |
 | B | Library/media reliability, upload safeguards, owner Guided/Listening/curation | Pending | Issue #58 synthetic media; no personal media migration |
 | C | bounded model/voice adapters, budgets, idempotency, mock interruption | Pending | paid/live calls remain disabled |
 | D | export/preview/trial import, rollback/restore, deletion/session controls | Pending | synthetic account data only |
