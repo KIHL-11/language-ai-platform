@@ -1,15 +1,21 @@
 import os
 import subprocess
+from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from services.auth.identity import PersonalStorageDependency
 from services.library.access import LibraryAccessDependency
-from services.library.owner_repository import OwnerScopedLibraryRepository
+from services.library.owner_repository import (
+    OwnerScopedAudio,
+    OwnerScopedLibraryRepository,
+)
 from services.library.postgres import (
     CloudLibraryUnavailableError,
+    MediaIntegrityError,
     OwnerNotProvisionedError,
 )
 from services.library.store import (
@@ -55,6 +61,14 @@ def _store_error(operation):
                 "message": "The authenticated cloud account is not provisioned.",
             },
         ) from exc
+    except MediaIntegrityError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "cloud_media_integrity_failed",
+                "message": "Library audio failed an integrity check.",
+            },
+        ) from exc
     except CloudLibraryUnavailableError as exc:
         raise HTTPException(
             status_code=503,
@@ -65,6 +79,40 @@ def _store_error(operation):
         ) from exc
     except LibraryStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class VerifiedAudioResponse(FileResponse):
+    """Stream the handle whose bytes were hashed, never a reopened path.
+
+    Keeps FileResponse's Range/HEAD handling; ``_open_file`` is the single
+    place Starlette opens the file, and a test swaps the object on disk after
+    verification to prove this override is still the one in use.
+    """
+
+    def __init__(self, audio: OwnerScopedAudio):
+        super().__init__(
+            audio.path,
+            media_type=audio.content_type,
+            stat_result=os.fstat(audio.file.fileno()),
+            headers={"etag": f'"{audio.sha256}"'},
+        )
+        self._audio = audio
+
+    async def __call__(self, scope, receive, send) -> None:
+        extensions = {
+            name: value
+            for name, value in scope.get("extensions", {}).items()
+            if name != "http.response.pathsend"
+        }
+        try:
+            await super().__call__({**scope, "extensions": extensions}, receive, send)
+        finally:
+            self._audio.close()
+
+    @asynccontextmanager
+    async def _open_file(self):
+        self._audio.file.seek(0)
+        yield anyio.wrap_file(self._audio.file)
 
 
 def _cloud_repository(access) -> tuple[OwnerScopedLibraryRepository, str]:
@@ -217,7 +265,7 @@ def get_library_audio(item_id: str, access: LibraryAccessDependency):
         audio = _store_error(
             lambda: repository.audio_for_owner(owner_user_id, item_id)
         )
-        return FileResponse(audio.path, media_type=audio.content_type)
+        return VerifiedAudioResponse(audio)
     path, content_type = _store_error(lambda: library_store.audio_path(item_id))
     return FileResponse(path, media_type=content_type)
 
