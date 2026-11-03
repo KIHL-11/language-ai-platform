@@ -14,6 +14,7 @@ on:
       - codex/p8-05a-secure-cloud-sessions
       - codex/p8-05a2-cloud-frontend-session
       - claude/p8-05b-email-auth
+      - claude/p8-05b2-account-identity
     paths-ignore:
       - "**/*.md"
   push:
@@ -29,6 +30,7 @@ on:
       - codex/p8-feature-complete-integration
       - claude/p8-05b-email-auth
       - claude/p8-05b2-account-identity
+      - claude/p8-05b3-email-management
   workflow_dispatch:
 
 permissions:
