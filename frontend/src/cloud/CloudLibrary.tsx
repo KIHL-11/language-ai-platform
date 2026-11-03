@@ -133,7 +133,10 @@ function CloudListening({ item, generation, onBack }: { item: LibraryItem; gener
   const [failure, setFailure] = useState<CloudSyncFailure | null>(null)
   const getSync = useCloudSync(item, generation, { onFailure: setFailure })
   // Stable: ListeningWorkspace flushes on every change of this function.
-  const saveProgress = useCallback((progress: ListeningProgress) => getSync().saveListening(progress), [getSync])
+  const saveProgress = useCallback(
+    (progress: ListeningProgress, meta: { ownsPosition: boolean }) => getSync().saveListening(progress, meta),
+    [getSync],
+  )
   return <>
     {failure && <p role="alert" className="mx-auto mt-4 max-w-5xl px-5 text-sm text-[#8f1d14]">{FAILURE_MESSAGES[failure]}</p>}
     <ListeningWorkspace item={item} onBack={onBack} saveProgress={saveProgress} studyFeatures={false} />

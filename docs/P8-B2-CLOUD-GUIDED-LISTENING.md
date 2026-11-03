@@ -47,10 +47,18 @@ Daily Review state keep their own tables and semantics.
     is still further ahead, the view remounts on it and explains why. Late
     calls from the replaced view are refused by `CloudGuided` (a per-view
     guard), so a stale tab can never move saved progress back.
-  - **Listening:** playback position and display settings are a resume point,
-    not learning state. After a conflict the latest local snapshot is resent
-    on the reloaded revision, so the position follows the tab in use. This is
-    an owner decision item (see "Not covered").
+  - **Listening (owner decision, 2026-11-04):** the resume point is the
+    position from the most recent *playback action* (play, pause, seek,
+    sentence pick, or playing time), forward or back. Display settings follow
+    the tab that changed them. Another tab's player is never moved.
+    `ListeningWorkspace` passes `ownsPosition` with each write: true only
+    after such an action since this tab's last write, and never for a
+    paused or not-yet-loaded player whose clock drifts. Without that claim
+    the sync writes the latest saved position (refreshed on a 409 reload),
+    so an idle background tab that toggles a setting, drifts or closes its
+    view cannot move the active tab's resume point. A queued claim survives
+    being coalesced into a newer snapshot. Personal ignores the flag; its
+    request body is unchanged.
   - **Retries:** at most 3 conflicts in a row, then the view says so. Network
     errors, expiry and identity changes are never retried.
 - **Session binding.** Every Library request in the cloud views carries the
@@ -75,9 +83,32 @@ Daily Review state keep their own tables and semantics.
     cloud dictionary and Study Bank provenance land (B-3/B-4). Shadowing is
     not offered.
 
+## Cloud → Personal storage boundary (B-3 gate)
+
+These routes checked the caller's identity but then used the Personal
+server-local JSON stores in cloud mode. Two of them wrote to those stores:
+
+- `GET /api/chunks/memory`
+- `GET /api/chunks/memory/active-recall`
+- `PATCH /api/chunks/memory/{id}/practice` (write)
+- `PATCH /api/chunks/memory/{id}` (write)
+- `GET /api/integration/target-languages`
+- `POST /api/integration/speaking/…/suggestions/{i}/save` (writes)
+
+They were isolated per `user_id`, but cloud data had no business there. Each
+route now checks identity first (401/403 unchanged), then calls
+`require_personal_storage`. In cloud that returns 503
+`cloud_tenant_storage_not_configured` before any store is touched. A test
+replaces every Personal store with one that raises on access and runs all
+six routes as the account's own owner. B-3 may only reopen recall or chunk
+memory in cloud on owner-scoped PostgreSQL stores. Personal mode is
+unchanged.
+
 ## Tests
 
-- **Backend:** `test_cloud_progress_revision.py` has 15 tests. They cover:
+- **Backend:** `test_cloud_progress_revision.py` has 15 tests, and
+  `test_auth_tenant_boundary.py` adds 6 cases for the route gate. The
+  revision tests cover:
   - the single-learner flow;
   - a missing revision, which gives a 409 without enumeration;
   - stale revisions for both kinds;
@@ -91,7 +122,7 @@ Daily Review state keep their own tables and semantics.
   - writes staying within the Library table;
   - the Personal contract, including a check that the file has no
     `revision`.
-- **Frontend:** 39 new tests across these files:
+- **Frontend:** 47 new tests across these files:
   - **`cloudProgressSync.test.ts`:**
     - merging;
     - coalescing;
@@ -100,7 +131,10 @@ Daily Review state keep their own tables and semantics.
     - the queue-drain race;
     - keeping a newer step queued before or during the reload (review H1 and
       re-review M1), and not writing one the other tab is ahead of;
-    - resending the latest listening snapshot after a conflict.
+    - resending the latest listening snapshot after a conflict;
+    - position ownership: a non-owning write keeps the saved position, a
+      rewind this tab made is written, and a queued claim survives
+      coalescing.
   - **`client.test.ts`:**
     - silent same-user re-check;
     - generation-bound refusal before sending;
@@ -116,12 +150,25 @@ Daily Review state keep their own tables and semantics.
     - an error when going back finds the lesson gone (review L4);
     - an open session surviving a focus re-check;
     - an unavailable lesson;
-    - no voice even when the build enables it.
+    - no voice even when the build enables it;
+    - an idle tab toggling a setting or leaving keeps another tab's resume
+      point, and a deliberate rewind becomes the resume point.
   - **`CloudGuided.test.tsx`:** a replaced view's late callback is ignored.
+  - **`ListeningWorkspace.test.tsx`:** passive clock drift is not a position
+    claim; a sentence pick is; a display change is not.
   - **Personal regression:**
     - a plain Listening PATCH with study features on;
     - realtime voice still offered in Personal.
-- **Mutation check:** 21 guards were removed one at a time. Each fails the
+- **CI failure on `d2c981b`** (run 41676494879, `CloudSessionProvider.test.tsx`):
+  - The cause was found with a probe that logged to a file. In 1 of 89 runs,
+    the Study Bank request, sent from a passive effect, had not run when the
+    heading was committed; it then arrived correctly.
+  - This was test timing, not a product defect. The test now waits for the
+    request and asserts more than before: every owner claim is the session's,
+    and none is stale after the switch. A stale-owner mutant fails it.
+  - 100 consecutive runs pass.
+- **Mutation check:** 32 guards were removed one at a time: the 21 earlier
+  ones, the 6 route gates and 5 position-ownership guards. Each fails the
   suite except one equivalent: the UPDATE's `revision =` condition, which the
   row lock plus the pre-check make unreachable. The account-switch guard is
   also caught by the integration test on its own.
@@ -159,10 +206,9 @@ covering one write (Low). Both are resolved below.
   realtime voice (Workstream C).
 - A browser E2E; jsdom tests drive the real components against a mocked
   server.
-- **Owner decision item:** Listening position follows the tab in use. If two
-  tabs play the same lesson, the last one used sets the resume point. Making
-  it monotonic would mean moving the other tab's player, which disrupts a
-  learner who is actively listening.
+- **Two tabs both playing:** each makes real playback actions, so the most
+  recent writer sets the resume point. That is the owner's chosen
+  semantics. Moving the other tab's player is deliberately not done.
 - **Accepted (review L3):** while a same-account focus re-check is in flight,
   requests still go out with the current CSRF. A cookie switched to another
   account in a different tab is caught by the session-bound CSRF (403) and by

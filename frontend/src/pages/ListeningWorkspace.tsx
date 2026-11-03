@@ -47,7 +47,10 @@ interface ListeningWorkspaceProps {
   controllerFactory?: ListeningControllerFactory
   onShadowing?: (sentenceId: number) => void
   // Cloud injects a revision-checked writer; Personal keeps the plain PATCH.
-  saveProgress?: (progress: ListeningProgress) => Promise<unknown>
+  // `ownsPosition` is true only when this tab played, paused, sought or
+  // picked a sentence since its last write, so a writer can keep another
+  // tab's resume point when this one merely changed a setting or drifted.
+  saveProgress?: (progress: ListeningProgress, meta: { ownsPosition: boolean }) => Promise<unknown>
   // Dictionary lookups and Words & Chunks use Personal-only routes until the
   // cloud dictionary and Study Bank provenance land (B-3/B-4).
   studyFeatures?: boolean
@@ -100,6 +103,7 @@ export default function ListeningWorkspace({
   const progressRef = useRef<ListeningProgress>(item.listening_progress)
   const mountedRef = useRef(true)
   const lastQueuedPosition = useRef(item.listening_progress.last_position_seconds)
+  const positionTouched = useRef(false)
   const writeTail = useRef<Promise<void>>(Promise.resolve())
   const currentSentence = sentences[currentIndex] ?? null
   const lessonDuration = Math.max(0, ...sentences.map((sentence) => sentence.end))
@@ -136,8 +140,10 @@ export default function ListeningWorkspace({
     progressRef.current = snapshot
     if (!force && Math.abs(snapshot.last_position_seconds - lastQueuedPosition.current) < PERSIST_INTERVAL_SECONDS) return
     lastQueuedPosition.current = snapshot.last_position_seconds
+    const meta = { ownsPosition: positionTouched.current }
+    positionTouched.current = false
     writeTail.current = writeTail.current.catch(() => undefined).then(async () => {
-      await (saveProgress ? saveProgress(snapshot) : updateListeningProgress(item.id, snapshot))
+      await (saveProgress ? saveProgress(snapshot, meta) : updateListeningProgress(item.id, snapshot))
     }).catch(() => undefined)
   }, [item.id, saveProgress])
 
@@ -206,6 +212,9 @@ export default function ListeningWorkspace({
         void controller.play().catch(() => setIsPlaying(false))
         time = range.start
       }
+      // Only real playback moves this tab's claim on the resume point; a
+      // paused or not-yet-loaded player reporting another time does not.
+      if (isPlayingRef.current) positionTouched.current = true
       setCurrentTime(time)
       const next = activeSentenceIndex(sentences, time, currentIndexRef.current)
       if (next >= 0 && next !== currentIndexRef.current) setCurrentIndex(next)
@@ -242,6 +251,7 @@ export default function ListeningWorkspace({
     setDictationResult(null)
     setBlindRevealed(false)
     controller?.seek(sentence.start)
+    positionTouched.current = true
     persist(true, {
       last_position_seconds: sentence.start,
       current_sentence_id: sentence.id,
@@ -254,6 +264,7 @@ export default function ListeningWorkspace({
     const next = Math.min(duration, Math.max(0, controller.getCurrentTime() + delta))
     controller.seek(next)
     setCurrentTime(next)
+    positionTouched.current = true
     persist(true, { last_position_seconds: next })
   }, [controller, lessonDuration, persist])
 
@@ -263,6 +274,7 @@ export default function ListeningWorkspace({
       controller.pause()
       setIsPlaying(false)
       setCurrentTime(controller.getCurrentTime())
+      positionTouched.current = true
       persist(true, { last_position_seconds: controller.getCurrentTime() })
     } else {
       void controller.play().then(() => setIsPlaying(true)).catch(() => {

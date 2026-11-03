@@ -8,6 +8,7 @@ import { libraryItem } from '../testFixtures/libraryItem'
 import { studyCandidates, studyItem } from '../testFixtures/studyBank'
 import { dictionaryEntry } from '../testFixtures/dictionary'
 import ListeningWorkspace from './ListeningWorkspace'
+import type { ListeningProgress } from '../types/library'
 
 class FakeController implements MediaController {
   time = libraryItem.listening_progress.last_position_seconds
@@ -401,5 +402,29 @@ describe('Listening Workspace', () => {
     expect(body).toMatchObject({ mode: 'blind' })
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/study-candidates'))).toBe(true)
     expect(screen.getByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
+  })
+
+  it('tells the writer whether this tab moved the position (passive clock drift does not)', async () => {
+    const long = {
+      ...libraryItem,
+      lesson: { ...libraryItem.lesson, sentences: libraryItem.lesson.sentences.map((sentence, index) => ({ ...sentence, start: index * 10, end: index * 10 + 9 })) },
+      listening_progress: { ...libraryItem.listening_progress, last_position_seconds: 20 },
+    }
+    // A player that has not loaded yet reports 0 whatever the restored position.
+    const fake = new FakeController()
+    fake.time = 0
+    fake.seek = vi.fn()
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'audio', message: null })
+    const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+    const user = userEvent.setup()
+    render(<ListeningWorkspace item={long} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+
+    await waitFor(() => expect(saveProgress).toHaveBeenCalled())
+    expect(saveProgress.mock.calls[0]).toEqual([expect.objectContaining({ last_position_seconds: 0 }), { ownsPosition: false }])
+
+    await user.click(screen.getByRole('button', { name: `Seek to ${long.lesson.sentences[1].text}` }))
+    await waitFor(() => expect(saveProgress.mock.calls.at(-1)).toEqual([expect.objectContaining({ last_position_seconds: 10 }), { ownsPosition: true }]))
+    await user.click(screen.getByRole('button', { name: 'Show translation' }))
+    await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[1]).toEqual({ ownsPosition: false }))
   })
 })

@@ -257,4 +257,50 @@ describe('Cloud Library learning', () => {
       vi.unstubAllEnvs()
     }
   })
+
+  describe('Listening resume point across tabs', () => {
+    async function openListeningIdle() {
+      const server = cloudServer()
+      const user = userEvent.setup()
+      await openLesson(user)
+      await user.click(screen.getByRole('button', { name: 'Open listening' }))
+      await screen.findByRole('button', { name: 'Blind' })
+      // Another tab plays on: the saved resume point moves to 2.75 s.
+      server.state.item = {
+        ...server.state.item,
+        listening_progress: { ...server.state.item.listening_progress, last_position_seconds: 2.75, current_sentence_id: 3 },
+        revision: server.state.item.revision + 1,
+      }
+      return { ...server, user }
+    }
+
+    it('an idle tab changing a display setting keeps the other tab’s position', async () => {
+      const { state, user } = await openListeningIdle()
+
+      await user.click(screen.getByRole('button', { name: 'Show translation' }))
+
+      await waitFor(() => expect(state.item.listening_progress.translation_visible).toBe(false))
+      expect(state.item.listening_progress).toMatchObject({ last_position_seconds: 2.75, current_sentence_id: 3 })
+      expect(state.writes.filter((write) => write.body.last_position_seconds !== 2.75 && write.body.expected_revision === state.item.revision - 1)).toEqual([])
+    })
+
+    it('leaving an idle tab keeps the other tab’s position', async () => {
+      const { state, user } = await openListeningIdle()
+
+      await user.click(screen.getByRole('button', { name: /back/i }))
+      await screen.findByRole('button', { name: 'Open listening' })
+
+      expect(state.item.listening_progress).toMatchObject({ last_position_seconds: 2.75, current_sentence_id: 3 })
+    })
+
+    it('a deliberate rewind in this tab becomes the resume point', async () => {
+      const { state, user } = await openListeningIdle()
+      const [first] = libraryItem.lesson.sentences
+
+      await user.click(screen.getByRole('button', { name: `Seek to ${first.text}` }))
+
+      await waitFor(() => expect(state.item.listening_progress.last_position_seconds).toBe(first.start))
+      expect(state.item.listening_progress.current_sentence_id).toBe(first.id)
+    })
+  })
 })

@@ -301,4 +301,56 @@ describe('createCloudProgressSync', () => {
     expect(update.mock.calls.map((call) => [call[1].stage_index, call[2]?.expectedRevision])).toEqual([[2, 1], [4, 5]])
     expect(merged).not.toHaveBeenCalled()
   })
+
+  it('keeps the saved resume point for a write that does not own the position', async () => {
+    const saved = { ...libraryItem.listening_progress, last_position_seconds: 2, current_sentence_id: 2 }
+    const local = { ...saved, last_position_seconds: 0, current_sentence_id: 1, translation_visible: false }
+    updateListening.mockResolvedValueOnce(cloudItem(2, atStage(1), { ...saved, translation_visible: false }))
+    const sync = createCloudProgressSync({ item: cloudItem(1, atStage(1), saved), generation: 1 })
+
+    await sync.saveListening(local, { ownsPosition: false })
+
+    expect(updateListening.mock.calls[0][1]).toEqual({ ...local, last_position_seconds: 2, current_sentence_id: 2 })
+  })
+
+  it('takes the other tab’s fresh position after a conflict when this tab did not play', async () => {
+    const local = { ...libraryItem.listening_progress, last_position_seconds: 1, current_sentence_id: 1, mode: 'blind' as const }
+    const other = { ...libraryItem.listening_progress, last_position_seconds: 2.75, current_sentence_id: 3 }
+    updateListening.mockRejectedValueOnce(new CloudConflictError()).mockResolvedValueOnce(cloudItem(4, atStage(1), { ...other, mode: 'blind' }))
+    reload.mockResolvedValueOnce(cloudItem(3, atStage(1), other))
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
+
+    await sync.saveListening(local, { ownsPosition: false })
+
+    expect(updateListening.mock.calls[1][1]).toEqual({ ...local, last_position_seconds: 2.75, current_sentence_id: 3 })
+  })
+
+  it('writes this tab’s rewind after a conflict when this tab made it', async () => {
+    const rewound = { ...libraryItem.listening_progress, last_position_seconds: 0.5, current_sentence_id: 1 }
+    const other = { ...libraryItem.listening_progress, last_position_seconds: 2.75, current_sentence_id: 3 }
+    updateListening.mockRejectedValueOnce(new CloudConflictError()).mockResolvedValueOnce(cloudItem(4, atStage(1), rewound))
+    reload.mockResolvedValueOnce(cloudItem(3, atStage(1), other))
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
+
+    await sync.saveListening(rewound, { ownsPosition: true })
+
+    expect(updateListening.mock.calls[1][1]).toEqual(rewound)
+  })
+
+  it('keeps a queued claim on the position when a newer non-owning snapshot replaces it', async () => {
+    let finish!: (item: LibraryItem) => void
+    updateListening.mockImplementationOnce(() => new Promise((done) => { finish = done }))
+      .mockResolvedValueOnce(cloudItem(3, atStage(1)))
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
+    const first = { ...libraryItem.listening_progress, mode: 'blind' as const }
+    const sought = { ...first, last_position_seconds: 0.25, current_sentence_id: 1 }
+
+    void sync.saveListening(first, { ownsPosition: false })
+    void sync.saveListening(sought, { ownsPosition: true })
+    const last = sync.saveListening({ ...sought, translation_visible: false }, { ownsPosition: false })
+    finish(cloudItem(2, atStage(1), first))
+    await last
+
+    expect(updateListening.mock.calls[1][1]).toMatchObject({ last_position_seconds: 0.25, current_sentence_id: 1, translation_visible: false })
+  })
 })

@@ -28,7 +28,10 @@ export interface CloudProgressSyncOptions {
 
 export interface CloudProgressSync {
   saveGuided: (progress: LibraryProgress) => Promise<void>
-  saveListening: (progress: ListeningProgress) => Promise<void>
+  // ownsPosition: this tab made the latest playback action (play, pause,
+  // seek, sentence). Otherwise the saved resume point is kept and only the
+  // display settings are written.
+  saveListening: (progress: ListeningProgress, meta?: { ownsPosition: boolean }) => Promise<void>
   // Resolves once every queued write has finished (tests, navigation).
   idle: () => Promise<void>
 }
@@ -77,7 +80,7 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
   let revision = item.revision as number
   let savedGuided: LibraryProgress = item.progress
   let savedListening: ListeningProgress = item.listening_progress
-  const pending: { guided?: LibraryProgress; listening?: ListeningProgress } = {}
+  const pending: { guided?: LibraryProgress; listening?: { progress: ListeningProgress; ownsPosition: boolean } } = {}
   let running: Promise<void> | null = null
 
   async function reload(): Promise<LibraryItem> {
@@ -124,9 +127,17 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
     options.onFailure?.('conflict')
   }
 
-  async function writeListening(progress: ListeningProgress) {
-    let body = progress
+  async function writeListening(latest: ListeningProgress, ownsPosition: boolean) {
+    let progress = latest
+    let owns = ownsPosition
     for (let attempt = 0; attempt <= MAX_CONFLICT_RETRIES; attempt += 1) {
+      // Recomputed on every attempt: after a 409 reload, savedListening holds
+      // the other tab's latest resume point.
+      const body = owns ? progress : {
+        ...progress,
+        last_position_seconds: savedListening.last_position_seconds,
+        current_sentence_id: savedListening.current_sentence_id,
+      }
       if (sameJson(body, savedListening)) return
       try {
         accept(await updateListeningProgress(item.id, body, { expectedRevision: revision, generation }))
@@ -135,10 +146,11 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
         if (!(error instanceof CloudConflictError)) throw error
       }
       await reload()
-      // Playback position and display settings are a resume point that
-      // follows the tab in use (not learning state): resend the latest one.
+      // Display settings follow this tab; the position only if this tab
+      // made the latest playback action (forward or back).
       if (pending.listening) {
-        body = pending.listening
+        progress = pending.listening.progress
+        owns = owns || pending.listening.ownsPosition
         delete pending.listening
       }
     }
@@ -153,7 +165,7 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
       delete pending.listening
       try {
         if (guided) await writeGuided(guided)
-        if (listening) await writeListening(listening)
+        if (listening) await writeListening(listening.progress, listening.ownsPosition)
       } catch {
         // Network failure, expired session or a changed account: the write
         // is dropped (never replayed under another identity) and reported.
@@ -175,7 +187,12 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
 
   return {
     saveGuided(progress) { pending.guided = progress; return schedule().then(idle) },
-    saveListening(progress) { pending.listening = progress; return schedule().then(idle) },
+    saveListening(progress, meta = { ownsPosition: true }) {
+      // A queued claim on the position survives being superseded by a newer
+      // snapshot of this tab: that snapshot carries the tab's current position.
+      pending.listening = { progress, ownsPosition: meta.ownsPosition || Boolean(pending.listening?.ownsPosition) }
+      return schedule().then(idle)
+    },
     idle,
   }
 }
