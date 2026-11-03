@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 import psycopg
 
 from services.auth.identity import InvalidAuthentication
-from services.auth.sessions import REAUTH_LIFETIME, BrowserSessionRepository, SessionUnavailable
+from services.auth.sessions import REAUTH_LIFETIME, BrowserSessionRepository, SessionUnavailable, account_lock
 
 
 CODE_LIFETIME = timedelta(minutes=10)
@@ -319,10 +319,15 @@ class EmailLoginService:
         bound = _binding_digest(binding)
 
         def accept(connection, row, now):
-            # Revoke the previous session before touching identity rows: unlink
-            # locks session rows first, so the opposite order could deadlock.
+            # Same order as every other sign-in method change: address lock (held
+            # by _consume), then the account lock, then session rows, then
+            # identity rows. Without the account lock this deadlocked with unlink.
+            known = connection.execute("SELECT owner_user_id FROM cloud_external_identities WHERE provider='email' AND subject=%s",
+                                       (row['email'],)).fetchone()
+            if known is not None:
+                account_lock(connection, known['owner_user_id'])
             self.sessions.revoke_token_in_transaction(connection, replaces, now)
-            owner, created = self._map_identity(connection, row['email'], now)
+            owner, created = self._map_identity(connection, row['email'], now, known['owner_user_id'] if known else None)
             return VerifiedLogin(owner, self.sessions.issue_in_transaction(connection, owner, now, reauthenticated=True), created)
         return self._consume(challenge_id, code, bound, 'login', accept)
 
@@ -382,12 +387,17 @@ class EmailLoginService:
             raise EmailLoginRejected('Invalid code')
         return result
 
-    def _map_identity(self, connection, email, now):
+    def _map_identity(self, connection, email, now, locked_owner=None):
         mapped = connection.execute(
-            "SELECT owner_user_id FROM cloud_external_identities WHERE provider='email' AND subject=%s", (email,)).fetchone()
+            "SELECT owner_user_id FROM cloud_external_identities WHERE provider='email' AND subject=%s FOR UPDATE", (email,)).fetchone()
         if mapped is not None:
-            connection.execute("UPDATE cloud_external_identities SET verified_at=GREATEST(%s,created_at) WHERE provider='email' AND subject=%s",
-                               (now, email))
+            if mapped['owner_user_id'] != locked_owner:
+                raise SessionUnavailable('Sign-in raced an account change; retry')  # never issue under the wrong lock
+            updated = connection.execute("UPDATE cloud_external_identities SET verified_at=GREATEST(%s,created_at) "
+                                         "WHERE provider='email' AND subject=%s AND owner_user_id=%s",
+                                         (now, email, locked_owner)).rowcount
+            if updated != 1:
+                raise SessionUnavailable('Sign-in raced an account change; retry')
             return mapped['owner_user_id'], False
         owner = f'u_{uuid.uuid4().hex}'
         connection.execute('INSERT INTO cloud_users(user_id,created_at) VALUES(%s,%s)', (owner, now))
