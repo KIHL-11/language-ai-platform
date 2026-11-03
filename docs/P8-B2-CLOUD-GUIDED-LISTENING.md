@@ -42,14 +42,15 @@ Daily Review state keep their own tables and semantics.
   - **Guided:** the further position wins as a whole, ranked by
     (completed stages, stage, sentence). `lesson_memory_imported` is never
     unset, and a replaced lesson (different training order) wins outright.
-    A step already queued behind the conflicting write is folded in first,
-    so the learner's latest step is never lost. When the saved state is
-    still further ahead, the view remounts on it and explains why, and any
-    snapshot the replaced view emits afterwards is discarded (epoch counter
-    plus a per-view guard), so a stale tab can never move saved progress back.
-  - **Listening:** after a conflict, display settings follow the tab in use,
-    but the playback position never moves behind another tab's further
-    position. A rewind inside one tab is not a conflict and is written as is.
+    Every step the view queued before or during the reload is folded in
+    first, so the learner's latest step is never lost. When the saved state
+    is still further ahead, the view remounts on it and explains why. Late
+    calls from the replaced view are refused by `CloudGuided` (a per-view
+    guard), so a stale tab can never move saved progress back.
+  - **Listening:** playback position and display settings are a resume point,
+    not learning state. After a conflict the latest local snapshot is resent
+    on the reloaded revision, so the position follows the tab in use. This is
+    an owner decision item (see "Not covered").
   - **Retries:** at most 3 conflicts in a row, then the view says so. Network
     errors, expiry and identity changes are never retried.
 - **Session binding.** Every Library request in the cloud views carries the
@@ -90,17 +91,16 @@ Daily Review state keep their own tables and semantics.
   - writes staying within the Library table;
   - the Personal contract, including a check that the file has no
     `revision`.
-- **Frontend:** 38 new tests across these files:
+- **Frontend:** 39 new tests across these files:
   - **`cloudProgressSync.test.ts`:**
     - merging;
     - coalescing;
     - bounded retries;
     - no retry on non-conflict errors;
     - the queue-drain race;
-    - dropping stale snapshots after a merge, including one emitted while
-      the reload is in flight;
-    - keeping a newer queued step (review H1);
-    - never moving the listening position back after a conflict (review L1).
+    - keeping a newer step queued before or during the reload (review H1 and
+      re-review M1), and not writing one the other tab is ahead of;
+    - resending the latest listening snapshot after a conflict.
   - **`client.test.ts`:**
     - silent same-user re-check;
     - generation-bound refusal before sending;
@@ -121,7 +121,7 @@ Daily Review state keep their own tables and semantics.
   - **Personal regression:**
     - a plain Listening PATCH with study features on;
     - realtime voice still offered in Personal.
-- **Mutation check:** 23 guards were removed one at a time. Each fails the
+- **Mutation check:** 21 guards were removed one at a time. Each fails the
   suite except one equivalent: the UPDATE's `revision =` condition, which the
   row lock plus the pre-check make unreachable. The account-switch guard is
   also caught by the integration test on its own.
@@ -132,14 +132,17 @@ Daily Review state keep their own tables and semantics.
 ## Independent review (cf3771e)
 
 A separate reviewer agent (fresh context) found no Critical issues, one High,
-one Medium and four Lows. Five of them are fixed, each with a test that fails
-without the fix; L3 is accepted.
+one Medium and four Lows. Five are resolved, with tests where code changed;
+L3 is accepted. Its re-review of `aa90b82` found the H1 fix incomplete (a step
+queued *during* the reload was still dropped, Medium) and the L1 fix only
+covering one write (Low). Both are resolved below.
 
 | Severity | Finding | Resolution |
 | --- | --- | --- |
 | High | a conflict merge discarded a newer queued Guided step and claimed "furthest point" | queued step folded in before merging |
 | Medium | switch/sign-out tests never attempted a write | rewritten with a write in flight and one queued |
-| Low | Listening position could move back after a conflict | further position kept on the conflict path |
+| Low | Listening position could move back after a conflict | not a learning-state regression: position follows the tab in use (owner decision item). A one-write "keep further position" half-measure was removed after the re-review showed the next ordinary write undid it |
+| Medium (re-review) | a step queued during the reload was still dropped | queued step folded in after the reload; the unreachable epoch guard was removed |
 | Low | Cloud Guided minted a Personal learner id in localStorage | not created with the cloud memory client |
 | Low | same-user focus re-check no longer blocks requests during `/me` | accepted: CSRF is session-bound (a switched cookie gets 403) and private GETs are owner-checked; noted below |
 | Low | a failed Back left the error invisible | returns to the list with the error |
@@ -156,6 +159,10 @@ without the fix; L3 is accepted.
   realtime voice (Workstream C).
 - A browser E2E; jsdom tests drive the real components against a mocked
   server.
+- **Owner decision item:** Listening position follows the tab in use. If two
+  tabs play the same lesson, the last one used sets the resume point. Making
+  it monotonic would mean moving the other tab's player, which disrupts a
+  learner who is actively listening.
 - **Accepted (review L3):** while a same-account focus re-check is in flight,
   requests still go out with the current CSRF. A cookie switched to another
   account in a different tab is caught by the session-bound CSRF (403) and by

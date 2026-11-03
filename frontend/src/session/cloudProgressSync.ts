@@ -65,20 +65,6 @@ export function furthestProgress(local: LibraryProgress, saved: LibraryProgress)
   }
 }
 
-/**
- * After a Listening conflict, display settings follow the tab in use, but the
- * playback position never moves back behind another tab's further position.
- * A rewind inside one tab is not a conflict and is written as is.
- */
-export function furtherListening(local: ListeningProgress, saved: ListeningProgress): ListeningProgress {
-  if (saved.last_position_seconds <= local.last_position_seconds) return local
-  return {
-    ...local,
-    last_position_seconds: saved.last_position_seconds,
-    current_sentence_id: saved.current_sentence_id,
-  }
-}
-
 function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -89,12 +75,8 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
   let revision = item.revision as number
   let savedGuided: LibraryProgress = item.progress
   let savedListening: ListeningProgress = item.listening_progress
-  const pending: { guided?: { progress: LibraryProgress; epoch: number }; listening?: ListeningProgress } = {}
+  const pending: { guided?: LibraryProgress; listening?: ListeningProgress } = {}
   let running: Promise<void> | null = null
-  // Bumped whenever a merge moves the view to another saved state. Guided
-  // snapshots queued before that describe the replaced view; writing one
-  // would move the saved progress back, so they are dropped.
-  let epoch = 0
 
   async function reload(): Promise<LibraryItem> {
     const fresh = await getLibraryItem(item.id, { generation })
@@ -122,19 +104,19 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
       } catch (error) {
         if (!(error instanceof CloudConflictError)) throw error
       }
-      // A newer step may already be queued behind the one that conflicted;
-      // fold it in so the merge never discards the learner's latest step.
-      const queued = pending.guided
-      if (queued && queued.epoch === epoch) {
-        delete pending.guided
-        body = furthestProgress(queued.progress, body)
-      }
       const fresh = await reload()
-      const merged = furthestProgress(body, fresh.progress)
-      if (!sameJson(merged, body)) {
-        epoch += 1
-        options.onGuidedMerged?.(fresh, merged)
+      // The view is still live until onGuidedMerged runs, so every step it
+      // queued (before or during the reload) is the learner's latest one;
+      // fold it in so the merge never discards it. From here to the callback
+      // nothing awaits, so no step can slip in between. Late calls from a
+      // view the callback replaces are refused by that view's owner
+      // (CloudGuided), not here.
+      if (pending.guided) {
+        body = furthestProgress(pending.guided, body)
+        delete pending.guided
       }
+      const merged = furthestProgress(body, fresh.progress)
+      if (!sameJson(merged, body)) options.onGuidedMerged?.(fresh, merged)
       body = merged
     }
     options.onFailure?.('conflict')
@@ -150,12 +132,13 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
       } catch (error) {
         if (!(error instanceof CloudConflictError)) throw error
       }
+      await reload()
+      // Playback position and display settings are a resume point that
+      // follows the tab in use (not learning state): resend the latest one.
       if (pending.listening) {
         body = pending.listening
         delete pending.listening
       }
-      const fresh = await reload()
-      body = furtherListening(body, fresh.listening_progress)
     }
     options.onFailure?.('conflict')
   }
@@ -167,7 +150,7 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
       delete pending.guided
       delete pending.listening
       try {
-        if (guided && guided.epoch === epoch) await writeGuided(guided.progress)
+        if (guided) await writeGuided(guided)
         if (listening) await writeListening(listening)
       } catch {
         // Network failure, expired session or a changed account: the write
@@ -189,7 +172,7 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
   const idle = (): Promise<void> => running ? running.then(idle) : Promise.resolve()
 
   return {
-    saveGuided(progress) { pending.guided = { progress, epoch }; return schedule().then(idle) },
+    saveGuided(progress) { pending.guided = progress; return schedule().then(idle) },
     saveListening(progress) { pending.listening = progress; return schedule().then(idle) },
     idle,
   }

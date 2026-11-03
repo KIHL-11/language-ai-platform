@@ -237,16 +237,22 @@ describe('createCloudProgressSync', () => {
     expect(merged).toHaveBeenCalledWith(expect.anything(), atStage(5))
   })
 
-  it('never moves the listening position behind another tab after a conflict (review L1)', async () => {
-    const local = { ...libraryItem.listening_progress, last_position_seconds: 1, current_sentence_id: 1, translation_visible: false }
-    const other = { ...libraryItem.listening_progress, last_position_seconds: 2.75, current_sentence_id: 3, translation_visible: true }
-    updateListening.mockRejectedValueOnce(new CloudConflictError()).mockResolvedValueOnce(cloudItem(4, atStage(1), other))
-    reload.mockResolvedValueOnce(cloudItem(3, atStage(1), other))
+  it('resends the latest listening snapshot after a conflict (position follows the tab in use)', async () => {
+    const first = { ...libraryItem.listening_progress, last_position_seconds: 1 }
+    const latest = { ...libraryItem.listening_progress, last_position_seconds: 1.5, translation_visible: false }
+    let reject!: (error: unknown) => void
+    updateListening.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
+      .mockResolvedValueOnce(cloudItem(4, atStage(1), latest))
+    reload.mockResolvedValueOnce(cloudItem(3, atStage(1), { ...first, last_position_seconds: 2.75 }))
     const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
 
-    await sync.saveListening(local)
+    const pendingWrite = sync.saveListening(first)
+    void sync.saveListening(latest)
+    reject(new CloudConflictError())
+    await pendingWrite
+    await sync.idle()
 
-    expect(updateListening.mock.calls[1][1]).toEqual({ ...local, last_position_seconds: 2.75, current_sentence_id: 3 })
+    expect(updateListening.mock.calls.map((call) => [call[1], call[2]?.expectedRevision])).toEqual([[first, 1], [latest, 3]])
   })
 
   it('writes a deliberate rewind when there is no conflict', async () => {
@@ -259,7 +265,7 @@ describe('createCloudProgressSync', () => {
     expect(updateListening.mock.calls[0][1]).toEqual(rewound)
   })
 
-  it('drops a stale snapshot the replaced view emits while the reload is in flight', async () => {
+  it('does not write a step queued during the reload that is behind the other tab', async () => {
     update.mockRejectedValueOnce(new CloudConflictError())
     let finishReload!: (item: LibraryItem) => void
     reload.mockImplementationOnce(() => new Promise((done) => { finishReload = done }))
@@ -276,5 +282,23 @@ describe('createCloudProgressSync', () => {
 
     expect(merged).toHaveBeenCalledTimes(1)
     expect(update).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a step queued during the reload that is ahead of the other tab (re-review M1)', async () => {
+    update.mockRejectedValueOnce(new CloudConflictError()).mockResolvedValueOnce(cloudItem(6, atStage(4)))
+    let finishReload!: (item: LibraryItem) => void
+    reload.mockImplementationOnce(() => new Promise((done) => { finishReload = done }))
+    const merged = vi.fn()
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1, onGuidedMerged: merged })
+
+    const first = sync.saveGuided(atStage(2))
+    await vi.waitFor(() => expect(reload).toHaveBeenCalled())
+    void sync.saveGuided(atStage(4))
+    finishReload(cloudItem(5, atStage(3)))
+    await first
+    await sync.idle()
+
+    expect(update.mock.calls.map((call) => [call[1].stage_index, call[2]?.expectedRevision])).toEqual([[2, 1], [4, 5]])
+    expect(merged).not.toHaveBeenCalled()
   })
 })
