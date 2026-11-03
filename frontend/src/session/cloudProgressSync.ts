@@ -65,6 +65,20 @@ export function furthestProgress(local: LibraryProgress, saved: LibraryProgress)
   }
 }
 
+/**
+ * After a Listening conflict, display settings follow the tab in use, but the
+ * playback position never moves back behind another tab's further position.
+ * A rewind inside one tab is not a conflict and is written as is.
+ */
+export function furtherListening(local: ListeningProgress, saved: ListeningProgress): ListeningProgress {
+  if (saved.last_position_seconds <= local.last_position_seconds) return local
+  return {
+    ...local,
+    last_position_seconds: saved.last_position_seconds,
+    current_sentence_id: saved.current_sentence_id,
+  }
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -108,6 +122,13 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
       } catch (error) {
         if (!(error instanceof CloudConflictError)) throw error
       }
+      // A newer step may already be queued behind the one that conflicted;
+      // fold it in so the merge never discards the learner's latest step.
+      const queued = pending.guided
+      if (queued && queued.epoch === epoch) {
+        delete pending.guided
+        body = furthestProgress(queued.progress, body)
+      }
       const fresh = await reload()
       const merged = furthestProgress(body, fresh.progress)
       if (!sameJson(merged, body)) {
@@ -120,16 +141,21 @@ export function createCloudProgressSync(options: CloudProgressSyncOptions): Clou
   }
 
   async function writeListening(progress: ListeningProgress) {
+    let body = progress
     for (let attempt = 0; attempt <= MAX_CONFLICT_RETRIES; attempt += 1) {
-      if (sameJson(progress, savedListening)) return
+      if (sameJson(body, savedListening)) return
       try {
-        accept(await updateListeningProgress(item.id, progress, { expectedRevision: revision, generation }))
+        accept(await updateListeningProgress(item.id, body, { expectedRevision: revision, generation }))
         return
       } catch (error) {
         if (!(error instanceof CloudConflictError)) throw error
       }
-      // Position and display settings follow the tab the learner is using.
-      await reload()
+      if (pending.listening) {
+        body = pending.listening
+        delete pending.listening
+      }
+      const fresh = await reload()
+      body = furtherListening(body, fresh.listening_progress)
     }
     options.onFailure?.('conflict')
   }

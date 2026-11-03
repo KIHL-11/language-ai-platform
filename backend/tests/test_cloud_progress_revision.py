@@ -296,6 +296,24 @@ def test_invalid_progress_with_current_revision_changes_nothing(postgres_reposit
     assert _stored(item["id"])[0] == 1
 
 
+def test_stale_revision_is_reported_before_progress_validation(postgres_repository):
+    """A stale tab must be told to reload (409), not that its now-outdated
+    progress is invalid (422)."""
+    item = _create_via_api(OWNER_A, postgres_repository)
+    _patch(
+        OWNER_A, postgres_repository, item["id"],
+        {**_guided(item, is_training=True), "expected_revision": 1},
+    )
+
+    stale_and_invalid = _patch(
+        OWNER_A, postgres_repository, item["id"],
+        {**_guided(item, stage_index=99), "expected_revision": 1},
+    )
+
+    assert stale_and_invalid.status_code == 409
+    assert stale_and_invalid.json()["detail"]["code"] == "library_revision_conflict"
+
+
 def test_resaving_the_lesson_invalidates_open_tabs(postgres_repository):
     item = _create_via_api(OWNER_A, postgres_repository)
     resaved = _create_via_api(OWNER_A, postgres_repository, lesson(title="Regenerated"))

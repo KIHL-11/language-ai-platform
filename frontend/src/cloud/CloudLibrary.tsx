@@ -164,7 +164,11 @@ export default function CloudLibrary({ generation }: { generation: number }) {
       const item = await getLibraryItem(itemId, { generation })
       if (ticket === opening.current) setView({ kind, item })
     } catch {
-      if (ticket === opening.current) setError('That lesson could not be opened. It may have been removed or your session changed.')
+      if (ticket === opening.current) {
+        // Leave Guided/Listening too, so the message is visible.
+        setView({ kind: 'list' })
+        setError('That lesson could not be opened. It may have been removed or your session changed.')
+      }
     } finally {
       if (ticket === opening.current) setLoading(null)
     }

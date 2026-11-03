@@ -31,6 +31,9 @@ function cloudServer(owner = 'owner-a') {
       revision: 1,
     } as LibraryItem & { revision: number },
     writes: [] as Array<{ url: string; body: Record<string, unknown>; csrf: string | null; owner: string }>,
+    // When set, the next PATCH stays in flight until release() is called.
+    holdNext: false,
+    release: () => {},
   }
   const reply = (value: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(value), {
     status, headers: { 'X-Authenticated-User': state.owner },
@@ -44,6 +47,15 @@ function cloudServer(owner = 'owner-a') {
     if (url.startsWith(`${ITEM_URL}/`) && init.method === 'PATCH') {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>
       state.writes.push({ url, body, csrf: new Headers(init.headers).get('X-CSRF-Token'), owner: state.owner })
+      if (state.holdNext) {
+        state.holdNext = false
+        const answeredBy = state.owner
+        return new Promise<Response>((done) => {
+          state.release = () => done(new Response(JSON.stringify({ ...state.item, revision: state.item.revision + 1 }), {
+            headers: { 'X-Authenticated-User': answeredBy },
+          }))
+        })
+      }
       if (body.expected_revision !== state.item.revision) {
         return reply({ detail: { code: 'library_revision_conflict' } }, 409)
       }
@@ -70,6 +82,7 @@ async function openLesson(user: ReturnType<typeof userEvent.setup>, owner = 'own
 describe('Cloud Library learning', () => {
   it('runs Guided training with revision-checked, CSRF-protected writes and no Personal or voice routes', async () => {
     const { state, fetchMock } = cloudServer()
+    localStorage.clear()
     const user = userEvent.setup()
     await openLesson(user)
     expect(screen.getByText(/Guided training not started/)).toBeInTheDocument()
@@ -87,6 +100,8 @@ describe('Cloud Library learning', () => {
     expect(sinceOpen.filter((url) => /\/api\/(chunks|realtime)|user_id=|study/.test(url))).toEqual([])
     expect(new Set(sinceOpen)).toEqual(new Set([`${ITEM_URL}`, `${ITEM_URL}/progress`]))
     expect(screen.queryByText('Personal Desktop')).not.toBeInTheDocument()
+    // No Personal learner id is minted for cloud training (review L2).
+    expect(localStorage.getItem('language_ai_learner_id_v1')).toBeNull()
   })
 
   it('continues from another tab’s further progress instead of overwriting it', async () => {
@@ -135,33 +150,57 @@ describe('Cloud Library learning', () => {
     const user = userEvent.setup()
     await openLesson(user)
     await user.click(screen.getByRole('button', { name: 'Open listening' }))
-    await screen.findByRole('button', { name: 'Blind' })
-    const before = state.writes.length
+    state.holdNext = true
+    await user.click(await screen.findByRole('button', { name: 'Blind' }))
+    await waitFor(() => expect(state.writes).toHaveLength(1))
+    // A second change is queued behind the in-flight write.
+    await user.click(screen.getByRole('button', { name: 'Show translation' }))
 
     state.owner = 'owner-b'
     await act(() => cloudAuth.refresh())
+    await act(async () => { state.release(); await new Promise((resolve) => setTimeout(resolve, 20)) })
 
     expect(await screen.findByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
     expect(screen.queryByText(libraryItem.lesson.title)).not.toBeInTheDocument()
-    // Leaving Listening flushes its position; under owner-b it must be refused
-    // before any request is made.
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === '/api/account/me').length).toBeGreaterThan(1))
-    expect(state.writes.slice(before).filter((write) => write.owner === 'owner-b')).toEqual([])
+    // Only the write sent under owner-a ever reached the network; the queued
+    // and unmount-flush writes were refused before any request.
+    expect(state.writes.map((write) => write.owner)).toEqual(['owner-a'])
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')).toHaveLength(1)
   })
 
-  it('stops writing after sign-out', async () => {
+  it('stops writing after sign-out, including writes queued before it', async () => {
     const { state } = cloudServer()
     const user = userEvent.setup()
     await openLesson(user)
     await user.click(screen.getByRole('button', { name: 'Open listening' }))
-    await screen.findByRole('button', { name: 'Blind' })
+    state.holdNext = true
+    await user.click(await screen.findByRole('button', { name: 'Blind' }))
+    await waitFor(() => expect(state.writes).toHaveLength(1))
+    await user.click(screen.getByRole('button', { name: 'Show translation' }))
 
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await act(async () => { state.release(); await new Promise((resolve) => setTimeout(resolve, 20)) })
 
     // The sign-out broadcast also invalidates this tab: either gate message.
     expect(await screen.findByRole('heading', { name: 'Language AI — Cloud session' })).toBeInTheDocument()
+    expect(state.writes).toHaveLength(1)
+  })
+
+  it('shows the error when going back finds the lesson gone (review L4)', async () => {
+    const { fetchMock } = cloudServer()
+    const user = userEvent.setup()
+    await openLesson(user)
+    await user.click(screen.getByRole('button', { name: 'Open listening' }))
+    await screen.findByRole('button', { name: 'Blind' })
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === ITEM_URL && (init?.method ?? 'GET') === 'GET'
+      ? Promise.resolve(new Response('{}', { status: 404, headers: { 'X-Authenticated-User': 'owner-a' } }))
+      : original(url, init))
+
+    await user.click(screen.getByRole('button', { name: /back/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be opened')
     expect(screen.queryByRole('button', { name: 'Blind' })).not.toBeInTheDocument()
-    expect(state.writes).toEqual([])
   })
 
   it('keeps an open Guided session when the same account is re-checked on focus', async () => {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   chunkMemoryClient,
+  cloudUnavailableMemoryClient,
   type ChunkMemoryClient,
 } from '../api/chunkMemory'
 import ActiveRecall from '../components/training/ActiveRecall'
@@ -69,7 +70,10 @@ export default function TrainingSession({
     isDevelopment,
   )
   const progressionLock = useRef(false)
-  const [learnerId] = useState(getOrCreateLearnerId)
+  // Cloud recall never uses a local learner id, so none is created there.
+  const [learnerId] = useState(() =>
+    memoryClient === cloudUnavailableMemoryClient ? '' : getOrCreateLearnerId(),
+  )
   const [devOverride, setDevOverride] = useState<{
     stage: TrainingStage
     sentenceIndex: number

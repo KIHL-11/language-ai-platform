@@ -42,11 +42,14 @@ Daily Review state keep their own tables and semantics.
   - **Guided:** the further position wins as a whole, ranked by
     (completed stages, stage, sentence). `lesson_memory_imported` is never
     unset, and a replaced lesson (different training order) wins outright.
-    When the saved state is further ahead, the view remounts on it and
-    explains why. Snapshots queued before such a merge are discarded, using an
-    epoch counter, so a stale tab can never move saved progress back.
-  - **Listening:** position and display settings follow the tab in use, so the
-    snapshot is re-sent on the reloaded revision.
+    A step already queued behind the conflicting write is folded in first,
+    so the learner's latest step is never lost. When the saved state is
+    still further ahead, the view remounts on it and explains why, and any
+    snapshot the replaced view emits afterwards is discarded (epoch counter
+    plus a per-view guard), so a stale tab can never move saved progress back.
+  - **Listening:** after a conflict, display settings follow the tab in use,
+    but the playback position never moves behind another tab's further
+    position. A rewind inside one tab is not a conflict and is written as is.
   - **Retries:** at most 3 conflicts in a row, then the view says so. Network
     errors, expiry and identity changes are never retried.
 - **Session binding.** Every Library request in the cloud views carries the
@@ -73,7 +76,7 @@ Daily Review state keep their own tables and semantics.
 
 ## Tests
 
-- **Backend:** `test_cloud_progress_revision.py` has 14 tests. They cover:
+- **Backend:** `test_cloud_progress_revision.py` has 15 tests. They cover:
   - the single-learner flow;
   - a missing revision, which gives a 409 without enumeration;
   - stale revisions for both kinds;
@@ -82,19 +85,22 @@ Daily Review state keep their own tables and semantics.
   - a deterministic lock wait;
   - safe retry and replay;
   - cross-owner 404s;
-  - invalid progress;
+  - invalid progress, and a stale revision reported (409) before validation;
   - re-saving the lesson;
   - writes staying within the Library table;
   - the Personal contract, including a check that the file has no
     `revision`.
-- **Frontend:** 32 new tests across these files:
+- **Frontend:** 38 new tests across these files:
   - **`cloudProgressSync.test.ts`:**
     - merging;
     - coalescing;
     - bounded retries;
     - no retry on non-conflict errors;
     - the queue-drain race;
-    - dropping stale snapshots after a merge.
+    - dropping stale snapshots after a merge, including one emitted while
+      the reload is in flight;
+    - keeping a newer queued step (review H1);
+    - never moving the listening position back after a conflict (review L1).
   - **`client.test.ts`:**
     - silent same-user re-check;
     - generation-bound refusal before sending;
@@ -104,7 +110,10 @@ Daily Review state keep their own tables and semantics.
     - Guided with CSRF and revisions, and no Personal or voice routes;
     - adopting another tab's further progress;
     - Listening without study routes;
-    - no writes after an account switch or sign-out;
+    - no writes after an account switch or sign-out, with a write held in
+      flight and another queued (review M1);
+    - no Personal learner id minted (review L2);
+    - an error when going back finds the lesson gone (review L4);
     - an open session surviving a focus re-check;
     - an unavailable lesson;
     - no voice even when the build enables it.
@@ -112,12 +121,28 @@ Daily Review state keep their own tables and semantics.
   - **Personal regression:**
     - a plain Listening PATCH with study features on;
     - realtime voice still offered in Personal.
-- **Mutation check:** 17 guards were removed one at a time. Each fails the
+- **Mutation check:** 23 guards were removed one at a time. Each fails the
   suite except one equivalent: the UPDATE's `revision =` condition, which the
-  row lock plus the pre-check make unreachable.
+  row lock plus the pre-check make unreachable. The account-switch guard is
+  also caught by the integration test on its own.
 - **Flakiness:** the concurrency test ran 30 times without failure. Its first
   version picked positions outside the 6 s lesson, so it failed only when one
   of those writers won; that was a test bug.
+
+## Independent review (cf3771e)
+
+A separate reviewer agent (fresh context) found no Critical issues, one High,
+one Medium and four Lows. Five of them are fixed, each with a test that fails
+without the fix; L3 is accepted.
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| High | a conflict merge discarded a newer queued Guided step and claimed "furthest point" | queued step folded in before merging |
+| Medium | switch/sign-out tests never attempted a write | rewritten with a write in flight and one queued |
+| Low | Listening position could move back after a conflict | further position kept on the conflict path |
+| Low | Cloud Guided minted a Personal learner id in localStorage | not created with the cloud memory client |
+| Low | same-user focus re-check no longer blocks requests during `/me` | accepted: CSRF is session-bound (a switched cookie gets 403) and private GETs are owner-checked; noted below |
+| Low | a failed Back left the error invisible | returns to the list with the error |
 
 ## Not covered
 
@@ -131,3 +156,8 @@ Daily Review state keep their own tables and semantics.
   realtime voice (Workstream C).
 - A browser E2E; jsdom tests drive the real components against a mocked
   server.
+- **Accepted (review L3):** while a same-account focus re-check is in flight,
+  requests still go out with the current CSRF. A cookie switched to another
+  account in a different tab is caught by the session-bound CSRF (403) and by
+  the owner header on private GETs. A non-private GET without an owner header
+  is not owner-checked; that gap predates B-2.

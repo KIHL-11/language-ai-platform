@@ -185,8 +185,10 @@ describe('createCloudProgressSync', () => {
     await sync.idle()
 
     expect(merged).toHaveBeenCalledTimes(1)
-    expect(update).toHaveBeenCalledTimes(1)
-    expect(update.mock.calls.every((call) => call[1].stage_index === 0 && call[2]?.expectedRevision === 1)).toBe(true)
+    // Only the in-flight write was at stage 0; everything after the conflict
+    // stays at or past the other tab's stage 3.
+    expect(update.mock.calls[0][1].stage_index).toBe(0)
+    expect(update.mock.calls.slice(1).every((call) => call[1].stage_index >= 3)).toBe(true)
   })
 
   it('writes snapshots from the adopted view normally', async () => {
@@ -198,5 +200,81 @@ describe('createCloudProgressSync', () => {
     await sync.saveGuided(atStage(4))
 
     expect(update.mock.calls[1]).toEqual([libraryItem.id, atStage(4), { expectedRevision: 5, generation: 1 }])
+  })
+
+  it('keeps a newer queued step that is ahead of the other tab (review H1)', async () => {
+    let reject!: (error: unknown) => void
+    update.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
+      .mockResolvedValueOnce(cloudItem(6, atStage(4)))
+    reload.mockResolvedValueOnce(cloudItem(5, atStage(3)))
+    const merged = vi.fn()
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1, onGuidedMerged: merged })
+
+    const first = sync.saveGuided(atStage(2))
+    void sync.saveGuided(atStage(4))
+    reject(new CloudConflictError())
+    await first
+    await sync.idle()
+
+    expect(update.mock.calls.map((call) => [call[1].stage_index, call[2]?.expectedRevision])).toEqual([[2, 1], [4, 5]])
+    expect(merged).not.toHaveBeenCalled()
+  })
+
+  it('adopts the other tab when it is ahead of both the in-flight and queued steps', async () => {
+    let reject!: (error: unknown) => void
+    update.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
+    reload.mockResolvedValueOnce(cloudItem(5, atStage(5)))
+    const merged = vi.fn()
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1, onGuidedMerged: merged })
+
+    const first = sync.saveGuided(atStage(2))
+    void sync.saveGuided(atStage(4))
+    reject(new CloudConflictError())
+    await first
+    await sync.idle()
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(merged).toHaveBeenCalledWith(expect.anything(), atStage(5))
+  })
+
+  it('never moves the listening position behind another tab after a conflict (review L1)', async () => {
+    const local = { ...libraryItem.listening_progress, last_position_seconds: 1, current_sentence_id: 1, translation_visible: false }
+    const other = { ...libraryItem.listening_progress, last_position_seconds: 2.75, current_sentence_id: 3, translation_visible: true }
+    updateListening.mockRejectedValueOnce(new CloudConflictError()).mockResolvedValueOnce(cloudItem(4, atStage(1), other))
+    reload.mockResolvedValueOnce(cloudItem(3, atStage(1), other))
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
+
+    await sync.saveListening(local)
+
+    expect(updateListening.mock.calls[1][1]).toEqual({ ...local, last_position_seconds: 2.75, current_sentence_id: 3 })
+  })
+
+  it('writes a deliberate rewind when there is no conflict', async () => {
+    const rewound = { ...libraryItem.listening_progress, last_position_seconds: 0.25, current_sentence_id: 1 }
+    updateListening.mockResolvedValueOnce(cloudItem(2, atStage(1), rewound))
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1 })
+
+    await sync.saveListening(rewound)
+
+    expect(updateListening.mock.calls[0][1]).toEqual(rewound)
+  })
+
+  it('drops a stale snapshot the replaced view emits while the reload is in flight', async () => {
+    update.mockRejectedValueOnce(new CloudConflictError())
+    let finishReload!: (item: LibraryItem) => void
+    reload.mockImplementationOnce(() => new Promise((done) => { finishReload = done }))
+    const merged = vi.fn()
+    const sync = createCloudProgressSync({ item: cloudItem(1), generation: 1, onGuidedMerged: merged })
+
+    const first = sync.saveGuided(atStage(1, 1))
+    await vi.waitFor(() => expect(reload).toHaveBeenCalled())
+    // The old view is still mounted and emits a stale step during the reload.
+    void sync.saveGuided(atStage(1, 2))
+    finishReload(cloudItem(5, atStage(4)))
+    await first
+    await sync.idle()
+
+    expect(merged).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledTimes(1)
   })
 })
