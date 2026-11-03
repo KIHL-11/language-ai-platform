@@ -33,10 +33,12 @@ def _reset_identities(dsn):
 def email_login(sessions):  # noqa: F811
     repo, clock, *_ = sessions
     _reset_identities(repo.dsn)
+    _migration(repo.dsn, '0009_email_management.down.sql')
     _migration(repo.dsn, '0008_account_identity.down.sql')
     _migration(repo.dsn, '0007_email_login.down.sql')
     _migration(repo.dsn, '0007_email_login.up.sql')
     _migration(repo.dsn, '0008_account_identity.up.sql')
+    _migration(repo.dsn, '0009_email_management.up.sql')
     mailbox = SandboxMailbox()
     service = EmailLoginService(repo, mailbox, code_key=CODE_KEY)
     configure_email_login(app_module.app, service)
@@ -46,6 +48,7 @@ def email_login(sessions):  # noqa: F811
         if hasattr(app_module.app.state, 'email_login_service'):
             delattr(app_module.app.state, 'email_login_service')
         _reset_identities(repo.dsn)
+        _migration(repo.dsn, '0009_email_management.down.sql')
         _migration(repo.dsn, '0008_account_identity.down.sql')
         _migration(repo.dsn, '0007_email_login.down.sql')
 

@@ -371,9 +371,9 @@ def test_purge_is_bounded_and_keeps_rows_that_still_feed_throttles(wechat):
     wechat_start(client())
     now = clock()
     first = purge_auth_records(repo.dsn, now, batch=3, max_batches=2)
-    assert first == {'email_challenges': 6, 'oauth_states': 1}
+    assert first == {'email_challenges': 6, 'oauth_states': 1, 'browser_sessions': 0}
     second = purge_auth_records(repo.dsn, now, batch=3, max_batches=2)
-    assert second == {'email_challenges': 1, 'oauth_states': 0}
+    assert second == {'email_challenges': 1, 'oauth_states': 0, 'browser_sessions': 0}
     assert count(repo.dsn, 'SELECT count(*) FROM cloud_email_login_challenges') == 1
     assert count(repo.dsn, 'SELECT count(*) FROM cloud_oauth_states') == 1
     with pytest.raises(ValueError):
@@ -411,7 +411,8 @@ def test_least_privilege_role_links_signs_in_and_purges(wechat):
         connection.execute('GRANT USAGE ON SCHEMA public TO account_auth_test')
         connection.execute('GRANT SELECT,INSERT,UPDATE ON cloud_browser_sessions, cloud_email_login_challenges, '
                            'cloud_external_identities, cloud_oauth_states TO account_auth_test')
-        connection.execute('GRANT DELETE ON cloud_external_identities, cloud_email_login_challenges, cloud_oauth_states TO account_auth_test')
+        connection.execute('GRANT DELETE ON cloud_external_identities, cloud_email_login_challenges, cloud_oauth_states, '
+                           'cloud_browser_sessions TO account_auth_test')
         connection.execute('GRANT INSERT ON cloud_users TO account_auth_test')
     dsn = make_conninfo(repo.dsn, user='account_auth_test', password='synthetic-test')
     runtime = BrowserSessionRepository(dsn, repo.clock)
@@ -442,6 +443,7 @@ def test_rollback_refuses_while_wechat_links_exist_and_loses_nothing(wechat):
     with psycopg.connect(repo.dsn) as connection:
         identities = connection.execute('SELECT * FROM cloud_external_identities ORDER BY provider').fetchall()
         challenges = connection.execute('SELECT count(*) FROM cloud_email_login_challenges').fetchone()[0]
+    _migration(repo.dsn, '0009_email_management.down.sql')  # lossless here: one email per account
     with pytest.raises(psycopg.errors.RaiseException, match='WeChat identities exist'):
         _migration(repo.dsn, '0008_account_identity.down.sql')
     with psycopg.connect(repo.dsn) as connection:  # the refused rollback changed nothing
@@ -461,8 +463,10 @@ def test_rollback_refuses_while_wechat_links_exist_and_loses_nothing(wechat):
             connection.execute("INSERT INTO cloud_external_identities SELECT 'wechat',subject,owner_user_id,verified_at,created_at "
                                'FROM cloud_external_identities')
     _migration(repo.dsn, '0008_account_identity.up.sql')
+    _migration(repo.dsn, '0009_email_management.up.sql')
     again = browser.post('/api/account/wechat/link/start', json={'confirm': 'link-wechat'}, headers=secured(browser))
     assert again.status_code == 428  # the fresh-proof marker did not survive the rollback
+
 
 def test_state_is_single_use_even_if_the_provider_issued_a_second_code(wechat):
     _, _, mailbox, provider = wechat
