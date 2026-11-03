@@ -114,9 +114,10 @@ Still open:
   successful sign-in, that gets its own quota.
 - **Low:** no global budget for short-code guesses across many addresses (about
   10 guesses/day/address). Needs Workstream F.
-- **Low:** rolling back 0008 does not revoke sessions created by WeChat login
-  (they stay valid until expiry, at most 12 h), and deleting re-check/long-code
-  rows partly resets the daily failure count.
+- **Fixed:** rolling back 0008 used to delete WeChat identities and
+  re-check/long-code rows. It now **refuses** while any WeChat identity exists
+  (unlink first; unlink also signs out other browsers, so no WeChat-born
+  session survives) and keeps all login-code rows, so failure counts survive.
 - **Low:** if the browser's previous session is rotated during a new login,
   the rotated copy is not revoked; it belongs to that browser's earlier sign-in.
 
@@ -150,8 +151,8 @@ Suggested schedule: hourly. Browser session rows are not purged yet.
 
 Adds `wechat` to the provider check with a subject check, `UNIQUE(owner,provider)`,
 challenge `purpose`/`owner_user_id`/`code_format`, session `reauthenticated_at`
-and `cloud_oauth_states`. Rollback deletes WeChat identities, re-check and long
-codes; email accounts remain. Additional grants for the auth role:
+and `cloud_oauth_states`. Rollback refuses while WeChat identities exist and
+otherwise loses no identity or login-code row. Additional grants for the auth role:
 
 ```sql
 GRANT SELECT, INSERT, UPDATE ON cloud_oauth_states TO <auth_role>;

@@ -434,19 +434,35 @@ def test_least_privilege_role_links_signs_in_and_purges(wechat):
         accounts.unlink('x' * 43, 'wechat', 'unlink-wechat')
 
 
-def test_rollback_removes_wechat_links_and_reapplies(wechat):
-    repo, _, mailbox, provider = wechat
-    browser, _ = login(mailbox)
+def test_rollback_refuses_while_wechat_links_exist_and_loses_nothing(wechat):
+    repo, clock, mailbox, provider = wechat
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
     assert link(browser, provider).status_code == 200
+    with psycopg.connect(repo.dsn) as connection:
+        identities = connection.execute('SELECT * FROM cloud_external_identities ORDER BY provider').fetchall()
+        challenges = connection.execute('SELECT count(*) FROM cloud_email_login_challenges').fetchone()[0]
+    with pytest.raises(psycopg.errors.RaiseException, match='WeChat identities exist'):
+        _migration(repo.dsn, '0008_account_identity.down.sql')
+    with psycopg.connect(repo.dsn) as connection:  # the refused rollback changed nothing
+        assert connection.execute('SELECT * FROM cloud_external_identities ORDER BY provider').fetchall() == identities
+        assert connection.execute("SELECT count(*) FROM cloud_oauth_states").fetchone()[0] >= 1
+    _, still = wechat_login(provider)
+    assert still.json()['user_id'] == owner
+
+    assert browser.post('/api/account/identities/unlink', json={'provider': 'wechat', 'confirm': 'unlink-wechat'},
+                        headers=secured(browser)).status_code == 204
     _migration(repo.dsn, '0008_account_identity.down.sql')
-    assert count(repo.dsn, 'SELECT count(*) FROM cloud_external_identities') == 1
-    with psycopg.connect(repo.dsn) as connection, pytest.raises(psycopg.errors.CheckViolation):
-        connection.execute("INSERT INTO cloud_external_identities SELECT 'wechat',subject,owner_user_id,verified_at,created_at "
-                           'FROM cloud_external_identities')
+    with psycopg.connect(repo.dsn) as connection:
+        assert connection.execute("SELECT subject FROM cloud_external_identities").fetchall() == [(EMAIL,)]
+        assert connection.execute('SELECT count(*) FROM cloud_email_login_challenges').fetchone()[0] == challenges
+        assert connection.execute("SELECT to_regclass('cloud_external_identities_owner')").fetchone()[0] is not None
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute("INSERT INTO cloud_external_identities SELECT 'wechat',subject,owner_user_id,verified_at,created_at "
+                               'FROM cloud_external_identities')
     _migration(repo.dsn, '0008_account_identity.up.sql')
     again = browser.post('/api/account/wechat/link/start', json={'confirm': 'link-wechat'}, headers=secured(browser))
     assert again.status_code == 428  # the fresh-proof marker did not survive the rollback
-
 
 def test_state_is_single_use_even_if_the_provider_issued_a_second_code(wechat):
     _, _, mailbox, provider = wechat

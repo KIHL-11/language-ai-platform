@@ -21,9 +21,18 @@ EMAIL = 'learner.one@example.test'
 CODE_KEY = bytes(range(32))  # synthetic; production reads CLOUD_AUTH_CODE_KEY
 
 
+def _reset_identities(dsn):
+    # Test isolation only: migrations refuse to drop verified identities, and
+    # every test starts from an empty synthetic schema anyway.
+    with psycopg.connect(dsn) as connection:
+        if connection.execute("SELECT to_regclass('cloud_external_identities')").fetchone()[0]:
+            connection.execute('DELETE FROM cloud_external_identities')
+
+
 @pytest.fixture
 def email_login(sessions):  # noqa: F811
     repo, clock, *_ = sessions
+    _reset_identities(repo.dsn)
     _migration(repo.dsn, '0008_account_identity.down.sql')
     _migration(repo.dsn, '0007_email_login.down.sql')
     _migration(repo.dsn, '0007_email_login.up.sql')
@@ -36,6 +45,7 @@ def email_login(sessions):  # noqa: F811
     finally:
         if hasattr(app_module.app.state, 'email_login_service'):
             delattr(app_module.app.state, 'email_login_service')
+        _reset_identities(repo.dsn)
         _migration(repo.dsn, '0008_account_identity.down.sql')
         _migration(repo.dsn, '0007_email_login.down.sql')
 
