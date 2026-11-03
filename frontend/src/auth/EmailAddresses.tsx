@@ -12,6 +12,8 @@ function explain(error: unknown): string {
     if (error.message === 'email_already_yours') return 'That address is already on your account.'
     if (error.message === 'email_limit') return 'An account can have at most two email addresses.'
     if (error.message === 'email_invalid') return 'Enter a valid email address.'
+    if (error.message === 'not_linked') return 'That address is no longer on your account. Refresh and try again.'
+    if (error.message === 'confirmation_required') return 'Tick the confirmation box first.'
   }
   return 'Email settings are temporarily unavailable. Try again shortly.'
 }
@@ -47,7 +49,7 @@ export function EmailAddresses({ emails, fresh, onChanged }: { emails: string[];
       const done = await verifyEmailClaim(step.challengeId, code.replace(/-/g, ''))
       const told = done.result === 'changed' ? step.replaces : emails[0]
       setOutcome({
-        text: done.result === 'changed' ? `Your address is now ${step.email}. Other browsers were signed out.` : `${step.email} can now sign in to your account.`,
+        text: done.result === 'changed' ? `Your address is now ${step.email}. Other browsers were signed out. Review your other sign-in methods below.` : `${step.email} can now sign in to your account.`,
         // A failed notice is not "all done": say so plainly.
         warning: done.notice === 'sent' ? null : `We could not send a security notice to ${told}. If you did not expect this change, sign out everywhere and review your sign-in methods.`,
       })

@@ -299,7 +299,7 @@ def account_identities(sessions, session_token):
         with sessions._connect() as connection:
             session, now = sessions.session_in_transaction(connection, session_token)
             rows = connection.execute(
-                'SELECT provider,subject,created_at FROM cloud_external_identities WHERE owner_user_id=%s ORDER BY created_at',
+                'SELECT provider,subject,created_at FROM cloud_external_identities WHERE owner_user_id=%s ORDER BY created_at, subject',
                 (session['owner_user_id'],)).fetchall()
     except psycopg.Error as exc:
         raise SessionUnavailable('Login storage unavailable') from exc

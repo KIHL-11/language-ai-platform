@@ -35,4 +35,8 @@ BEGIN
   CREATE UNIQUE INDEX cloud_external_identities_one_per_provider ON cloud_external_identities(owner_user_id,provider);
  END IF;
 END $$;
+DROP INDEX IF EXISTS cloud_browser_sessions_expires;
+DROP INDEX IF EXISTS cloud_browser_sessions_last_seen;
+DROP INDEX IF EXISTS cloud_browser_sessions_revoked;
+DROP INDEX IF EXISTS cloud_oauth_states_session;
 COMMIT;

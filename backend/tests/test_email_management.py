@@ -7,7 +7,7 @@ import pytest
 import app as app_module
 from services.auth.identity import InvalidAuthentication
 from services.auth.sessions import COOKIE_NAME
-from test_account_identity import count, reauth, secured
+from test_account_identity import count, reauth, secured  # noqa: F401
 from test_browser_sessions import sessions  # noqa: F401  (fixture)
 from test_durable_ai_chunk_candidates import _migration, cloud_candidates  # noqa: F401  (fixture)
 from test_email_login import EMAIL, ORIGIN, client, email_login, login, verify  # noqa: F401
@@ -266,7 +266,8 @@ def test_rollback_refuses_while_an_account_holds_two_addresses_and_otherwise_los
     def snapshot():
         with psycopg.connect(repo.dsn) as connection:
             return (connection.execute('SELECT * FROM cloud_external_identities ORDER BY subject').fetchall(),
-                    connection.execute('SELECT challenge_id, email, failed_attempts FROM cloud_email_login_challenges '
+                    connection.execute('SELECT challenge_id, email, client_binding, code_hash, created_at, expires_at, '
+                                       'failed_attempts, code_format, owner_user_id FROM cloud_email_login_challenges '
                                        'ORDER BY challenge_id').fetchall())
     before = snapshot()
     with pytest.raises(psycopg.errors.RaiseException, match='1 accounts hold two email addresses'):
@@ -462,3 +463,149 @@ def test_session_purge_retention_boundary(email_login):
                                 __import__('services.auth.sessions', fromlist=['digest']).digest(browser.cookies.get(COOKIE_NAME))))
     assert purge_auth_records(repo.dsn, now)['browser_sessions'] == 1
     assert count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions') == 1
+
+
+def _schema(dsn):
+    tables = ['cloud_external_identities', 'cloud_email_login_challenges', 'cloud_browser_sessions', 'cloud_oauth_states']
+    with psycopg.connect(dsn) as c:
+        return (set(c.execute("SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                              "WHERE conrelid::regclass::text = ANY(%s)", (tables,)).fetchall()),
+                set(c.execute("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+                              "AND tablename = ANY(%s)", (tables,)).fetchall()),
+                set(c.execute("SELECT table_name, column_name, data_type, column_default, is_nullable FROM information_schema.columns "
+                              "WHERE table_schema=current_schema() AND table_name = ANY(%s)", (tables,)).fetchall()))
+
+
+def test_0009_rollback_restores_the_exact_0008_schema_and_reapplies_identically(email_login):
+    from test_email_login import _reset_identities
+    repo, *_ = email_login
+    with_0009 = _schema(repo.dsn)
+    _migration(repo.dsn, '0009_email_management.down.sql')
+    rolled_back = _schema(repo.dsn)
+    _reset_identities(repo.dsn)
+    for name in ('0008_account_identity.down.sql', '0007_email_login.down.sql', '0007_email_login.up.sql',
+                 '0008_account_identity.up.sql'):
+        _migration(repo.dsn, name)
+    assert rolled_back == _schema(repo.dsn)  # constraints, indexes and columns exactly as 0008 leaves them
+    _migration(repo.dsn, '0009_email_management.up.sql')
+    assert _schema(repo.dsn) == with_0009
+
+
+def test_a_login_with_the_old_address_in_flight_during_a_change_serializes(email_login):
+    """The login holds the old address's lock; the change waits for it, then signs that session out.
+
+    Covers both pause points of the login: before it takes the account lock
+    (where the change would otherwise deadlock on the old address's code rows)
+    and after it.
+    """
+    import threading
+    import time
+    from services.auth import email_login as module
+    from services.auth.email_login import new_client_binding
+    repo, clock, mailbox, service = email_login
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    for pause_at in ('account_lock', '_map_identity'):
+        clock.advance(minutes=2)
+        current = emails_of(repo, owner)[0]
+        target = f'{pause_at.strip("_")}.target@example.test'
+        binding = new_client_binding()
+        login_id = service.start(current, binding).challenge_id
+        login_code = mailbox.latest(current).code
+        clock.advance(seconds=61)
+        assert reauth(browser, mailbox, current).status_code == 200
+        started = claim_start(browser, target, replaces=current).json()
+        claim_code = mailbox.latest(target).code
+        entered, go = threading.Event(), threading.Event()
+        login_thread = {}
+
+        def pausing(original):
+            def wrapper(*args):
+                if threading.get_ident() == login_thread.get('id'):
+                    entered.set()
+                    go.wait(10)
+                return original(*args)
+            return wrapper
+        owner_obj = module if pause_at == 'account_lock' else service
+        original = getattr(owner_obj, pause_at)
+        setattr(owner_obj, pause_at, pausing(original))
+        outcome = {}
+
+        def old_login():
+            login_thread['id'] = threading.get_ident()
+            try:
+                outcome['login'] = service.verify(login_id, login_code, binding)
+            except Exception as exc:  # noqa: BLE001
+                outcome['login'] = exc
+        workers = [threading.Thread(target=old_login),
+                   threading.Thread(target=lambda: outcome.setdefault('claim', claim_verify(browser, started['challenge_id'], claim_code)))]
+        workers[0].start()
+        assert entered.wait(5)
+        workers[1].start()
+        time.sleep(0.5)
+        go.set()
+        for worker in workers:
+            worker.join(15)
+        if owner_obj is service:
+            del service._map_identity  # back to the class method
+        else:
+            setattr(module, pause_at, original)
+        assert outcome['claim'].status_code == 200, (pause_at, outcome['claim'].text)  # no deadlock
+        assert emails_of(repo, owner) == [target]
+        signed_in = outcome['login']
+        assert signed_in.owner_user_id == owner, (pause_at, signed_in)  # committed while the address was still the account's
+        with pytest.raises(InvalidAuthentication):
+            repo.verify(signed_in.session_token)  # and the change then signed it out
+
+
+def test_purge_cascades_oauth_states_and_times_out_on_locked_rows_under_the_maintenance_role(email_login):
+    import time
+    from datetime import timedelta
+    from psycopg.conninfo import make_conninfo
+    from services.auth.maintenance import purge_auth_records
+    from services.auth.sessions import SessionUnavailable, digest
+    repo, clock, mailbox, _ = email_login
+    with psycopg.connect(repo.dsn) as connection:
+        connection.execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='auth_maintenance_test') THEN "
+                           "CREATE ROLE auth_maintenance_test LOGIN PASSWORD 'synthetic-test' NOSUPERUSER NOBYPASSRLS; END IF; END $$")
+        connection.execute('GRANT USAGE ON SCHEMA public TO auth_maintenance_test')
+        connection.execute('GRANT SELECT, DELETE ON cloud_browser_sessions, cloud_email_login_challenges, cloud_oauth_states '
+                           'TO auth_maintenance_test')
+    dsn = make_conninfo(repo.dsn, user='auth_maintenance_test', password='synthetic-test')
+    browser, verified = login(mailbox)
+    session_id = count(repo.dsn, 'SELECT session_id FROM cloud_browser_sessions WHERE token_hash=%s',
+                       digest(browser.cookies.get(COOKIE_NAME)))
+    now = clock()
+    with psycopg.connect(repo.dsn) as connection:  # a long-lived link state that outlives its session
+        connection.execute("INSERT INTO cloud_oauth_states VALUES(%s,'wechat','link',%s,%s,%s,%s,%s,NULL)",
+                           ('a' * 64, 'b' * 64, verified.json()['user_id'], session_id, now, now + timedelta(days=5)))
+    clock.advance(days=3)
+    with psycopg.connect(repo.dsn) as holder:
+        holder.execute('SELECT 1 FROM cloud_browser_sessions WHERE session_id=%s FOR UPDATE', (session_id,))
+        began = time.monotonic()
+        with pytest.raises(SessionUnavailable):
+            purge_auth_records(dsn, clock())  # waits at most the lock timeout, never hangs
+        assert time.monotonic() - began < 10
+    assert purge_auth_records(dsn, clock())['browser_sessions'] == 1  # rerun after the holder is gone
+    assert count(repo.dsn, 'SELECT count(*) FROM cloud_oauth_states') == 0  # cascaded with SELECT+DELETE only
+
+
+def test_change_of_the_second_address_notifies_both_and_code_mail_names_its_purpose(email_login, tmp_path):
+    from datetime import datetime, timezone
+    from services.auth.email_login import DirectoryMailbox
+    repo, clock, mailbox, _ = email_login
+    browser, _ = login(mailbox)
+    clock.advance(seconds=1)
+    assert claim(browser, mailbox, NEW).status_code == 200
+    assert mailbox.latest(NEW).purpose == 'claim' and mailbox.latest(EMAIL).purpose == 'login'
+    clock.advance(minutes=1)
+    assert claim(browser, mailbox, 'third.place@example.test', replaces=NEW).json() == {'result': 'changed', 'notice': 'sent'}
+    assert mailbox.notices[-2:] == [(NEW, 'email-changed'), (EMAIL, 'email-changed')]
+
+    outbox = DirectoryMailbox(tmp_path / 'outbox')
+    outbox.send_login_code(email=NEW, code='ABCDEFGHJKMN', expires_at=datetime(2026, 11, 3, tzinfo=timezone.utc), purpose='claim')
+    outbox.send_security_notice(email=EMAIL, kind='email-changed')
+    texts = sorted(path.read_text() for path in (tmp_path / 'outbox').iterdir())
+    assert any('add this address to an account' in text and 'Never read it out' in text and 'ABCD-EFGH-JKMN' in text for text in texts)
+    assert outbox.purge(datetime.now(timezone.utc)) == 1  # the expired code goes; the notice is kept for days
+    assert any('security notice' in path.read_text() for path in (tmp_path / 'outbox').iterdir())

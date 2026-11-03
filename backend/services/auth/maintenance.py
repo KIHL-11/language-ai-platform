@@ -60,7 +60,7 @@ def purge_auth_records(dsn, now, *, batch=500, max_batches=20):
         # cannot sign anyone out. Its OAuth states cascade.
         'browser_sessions': ('DELETE FROM cloud_browser_sessions WHERE session_id IN ('
                              'SELECT session_id FROM cloud_browser_sessions WHERE revoked_at < %(cutoff)s OR expires_at < %(cutoff)s '
-                             'OR last_seen_at < %(idle)s ORDER BY created_at LIMIT %(batch)s)', dead),
+                             'OR last_seen_at < %(idle)s LIMIT %(batch)s)', dead),
     }
     counts = {}
     try:

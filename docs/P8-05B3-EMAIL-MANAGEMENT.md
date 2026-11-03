@@ -43,8 +43,9 @@ test-stage measure only, not a production approval.
      closes **every open code sent to the replaced address** (login codes from
      any browser included); the current session stays and is marked freshly
      proven.
-4. After commit, a security notice goes to the replaced address (on change) or
-   the primary address (on add). The response says `notice: "sent" | "failed"
+4. After commit, a security notice goes to the replaced address and the
+   primary address (on change; once if they are the same) or the primary
+   address (on add). The response says `notice: "sent" | "failed"
    | "unavailable"`; anything but `sent` is logged as a warning and the UI shows
    an alert telling the learner the other address was **not** told. The change
    itself is not undone: the learner just proved control of the new address,
@@ -57,7 +58,8 @@ closed, its sessions revoked, and a new code for it maps to nothing, so a
 login with it creates a separate, empty account (it is not reserved; the
 address may belong to someone else now).
 
-Challenge rows: purpose `claim`, `owner_user_id`, `replaces_subject`, bound to
+Code emails name their purpose: the claim email says someone asked to add the
+address to an account and warns never to read the code out. Challenge rows: purpose `claim`, `owner_user_id`, `replaces_subject`, bound to
 the requesting session like re-check codes, sharing the per-address throttles
 (60 s resend, 5/hour, daily failure cap with long codes).
 
@@ -65,9 +67,15 @@ the requesting session like re-check codes, sharing the per-address throttles
 
 - Every step is one transaction; any storage error rolls back the code
   consumption, the identity change and the session revocation together.
-- Code consumption takes the new address's advisory lock (shared with first
-  login), then the account lock: a first login and a claim of the same address
-  serialize, and exactly one wins (`PK` as backstop, mapped to 409).
+- Lock order, used by every flow: address advisory lock(s) → account lock →
+  session rows → identity rows. A claim takes the new address's lock (via the
+  code), then, for a change, the **replaced** address's lock, then the account
+  lock. Email login takes its address lock, then the mapped account's lock, and
+  re-reads the mapping `FOR UPDATE`. WeChat login/link/unlink, rotation and
+  revoke-all take the account lock before any session row. A first login and a
+  claim of the same address serialize, and exactly one wins (`PK` as backstop,
+  mapped to 409). Concurrency tests pause a transaction mid-flight at each lock
+  point (login vs unlink, old-address login vs change).
 - Two concurrent claims on one account cannot exceed two addresses or replace
   the same address twice.
 - Codes are bound to the session that requested them; another session, another
@@ -109,6 +117,8 @@ Operations:
   --max-batches 20`. Exit 0 = done, 1 = storage error (committed batches kept;
   rerun), 2 = another run holds the lock (skip).
 - **Concurrency:** a session-level advisory lock allows one run at a time.
+- **Indexes:** `expires_at`, `last_seen_at`, partial `revoked_at` on sessions and
+  `session_id` on OAuth states keep batches off full scans (migration 0009).
 - **Safety:** each batch is its own transaction with `lock_timeout 2s` and
   `statement_timeout 30s`; a timed-out batch rolls back alone.
 - **Recovery:** idempotent; after a crash just run again. There is nothing to
@@ -116,6 +126,26 @@ Operations:
   (codes past the 25 h throttle window, states expired > 1 h, dead sessions
   > 1 day). Restoring them would come only from a database backup.
 - **Outbox** (`--outbox`, staging only): unchanged from P8-05B2.
+
+## Independent review (P8-05B3)
+
+One separate reviewer agent (fresh context, not the author session) reviewed
+`24b8975..7e6d9fd`. No Critical/High. Fixed afterwards, with tests that fail on
+the old code:
+
+- **Medium (verified):** email re-login replacing a live session deadlocked with
+  an unlink in another browser. Login now takes the account lock (also on #79).
+- **Medium (verified):** a change could deadlock with a login using the old
+  address. The change now takes the replaced address's lock first.
+- **Low:** email-specific error codes on claim routes. Purpose-specific code
+  emails. A change also notifies the primary. Staging notices are kept 7 days.
+  Indexes for the session purge and the OAuth-state cascade. A stable identity
+  order. Clearer UI messages, and unknown results are rejected.
+
+Accepted, documented: a lock timeout ends the whole purge run (rerun picks it up);
+adding an address never signs other browsers out; a change does not remove a
+second address or WeChat that someone added earlier, so the UI asks the learner
+to review the remaining methods.
 
 ## Out of scope (next)
 

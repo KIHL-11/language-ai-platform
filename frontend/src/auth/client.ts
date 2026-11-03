@@ -264,7 +264,8 @@ export async function startEmailClaim(email: string, replaces: string | null): P
 
 export async function verifyEmailClaim(challengeId: string, code: string): Promise<EmailClaimResult> {
   const value = await (await accountCall('/api/account/email/claim/verify', 'POST', { challenge_id: challengeId, code })).json() as { result?: unknown; notice?: unknown }
-  const result = value.result === 'changed' ? 'changed' : 'added'
+  if (value.result !== 'changed' && value.result !== 'added') throw new CloudAuthError(503, 'unavailable')
+  const result = value.result
   const notice = value.notice === 'sent' || value.notice === 'unavailable' ? value.notice : 'failed'
   return { result, notice }
 }

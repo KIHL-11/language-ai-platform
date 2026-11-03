@@ -376,7 +376,8 @@ def start_email_claim(request:Request,body:EmailClaimRequest,identity:IdentityDe
     try: challenge=service.start_claim(request.cookies.get(COOKIE_NAME,''),body.email,body.replaces,body.confirm)
     except InvalidEmailAddress as exc: raise HTTPException(status_code=422,detail={'code':'email_invalid','message':'Enter a valid email address.'}) from exc
     except EmailLoginThrottled as exc: raise _throttled(exc) from exc
-    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication) as exc: raise _account_error(exc) from exc
     now=service.sessions._now()
     return {'challenge_id':challenge.challenge_id,'expires_in':int((challenge.expires_at-now).total_seconds()),
             'resend_after':int((challenge.resend_after-now).total_seconds())}
@@ -387,5 +388,6 @@ def verify_email_claim(request:Request,body:EmailVerifyRequest,identity:Identity
     service=_email_service(request)
     try: kind,notice=service.verify_claim(body.challenge_id,body.code,request.cookies.get(COOKIE_NAME,''))
     except EmailLoginRejected as exc: raise HTTPException(status_code=400,detail={'code':'email_code_invalid','message':'The code is invalid or has expired.'}) from exc
-    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication) as exc: raise _account_error(exc) from exc
     return {'result':kind,'notice':notice}
