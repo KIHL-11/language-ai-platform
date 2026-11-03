@@ -33,7 +33,12 @@ Not a production rollout; Personal Desktop is unchanged.
      (RFC 9110 lets a server ignore Range). A start past the end or `-0` gets 416.
    - If the verified inode is shortened in place while streaming, the response
      aborts instead of sending fewer bytes than its `content-length`.
-   - The handle is closed when the response ends, including on client disconnect.
+   - The handle is closed when the response ends. On a server that raises from
+     `send()` after a disconnect (ASGI 2.4) that ends the stream; on older
+     servers (uvicorn reports 2.3 and swallows such sends) the response watches
+     `receive()` for `http.disconnect` and stops reading at once.
+   - Range numbers are capped at 19 digits; longer ones are malformed (200),
+     never an unmapped error from `int()`.
 
 Any mismatch returns HTTP 500 with
 `{"code": "cloud_media_integrity_failed", "message": "Library audio failed an integrity check."}`
@@ -129,7 +134,7 @@ A dead row means an object was **not** deleted. Inspect it by `cleanup_id` and
 
 ## Tests
 
-`backend/tests/test_library_media_reliability.py` (61 tests) covers:
+`backend/tests/test_library_media_reliability.py` (66 tests) covers:
 
 - tampering, truncation, extension and cross-owner swaps of synthetic audio;
 - symlinked objects and directories;
@@ -158,8 +163,8 @@ honouring the first of several ranges, sending a short body) are all caught.
 
 ## Independent review (bfed0b8)
 
-A separate reviewer agent (fresh context, not the author session) found four
-Mediums and three Lows, all fixed with a test that fails without the fix
+A separate reviewer agent (fresh context, not the author session) found three
+Mediums and four Lows, all fixed with a test that fails without the fix
 except the last:
 
 | Severity | Finding | Fix |
@@ -171,6 +176,13 @@ except the last:
 | Low | symlink loop raised unmapped errors (path in traceback) | mapped to namespace error; worker records any delete error as a retry |
 | Low | FIFO at a key hangs the request thread | `O_NONBLOCK` |
 | Low | every Range request rehashes the object | documented above, not changed |
+
+The re-review of the fixes (`3f92c94`) found no Critical, High or Medium. It
+ran the Library suites on Starlette 1.7.0 and 1.10.0 and a 400-operation
+concurrent stress mix (uploads, progress, deletes, workers) three times with no
+deadlock or orphan. Its two Lows are fixed with tests: a Range number over
+4300 digits raised from `int()`, and a pre-2.4 server's disconnect did not stop
+the file read.
 
 ## Not covered
 

@@ -332,9 +332,12 @@ def test_asgi_layer_streams_only_verified_bytes_after_swap(
         ((("Range", "bytes=-0"),), 416, b""),
         ((("Range", f"bytes={len(AUDIO)}-"),), 416, b""),
         ((("Range", f"bytes=0-{len(AUDIO) * 2}"),), 206, AUDIO),
+        ((("Range", "bytes=" + "9" * 5000 + "-"),), 200, AUDIO),
+        ((("Range", "bytes=0-" + "9" * 5000),), 200, AUDIO),
+        ((("Range", "bytes=-" + "9" * 5000),), 200, AUDIO),
     ],
     ids=["stale-if-range", "reversed", "other-unit", "empty", "zero-suffix",
-         "past-end", "clamped-end"],
+         "past-end", "clamped-end", "huge-start", "huge-end", "huge-suffix"],
 )
 def test_range_edge_cases(postgres_repository, headers, status, expected):
     from services.api.library_api import VerifiedAudioResponse
@@ -379,7 +382,9 @@ def test_handle_is_closed_when_the_client_send_fails(postgres_repository):
         if message["type"] == "http.response.body":
             raise OSError("client went away")
 
-    scope = {"type": "http", "method": "GET", "headers": [], "extensions": {}}
+    # ASGI 2.4 servers raise from send() after a disconnect.
+    scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "method": "GET",
+             "headers": [], "extensions": {}}
     with pytest.raises(OSError):
         anyio.run(VerifiedAudioResponse(audio), scope, receive, broken_send)
     assert audio.file.closed
@@ -397,7 +402,7 @@ def test_in_place_truncation_after_verification_aborts(postgres_repository):
     sent = []
 
     async def receive():
-        return {"type": "http.request"}
+        await anyio.sleep_forever()
 
     async def send(message):
         sent.append(message)
@@ -1173,3 +1178,77 @@ def test_fifo_at_object_key_fails_fast(postgres_repository):
         executor.shutdown(wait=True)
 
     _assert_integrity_failure(response)
+
+
+def test_disconnect_on_a_pre_2_4_server_stops_reading_the_file(postgres_repository):
+    """Re-review Low 2: uvicorn (ASGI 2.3) swallows sends after a disconnect,
+    so the response must notice via receive() instead of reading on."""
+    import anyio
+
+    from services.api.library_api import VerifiedAudioResponse
+    from services.library import verified_response
+
+    content = os.urandom(verified_response.CHUNK_BYTES * 16)
+    item = _item_with_audio(postgres_repository, content=content)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+    chunks = []
+
+    async def run():
+        gone = anyio.Event()
+
+        async def receive():
+            await gone.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] != "http.response.body":
+                return
+            chunks.append(message)
+            if len(chunks) == 1:
+                gone.set()
+            # Like uvicorn after a disconnect: swallow, never raise.
+            await anyio.sleep(0)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "method": "GET",
+            "headers": [],
+            "extensions": {},
+        }
+        await VerifiedAudioResponse(audio)(scope, receive, send)
+
+    anyio.run(run)
+    assert 1 <= len(chunks) < 16
+    assert audio.file.closed
+
+
+def test_completed_send_on_a_pre_2_4_server_returns(postgres_repository):
+    import anyio
+
+    from services.api.library_api import VerifiedAudioResponse
+
+    item = _item_with_audio(postgres_repository)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+    body = []
+    ran = []
+
+    async def receive():
+        await anyio.sleep_forever()
+
+    async def send(message):
+        body.append(message.get("body", b""))
+
+    response = VerifiedAudioResponse(audio)
+
+    async def background():
+        ran.append(True)
+
+    response.background = background
+    scope = {"type": "http", "asgi": {"spec_version": "2.3"}, "method": "GET",
+             "headers": [], "extensions": {}}
+    anyio.run(response, scope, receive, send)
+
+    assert b"".join(body) == AUDIO
+    assert ran == [True]
+    assert audio.file.closed
