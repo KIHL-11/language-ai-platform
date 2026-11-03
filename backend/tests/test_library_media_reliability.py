@@ -72,6 +72,10 @@ def _at(repository, delta):
     repository.clock = lambda: NOW + delta
 
 
+class SimulatedCrash(BaseException):
+    """Process death: no except-Exception handler may absorb it."""
+
+
 def _failing_delete(*_args):
     raise LibraryStoreError("synthetic object-store failure")
 
@@ -226,7 +230,7 @@ def test_range_requests_are_served_from_verified_bytes(postgres_repository):
 def test_bytes_swapped_after_verification_are_never_streamed(
     postgres_repository, monkeypatch
 ):
-    """Guards the FileResponse override: Starlette must not reopen the path."""
+    """End to end through FastAPI: the swapped path is never reopened."""
     item = _item_with_audio(postgres_repository)
     original = postgres_repository.audio_for_owner
 
@@ -245,6 +249,177 @@ def test_bytes_swapped_after_verification_are_never_streamed(
 
     assert full.content == AUDIO
     assert ranged.content == AUDIO[:32]
+
+
+def _asgi_call(response, method="GET", headers=(), extensions=None):
+    """Drive the response at the ASGI layer and collect every message."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": method,
+        "path": "/audio",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers],
+        "extensions": extensions if extensions is not None else {},
+    }
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    import anyio
+
+    anyio.run(response, scope, receive, send)
+    start = messages[0]
+    body = b"".join(m.get("body", b"") for m in messages[1:])
+    return start, dict((k.decode(), v.decode()) for k, v in start["headers"]), body, messages
+
+
+def _verified_then_swapped(repository, item_id):
+    """Verification passes, then the object at the path is replaced."""
+    from services.api.library_api import VerifiedAudioResponse
+
+    audio = repository.audio_for_owner(OWNER_A, item_id)
+    replacement = audio.path.with_name("swap.tmp")
+    replacement.write_bytes(b"Z" * len(AUDIO))
+    os.replace(replacement, audio.path)
+    return audio, VerifiedAudioResponse(audio)
+
+
+@pytest.mark.parametrize(
+    "method,headers,status,expected",
+    [
+        ("GET", (), 200, AUDIO),
+        ("GET", (("Range", "bytes=100-299"),), 206, AUDIO[100:300]),
+        ("GET", (("Range", "bytes=-7"),), 206, AUDIO[-7:]),
+        ("GET", (("Range", f"bytes={len(AUDIO) - 3}-"),), 206, AUDIO[-3:]),
+        # Several ranges are answered with the whole verified body (RFC 9110
+        # lets a server ignore Range); never a multipart read of the path.
+        ("GET", (("Range", "bytes=0-9,20-29"),), 200, AUDIO),
+        ("HEAD", (), 200, b""),
+        ("HEAD", (("Range", "bytes=0-9"),), 206, b""),
+    ],
+    ids=["get", "single-range", "suffix-range", "open-range", "multi-range", "head", "head-range"],
+)
+def test_asgi_layer_streams_only_verified_bytes_after_swap(
+    postgres_repository, method, headers, status, expected
+):
+    item = _item_with_audio(postgres_repository)
+    audio, response = _verified_then_swapped(postgres_repository, item.id)
+
+    start, response_headers, body, _ = _asgi_call(response, method, headers)
+
+    assert start["status"] == status
+    assert body == expected
+    assert b"Z" * 8 not in body
+    length = len(AUDIO) if method == "HEAD" and status == 200 else len(expected)
+    if method == "HEAD" and status == 206:
+        length = 10
+    assert int(response_headers["content-length"]) == length
+    assert audio.file.closed
+
+
+@pytest.mark.parametrize(
+    "headers,status,expected",
+    [
+        ((("Range", "bytes=0-9"), ("If-Range", '"stale-etag"')), 200, AUDIO),
+        ((("Range", "bytes=9-0"),), 200, AUDIO),
+        ((("Range", "items=0-9"),), 200, AUDIO),
+        ((("Range", "bytes=-"),), 200, AUDIO),
+        ((("Range", "bytes=-0"),), 416, b""),
+        ((("Range", f"bytes={len(AUDIO)}-"),), 416, b""),
+        ((("Range", f"bytes=0-{len(AUDIO) * 2}"),), 206, AUDIO),
+    ],
+    ids=["stale-if-range", "reversed", "other-unit", "empty", "zero-suffix",
+         "past-end", "clamped-end"],
+)
+def test_range_edge_cases(postgres_repository, headers, status, expected):
+    from services.api.library_api import VerifiedAudioResponse
+
+    item = _item_with_audio(postgres_repository)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+
+    start, response_headers, body, _ = _asgi_call(VerifiedAudioResponse(audio), "GET", headers)
+
+    assert (start["status"], body) == (status, expected)
+    if status == 416:
+        assert response_headers["content-range"] == f"bytes */{len(AUDIO)}"
+    assert audio.file.closed
+
+
+def test_matching_if_range_serves_the_partial_body(postgres_repository):
+    from services.api.library_api import VerifiedAudioResponse
+
+    item = _item_with_audio(postgres_repository)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+    etag = f'"{hashlib.sha256(AUDIO).hexdigest()}"'
+
+    start, _, body, _ = _asgi_call(
+        VerifiedAudioResponse(audio), headers=(("Range", "bytes=5-9"), ("If-Range", etag))
+    )
+
+    assert (start["status"], body) == (206, AUDIO[5:10])
+
+
+def test_handle_is_closed_when_the_client_send_fails(postgres_repository):
+    import anyio
+
+    from services.api.library_api import VerifiedAudioResponse
+
+    item = _item_with_audio(postgres_repository)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def broken_send(message):
+        if message["type"] == "http.response.body":
+            raise OSError("client went away")
+
+    scope = {"type": "http", "method": "GET", "headers": [], "extensions": {}}
+    with pytest.raises(OSError):
+        anyio.run(VerifiedAudioResponse(audio), scope, receive, broken_send)
+    assert audio.file.closed
+
+
+def test_in_place_truncation_after_verification_aborts(postgres_repository):
+    """Same inode shortened: never send less than the declared length."""
+    import anyio
+
+    from services.api.library_api import VerifiedAudioResponse
+
+    item = _item_with_audio(postgres_repository)
+    audio = postgres_repository.audio_for_owner(OWNER_A, item.id)
+    os.truncate(audio.path, 100)
+    sent = []
+
+    async def receive():
+        return {"type": "http.request"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "GET", "headers": [], "extensions": {}}
+    with pytest.raises(RuntimeError):
+        anyio.run(VerifiedAudioResponse(audio), scope, receive, send)
+    assert not any(m.get("more_body") is False for m in sent[1:])
+    assert audio.file.closed
+
+
+def test_pathsend_extension_never_bypasses_the_verified_handle(postgres_repository):
+    item = _item_with_audio(postgres_repository)
+    audio, response = _verified_then_swapped(postgres_repository, item.id)
+
+    _, _, body, messages = _asgi_call(
+        response, extensions={"http.response.pathsend": {}}
+    )
+
+    assert all(m["type"] != "http.response.pathsend" for m in messages)
+    assert body == AUDIO
+    assert audio.file.closed
 
 
 # --- cleanup outbox worker -------------------------------------------------
@@ -349,10 +524,10 @@ def test_crash_after_claim_is_retried_by_next_worker(postgres_repository, monkey
     _at(postgres_repository, timedelta(hours=1))
 
     def crash(*_args):
-        raise RuntimeError("synthetic worker crash")
+        raise SimulatedCrash()
 
     monkeypatch.setattr(postgres_repository.media_objects, "delete", crash)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SimulatedCrash):
         cleanup_worker.run_cleanup(postgres_repository)
     [(_, status, attempts, next_at, _)] = _outbox()
     assert (status, attempts) == ("pending", 2)
@@ -373,10 +548,10 @@ def test_crash_after_object_delete_is_idempotent(postgres_repository, monkeypatc
 
     def delete_then_crash(*args):
         real_delete(*args)
-        raise RuntimeError("synthetic crash before acknowledgement")
+        raise SimulatedCrash()
 
     monkeypatch.setattr(postgres_repository.media_objects, "delete", delete_then_crash)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SimulatedCrash):
         postgres_repository.delete_for_owner(OWNER_A, item.id)
     assert not path.exists()
     assert [row[1:3] for row in _outbox()] == [("pending", 1)]
@@ -828,3 +1003,173 @@ def test_database_rejects_dead_rows_without_reason(postgres_repository):
             connection.execute(
                 "UPDATE cloud_media_cleanup_outbox SET last_error_code = '/tmp/leak'"
             )
+
+
+# --- independent review findings (bfed0b8) ---------------------------------
+
+
+def test_concurrent_first_uploads_leave_no_untracked_object(
+    postgres_repository, monkeypatch
+):
+    """Review finding 1: with no media row to lock, both uploads used to see
+    previous=None and the second upsert dropped the first key untracked."""
+    item = postgres_repository.create_for_owner(OWNER_A, lesson())
+    inserted = threading.Event()
+    release = threading.Event()
+    real_connect = postgres_repository._connect
+    first_thread = None
+
+    class PausingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._connection.__exit__(*exc)
+
+        def execute(self, sql, *args, **kwargs):
+            result = self._connection.execute(sql, *args, **kwargs)
+            if (
+                threading.current_thread() is first_thread
+                and "INSERT INTO cloud_library_media_assets" in sql
+            ):
+                inserted.set()
+                assert release.wait(10)
+            return result
+
+    monkeypatch.setattr(
+        postgres_repository, "_connect", lambda: PausingConnection(real_connect())
+    )
+
+    def upload(name):
+        postgres_repository.put_audio_for_owner(
+            OWNER_A, item.id, filename=f"{name}.mp3", content_type=None, content=name.encode()
+        )
+
+    first_thread = threading.Thread(target=upload, args=("first",))
+    first_thread.start()
+    assert inserted.wait(10)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        second = executor.submit(upload, "second")
+        with pytest.raises(TimeoutError):
+            second.result(timeout=0.5)
+        release.set()
+        second.result(timeout=10)
+    first_thread.join(10)
+    monkeypatch.setattr(postgres_repository, "_connect", real_connect)
+    cleanup_worker.run_cleanup(postgres_repository)
+
+    assert len(_media_keys()) == 1
+    assert _object_files(postgres_repository) == _media_keys()
+    assert _outbox() == []
+    assert _get_audio(postgres_repository, item.id).content == b"second"
+
+
+def test_upload_whose_row_is_cleaned_before_the_object_lands_is_retracked(
+    postgres_repository, monkeypatch
+):
+    """Review finding 4: the worker deletes nothing (no file yet) and drops the
+    row; the object then lands, so the abort must re-enqueue it."""
+    item = _item_with_audio(postgres_repository)
+    real_write = postgres_repository.media_objects.write_audio
+
+    def worker_runs_before_replace(*args):
+        _at(postgres_repository, UPLOAD_CLEANUP_GRACE)
+        assert cleanup_worker.run_cleanup(postgres_repository)["deleted"] == 1
+        real_write(*args)
+
+    monkeypatch.setattr(
+        postgres_repository.media_objects, "write_audio", worker_runs_before_replace
+    )
+    with pytest.raises(MediaUploadAbortedError):
+        postgres_repository.put_audio_for_owner(
+            OWNER_A, item.id, filename="new.mp3", content_type=None, content=b"late"
+        )
+
+    assert _outbox() == []
+    assert _object_files(postgres_repository) == _media_keys()
+    assert _get_audio(postgres_repository, item.id).content == AUDIO
+
+
+@pytest.mark.parametrize("prepare", ["missing", "unmarked"])
+def test_worker_refuses_an_uninitialised_media_root(
+    postgres_repository, monkeypatch, tmp_path, capsys, prepare
+):
+    """Review finding 3: a wrong root used to "delete" every row as a no-op."""
+    item = _item_with_audio(postgres_repository)
+    path = _object_path(postgres_repository, OWNER_A, item.id)
+    monkeypatch.setattr(postgres_repository.media_objects, "delete", _failing_delete)
+    postgres_repository.delete_for_owner(OWNER_A, item.id)
+    wrong_root = tmp_path / "typo-root"
+    if prepare == "unmarked":
+        wrong_root.mkdir()
+    monkeypatch.setenv("CLOUD_LIBRARY_DATABASE_URL", _dsn())
+    monkeypatch.setenv("CLOUD_LIBRARY_MEDIA_ROOT", str(wrong_root))
+
+    assert cleanup_worker.main([]) == 1
+
+    assert "not an initialised media root" in capsys.readouterr().err
+    assert wrong_root.exists() == (prepare == "unmarked")
+    assert [row[1] for row in _outbox()] == ["pending"]
+    assert path.exists()
+
+
+def test_app_store_marks_its_root(tmp_path):
+    root = tmp_path / "media"
+    library_postgres.FilesystemMediaObjectStore(root)
+
+    assert (root / library_postgres.ROOT_MARKER).is_file()
+    library_postgres.FilesystemMediaObjectStore(root, create=False)
+
+
+def test_symlink_loop_is_an_integrity_failure_and_a_dead_letter(
+    postgres_repository, monkeypatch
+):
+    """Review finding 5: resolve() raised RuntimeError/OSError unmapped."""
+    item = _item_with_audio(postgres_repository)
+    path = _object_path(postgres_repository, OWNER_A, item.id)
+    path.unlink()
+    path.symlink_to(path)
+
+    _assert_integrity_failure(_get_audio(postgres_repository, item.id))
+
+    postgres_repository.delete_for_owner(OWNER_A, item.id)
+    [(_, status, _, _, error)] = _outbox()
+    assert (status, error) == ("dead", "namespace_mismatch")
+
+
+def test_unexpected_delete_error_is_a_recorded_retry(postgres_repository, monkeypatch):
+    item = _item_with_audio(postgres_repository)
+
+    def unexpected(*_args):
+        raise OSError("/secret/absolute/path is busy")
+
+    monkeypatch.setattr(postgres_repository.media_objects, "delete", unexpected)
+    postgres_repository.delete_for_owner(OWNER_A, item.id)
+
+    [(_, status, attempts, _, error)] = _outbox()
+    assert (status, attempts, error) == ("pending", 1, "object_delete_failed")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_fifo_at_object_key_fails_fast(postgres_repository):
+    """Review finding 6: open() on a FIFO blocked the request thread."""
+    item = _item_with_audio(postgres_repository)
+    path = _object_path(postgres_repository, OWNER_A, item.id)
+    path.unlink()
+    os.mkfifo(path)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    pending = executor.submit(_get_audio, postgres_repository, item.id)
+    try:
+        response = pending.result(timeout=5)
+    finally:
+        if not pending.done():
+            # Release a reader stuck in open() so a regression fails, not hangs.
+            os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        executor.shutdown(wait=True)
+
+    _assert_integrity_failure(response)

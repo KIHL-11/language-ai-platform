@@ -4,7 +4,9 @@ Run on a schedule, as often as every minute:
 
     python -m services.library.cleanup_worker [--batch 50] [--max-batches 20]
 
-Needs CLOUD_LIBRARY_DATABASE_URL and CLOUD_LIBRARY_MEDIA_ROOT. Several runs
+Needs CLOUD_LIBRARY_DATABASE_URL and CLOUD_LIBRARY_MEDIA_ROOT; the root must
+already carry the marker the app writes, so a wrong or unmounted path is
+refused instead of "cleaning" an empty directory. Several runs
 may overlap safely: rows are claimed with SKIP LOCKED, and each object is
 deleted while its outbox row is locked. A crash simply leaves the row to come
 back after its backoff. Output carries counts only, never keys, owners or
@@ -20,6 +22,7 @@ from services.library.postgres import (
     MAX_CLEANUP_BATCH,
     CloudLibraryUnavailableError,
     FilesystemMediaObjectStore,
+    MediaRootUnavailableError,
     PostgresOwnerScopedLibraryRepository,
 )
 
@@ -51,9 +54,15 @@ def main(argv=None):
         parser.error("CLOUD_LIBRARY_DATABASE_URL is not set")
     if not media_root:
         parser.error("CLOUD_LIBRARY_MEDIA_ROOT is not set")
-    repository = PostgresOwnerScopedLibraryRepository(
-        dsn, FilesystemMediaObjectStore(media_root)
-    )
+    try:
+        media_objects = FilesystemMediaObjectStore(media_root, create=False)
+    except MediaRootUnavailableError:
+        print(
+            "cleanup refused: CLOUD_LIBRARY_MEDIA_ROOT is not an initialised media root",
+            file=sys.stderr,
+        )
+        return 1
+    repository = PostgresOwnerScopedLibraryRepository(dsn, media_objects)
     try:
         counts = run_cleanup(
             repository, batch=args.batch, max_batches=args.max_batches

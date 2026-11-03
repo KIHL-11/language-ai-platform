@@ -43,6 +43,7 @@ SAFE_ITEM_ID = re.compile(
 )
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 VERIFY_CHUNK_BYTES = 1024 * 1024
+ROOT_MARKER = ".language-ai-media-root"
 # An upload records its new object key in the cleanup outbox before writing
 # bytes; the worker leaves that row alone for this long so a slow upload can
 # still adopt the key. A crash during upload is cleaned after the grace.
@@ -72,6 +73,10 @@ class MediaNamespaceError(LibraryStoreError):
     """An object key does not belong to the owner/item it is used for."""
 
 
+class MediaRootUnavailableError(LibraryStoreError):
+    """The configured object root is missing or was never initialised."""
+
+
 class MediaUploadAbortedError(LibraryStoreError):
     """The new object was claimed for cleanup before its metadata committed."""
 
@@ -85,9 +90,16 @@ class FilesystemMediaObjectStore:
     storage.
     """
 
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, create: bool = True):
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        marker = self.root / ROOT_MARKER
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True)
+            marker.touch(exist_ok=True)
+        elif not marker.is_file():
+            # A wrong or unmounted root would make every delete a no-op
+            # "success" and silently empty the cleanup outbox.
+            raise MediaRootUnavailableError("Media root is not initialised")
         self._root = self.root.resolve()
 
     def put_audio(
@@ -156,8 +168,11 @@ class FilesystemMediaObjectStore:
             handle = open(
                 path,
                 "rb",
+                # O_NONBLOCK: opening a FIFO planted at the key would
+                # otherwise block until a writer appears.
                 opener=lambda name, flags: os.open(
-                    name, flags | getattr(os, "O_NOFOLLOW", 0)
+                    name,
+                    flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
                 ),
             )
         except FileNotFoundError as exc:
@@ -206,7 +221,11 @@ class FilesystemMediaObjectStore:
         ):
             raise MediaNamespaceError("Unsafe media object key")
         literal = self._root.joinpath(*object_key.split("/"))
-        candidate = literal.resolve()
+        try:
+            candidate = literal.resolve()
+        except (OSError, RuntimeError) as exc:
+            # A symlink loop: RuntimeError on Python 3.11, OSError on 3.12+.
+            raise MediaNamespaceError("Unsafe media object key") from exc
         # Any symlink along the key (a swapped directory or object) makes the
         # resolved path differ from the literal one.
         if candidate != literal:
@@ -512,6 +531,19 @@ class PostgresOwnerScopedLibraryRepository:
         try:
             self.media_objects.write_audio(object_key, owner_user_id, item_id, content)
             with self._connect() as connection:
+                # Item lock first, matching delete_for_owner. Without it two
+                # first uploads both see no media row, and the second upsert
+                # overwrites the first key without enqueueing it.
+                locked = connection.execute(
+                    """
+                    SELECT 1 FROM cloud_library_items
+                    WHERE owner_user_id = %s AND item_id = %s
+                    FOR NO KEY UPDATE
+                    """,
+                    (owner_user_id, item_id),
+                ).fetchone()
+                if locked is None:
+                    raise KeyError(item_id)
                 adopted = connection.execute(
                     """
                     DELETE FROM cloud_media_cleanup_outbox
@@ -576,7 +608,12 @@ class PostgresOwnerScopedLibraryRepository:
         except BaseException as exc:
             # The upload row is still pending (its adoption rolled back), so
             # the new object is reclaimed now or by a later worker run.
-            self._cleanup_now([upload_cleanup_id])
+            cleanup_ids = [upload_cleanup_id]
+            if isinstance(exc, MediaUploadAbortedError):
+                # A worker took the row, possibly before os.replace landed the
+                # object. The key was never adopted, so track it again.
+                cleanup_ids = self._reenqueue(owner_user_id, item_id, object_key)
+            self._cleanup_now(cleanup_ids)
             if isinstance(exc, psycopg.errors.ForeignKeyViolation):
                 raise KeyError(item_id) from exc
             if isinstance(exc, psycopg.Error):
@@ -725,6 +762,24 @@ class PostgresOwnerScopedLibraryRepository:
         ).fetchone()
         return str(row["cleanup_id"])
 
+    def _reenqueue(self, owner_user_id: str, item_id: str, object_key: str) -> list[str]:
+        try:
+            with self._connect() as connection:
+                return [
+                    self._enqueue_cleanup(
+                        connection,
+                        owner_user_id,
+                        item_id,
+                        object_key,
+                        not_before=self._now(),
+                    )
+                ]
+        except psycopg.Error:
+            logger.error(
+                "cloud media upload abort could not be re-enqueued item=%s", item_id
+            )
+            return []
+
     def _cleanup_now(self, cleanup_ids: list[str]) -> None:
         """Best-effort immediate cleanup; any failure leaves a durable row."""
 
@@ -830,7 +885,15 @@ class PostgresOwnerScopedLibraryRepository:
                     )
                 except MediaNamespaceError:
                     return self._mark_dead(connection, cleanup_id, "namespace_mismatch")
-                except LibraryStoreError:
+                except Exception as exc:
+                    # Any other object-store error (including unexpected
+                    # OSError/RuntimeError) is a retry; only its class is
+                    # logged, since messages can carry absolute paths.
+                    logger.warning(
+                        "cloud media cleanup delete failed cleanup_id=%s error=%s",
+                        cleanup_id,
+                        type(exc).__name__,
+                    )
                     if row["attempt_count"] >= MAX_CLEANUP_ATTEMPTS:
                         return self._mark_dead(
                             connection, cleanup_id, "object_delete_failed"
