@@ -645,3 +645,53 @@ def test_email_relogin_during_unlink_in_the_same_browser_does_not_deadlock(wecha
     assert outcome['login'].owner_user_id == owner
     with pytest.raises(InvalidAuthentication):
         repo.verify(s1)
+
+
+def test_email_relogin_in_one_browser_while_another_unlinks_does_not_deadlock(wechat):
+    """Browser 1 signs in again by email (replacing its live session) while browser 2 unlinks WeChat."""
+    import threading
+    import time
+    from services.auth.email_login import new_client_binding
+    repo, clock, mailbox, provider = wechat
+    first, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    assert link(first, provider).status_code == 200
+    clock.advance(seconds=61)
+    second, _ = login(mailbox)
+    clock.advance(seconds=61)
+    service = app_module.app.state.email_login_service
+    binding = new_client_binding()
+    challenge = service.start(EMAIL, binding).challenge_id
+    code = mailbox.latest(EMAIL).code
+    entered, go = threading.Event(), threading.Event()
+    original = service._map_identity
+
+    def paused(*args):  # hold the login mid-transaction, after its locks
+        entered.set()
+        go.wait(10)
+        return original(*args)
+    service._map_identity = paused
+    outcome = {}
+
+    def relogin():
+        try:
+            outcome['login'] = service.verify(challenge, code, binding, replaces=first.cookies.get(COOKIE_NAME)).owner_user_id
+        except Exception as exc:  # noqa: BLE001
+            outcome['login'] = exc
+
+    def unlink():
+        try:
+            unlink_identity(repo, second.cookies.get(COOKIE_NAME), 'wechat', 'unlink-wechat')
+            outcome['unlink'] = 'ok'
+        except Exception as exc:  # noqa: BLE001
+            outcome['unlink'] = exc
+    workers = [threading.Thread(target=relogin), threading.Thread(target=unlink)]
+    workers[0].start()
+    assert entered.wait(5)
+    workers[1].start()
+    time.sleep(0.5)
+    go.set()
+    for worker in workers:
+        worker.join(15)
+    service._map_identity = original
+    assert outcome == {'login': owner, 'unlink': 'ok'}, outcome
