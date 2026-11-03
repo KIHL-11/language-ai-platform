@@ -276,6 +276,9 @@ def test_daily_cap_also_stops_guessing_on_codes_issued_earlier(email_login):
         assert connection.execute('SELECT sum(failed_attempts) FROM cloud_email_login_challenges').fetchone()[0] == 10
         first_failure = connection.execute('SELECT min(created_at) FROM cloud_email_login_challenges').fetchone()[0]
     assert first_failure is not None
+    clock.advance(hours=1, seconds=1)
+    service.start(EMAIL, new_client_binding())
+    assert len(mailbox.latest(EMAIL).code) == 12  # capped: only an unguessable code is offered
 
 
 def test_capped_address_gets_an_unguessable_code_instead_of_a_lockout(email_login):

@@ -11,6 +11,7 @@ import TopicSpeakingCurriculum from '../speaking/TopicSpeakingCurriculum'
 import { getLibraryItem, listLibraryItems } from '../api/library'
 import type { LibraryItem, LibraryItemSummary } from '../types/library'
 
+type View = 'library' | 'study' | 'review' | 'topics' | 'account'
 type WeChatResult = { purpose: 'login' | 'link' | 'error'; message: string }
 
 function weChatFailure(error: unknown): string {
@@ -36,6 +37,9 @@ export function CloudSessionProvider({ children }: { children: ReactNode }) {
   const state = useSyncExternalStore(cloudAuth.subscribe, cloudAuth.getSnapshot)
   const [bootstrapped, setBootstrapped] = useState(false)
   const [weChat, setWeChat] = useState<WeChatResult | null>(null)
+  // Lives above the keyed workspace so a same-account refresh (e.g. on focus,
+  // while the learner fetches a code from their mail tab) keeps the view.
+  const [viewFor, setViewFor] = useState<{ userId: string; view: View } | null>(null)
   useEffect(() => {
     let active = true
     void cloudAuth.bootstrap(API_BASE_URL).then(async () => {
@@ -54,18 +58,20 @@ export function CloudSessionProvider({ children }: { children: ReactNode }) {
   }, [])
   if (!bootstrapped) return <main><p role="status">Checking server deployment…</p></main>
   if (state.status === 'personal') return children
-  if (state.status === 'authenticated') return <CloudWorkspace key={`${state.userId}:${state.generation}`} userId={state.userId} email={state.email} weChat={weChat} />
+  if (state.status === 'authenticated') {
+    const view = viewFor?.userId === state.userId ? viewFor.view : weChat && weChat.purpose !== 'login' ? 'account' : 'study'
+    return <CloudWorkspace key={`${state.userId}:${state.generation}`} userId={state.userId} email={state.email} weChat={weChat} view={view} setView={(next) => setViewFor({ userId: state.userId, view: next })} />
+  }
   return <main className="mx-auto max-w-3xl p-8"><h1>Language AI — Cloud session</h1>{weChat && <p role="alert">{weChat.message}</p>}<p role="status">{state.status === 'loading' ? 'Checking session…' : state.status === 'csrf-invalid' ? 'Authorization or CSRF validation failed. Refresh your session before continuing.' : state.status === 'expired' ? 'Your session is missing or expired.' : state.status === 'logout-unconfirmed' ? 'Local view cleared, but server logout was not confirmed.' : state.status === 'logged-out' ? 'Signed out of this browser view.' : 'Cloud authentication is unavailable.'}</p>{state.status !== 'loading' && state.status !== 'unavailable' && <EmailSignIn />}{state.status !== 'loading' && <button type="button" onClick={() => void cloudAuth.bootstrap(API_BASE_URL)}>Check session again</button>}</main>
 }
 
-function CloudWorkspace({ userId, email, weChat }: { userId: string; email: string | null; weChat: WeChatResult | null }) {
-  const [view, setView] = useState<'library' | 'study' | 'review' | 'topics' | 'account'>(weChat && weChat.purpose !== 'login' ? 'account' : 'study')
+function CloudWorkspace({ userId, email, weChat, view, setView }: { userId: string; email: string | null; weChat: WeChatResult | null; view: View; setView: (view: View) => void }) {
   async function logout(everywhere = false) {
     try { await (everywhere ? cloudAuth.revokeAll() : cloudAuth.logout()) }
     catch { /* The auth gate displays an unconfirmed logout state. */ }
     finally { broadcastAuth('invalidate') }
   }
-  return <div><header className="p-5"><h1>Language AI — Cloud</h1>{email && <p>Signed in as {email}</p>}<nav aria-label="Cloud learning"><button onClick={() => setView('library')}>My Library</button><button onClick={() => setView('study')}>Words & Chunks</button><button onClick={() => setView('review')}>Daily Review</button><button onClick={() => setView('topics')}>Topic Speaking</button><button onClick={() => setView('account')}>Sign-in methods</button><button onClick={() => void logout()}>Sign out</button><button onClick={() => void logout(true)}>Sign out everywhere</button></nav></header>{view === 'library' ? <CloudLibrary /> : view === 'study' ? <StudyBankPage /> : view === 'review' ? <DailyReviewPage /> : view === 'account' ? <AccountSecurity notice={weChat?.message} /> : <TopicSpeakingCurriculum learnerId={userId} onBack={() => setView('study')} />}</div>
+  return <div><header className="p-5"><h1>Language AI — Cloud</h1>{email && <p>Signed in as {email}</p>}<nav aria-label="Cloud learning"><button onClick={() => setView('library')}>My Library</button><button onClick={() => setView('study')}>Words & Chunks</button><button onClick={() => setView('review')}>Daily Review</button><button onClick={() => setView('topics')}>Topic Speaking</button><button onClick={() => setView('account')}>Sign-in methods</button><button onClick={() => void logout()}>Sign out</button><button onClick={() => void logout(true)}>Sign out everywhere</button></nav></header>{view === 'library' ? <CloudLibrary /> : view === 'study' ? <StudyBankPage /> : view === 'review' ? <DailyReviewPage /> : view === 'account' ? <AccountSecurity userId={userId} notice={weChat?.message} /> : <TopicSpeakingCurriculum learnerId={userId} onBack={() => setView('study')} />}</div>
 }
 
 function CloudLibrary() {

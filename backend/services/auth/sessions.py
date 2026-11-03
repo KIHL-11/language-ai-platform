@@ -93,6 +93,14 @@ class BrowserSessionRepository:
         """Lock and return the valid session row for ``token`` plus the current time."""
         return self._row(connection,token)
 
+    def owner_hint(self, connection, token):
+        """Unlocked owner lookup used only to pick an account lock; validate afterwards."""
+        if not isinstance(token,str) or not TOKEN_PATTERN.fullmatch(token):
+            raise InvalidAuthentication('Invalid session')
+        row=connection.execute('SELECT owner_user_id FROM cloud_browser_sessions WHERE token_hash=%s',(digest(token),)).fetchone()
+        if row is None: raise InvalidAuthentication('Invalid session')
+        return row['owner_user_id']
+
     def revoke_others_in_transaction(self, connection, owner, keep_session_id, now):
         connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND session_id<>%s AND revoked_at IS NULL',(now,owner,keep_session_id))
 

@@ -15,7 +15,7 @@ from services.auth.email_login import (
 )
 from services.auth.external_identity import (
     ExternalLoginRejected, IdentityConflict, IdentityNotLinked, ReauthenticationRequired, WeChatAccountService,
-    account_identities, wechat_from_environment,
+    account_identities, unlink_identity, wechat_from_environment,
 )
 from services.auth.identity import DeploymentMode, IdentityDependency, InvalidAuthentication, deployment_mode
 from services.auth.sessions import (
@@ -351,8 +351,8 @@ def identities(request:Request,identity:IdentityDependency):
 
 
 @router.post('/account/identities/unlink',status_code=204)
-def unlink_identity(request:Request,body:UnlinkRequest,identity:IdentityDependency):
-    service=_wechat_service(request)
-    try: service.unlink(request.cookies.get(COOKIE_NAME,''),body.provider,body.confirm)
+def unlink_route(request:Request,body:UnlinkRequest,identity:IdentityDependency):
+    repository=_repository(request)  # works even if WeChat sign-in is switched off later
+    try: unlink_identity(repository,request.cookies.get(COOKIE_NAME,''),body.provider,body.confirm)
     except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
     return Response(status_code=204)

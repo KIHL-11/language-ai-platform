@@ -109,6 +109,12 @@ class WeChatOAuthAdapter:
         return ExternalAssertion(self.issuer, self.app_id, openid)
 
 
+def _elevated(sessions, connection, session_token):
+    session, now = sessions.session_in_transaction(connection, session_token)
+    _require_fresh_proof(session, now)
+    return session, now
+
+
 def _require_fresh_proof(session, now):
     proven = session.get('reauthenticated_at')
     if proven is None or proven + REAUTH_LIFETIME <= now:
@@ -185,9 +191,7 @@ class WeChatAccountService:
             raise SessionUnavailable('Login storage unavailable') from exc
 
     def _elevated(self, connection, session_token):
-        session, now = self.sessions.session_in_transaction(connection, session_token)
-        _require_fresh_proof(session, now)
-        return session, now
+        return _elevated(self.sessions, connection, session_token)
 
     @staticmethod
     def _identity(connection, owner, provider):
@@ -240,6 +244,13 @@ class WeChatAccountService:
             "SELECT owner_user_id FROM cloud_external_identities WHERE provider='wechat' AND subject=%s", (subject,)).fetchone()
         if mapped is None:
             raise IdentityNotLinked('Sign in with email and link WeChat first')
+        # Serialize with unlink, then re-read: a session is only issued while
+        # the mapping still exists, so unlink's sign-out cannot be outrun.
+        _lock(connection, f'language-ai-account:{mapped["owner_user_id"]}')
+        mapped = connection.execute(
+            "SELECT owner_user_id FROM cloud_external_identities WHERE provider='wechat' AND subject=%s FOR UPDATE", (subject,)).fetchone()
+        if mapped is None:
+            raise IdentityNotLinked('Sign in with email and link WeChat first')
         connection.execute("UPDATE cloud_external_identities SET verified_at=GREATEST(%s,created_at) WHERE provider='wechat' AND subject=%s",
                            (now, subject))
         # A WeChat login does not count as a fresh email proof.
@@ -247,15 +258,15 @@ class WeChatAccountService:
         return WeChatLogin(mapped['owner_user_id'], token)
 
     def _link(self, connection, row, subject, session_token):
+        owner = row['owner_user_id']
+        _lock(connection, f'language-ai-account:{owner}')  # before any session row, as in unlink
         try:
             session, now = self.sessions.session_in_transaction(connection, session_token)
         except InvalidAuthentication as exc:
             raise ExternalLoginRejected('Link must finish in the session that started it') from exc
-        owner = row['owner_user_id']
         if str(session['session_id']) != str(row['session_id']) or session['owner_user_id'] != owner:
             raise ExternalLoginRejected('Link must finish in the session that started it')
         _require_fresh_proof(session, now)
-        _lock(connection, f'language-ai-account:{owner}')
         _lock(connection, f'language-ai-identity:wechat:{subject}')
         mapped = connection.execute(
             "SELECT owner_user_id FROM cloud_external_identities WHERE provider='wechat' AND subject=%s", (subject,)).fetchone()
@@ -270,26 +281,35 @@ class WeChatAccountService:
             (subject, owner, now, now))
 
     def unlink(self, session_token, provider, confirmation):
-        """Remove a sign-in method; signs out every other browser of the account."""
-        if UNLINK_CONFIRMATION.get(provider) is None:
-            raise IdentityConflict('unlink_unsupported')  # email is the recovery identity in this stage
-        if confirmation != UNLINK_CONFIRMATION[provider]:
-            raise IdentityConflict('confirmation_required')
-        try:
-            with self.sessions._connect() as connection:
-                session, now = self._elevated(connection, session_token)
-                owner = session['owner_user_id']
-                _lock(connection, f'language-ai-account:{owner}')
-                rows = connection.execute('SELECT provider FROM cloud_external_identities WHERE owner_user_id=%s FOR UPDATE',
-                                          (owner,)).fetchall()
-                if provider not in {row['provider'] for row in rows}:
-                    raise IdentityConflict('not_linked')
-                if len(rows) <= 1:
-                    raise IdentityConflict('last_login_method')
-                connection.execute('DELETE FROM cloud_external_identities WHERE owner_user_id=%s AND provider=%s', (owner, provider))
-                self.sessions.revoke_others_in_transaction(connection, owner, session['session_id'], now)
-        except psycopg.Error as exc:
-            raise SessionUnavailable('Login storage unavailable') from exc
+        unlink_identity(self.sessions, session_token, provider, confirmation)
+
+
+def unlink_identity(sessions, session_token, provider, confirmation):
+    """Remove a sign-in method; signs out every other browser of the account.
+
+    Independent of the WeChat verifier, so a link can be removed even after
+    WeChat sign-in is switched off. The account lock is taken before any
+    session row is updated, matching link and login.
+    """
+    if UNLINK_CONFIRMATION.get(provider) is None:
+        raise IdentityConflict('unlink_unsupported')  # email is the recovery identity in this stage
+    if confirmation != UNLINK_CONFIRMATION[provider]:
+        raise IdentityConflict('confirmation_required')
+    try:
+        with sessions._connect() as connection:
+            owner = sessions.owner_hint(connection, session_token)
+            _lock(connection, f'language-ai-account:{owner}')
+            session, now = _elevated(sessions, connection, session_token)
+            rows = connection.execute('SELECT provider FROM cloud_external_identities WHERE owner_user_id=%s FOR UPDATE',
+                                      (owner,)).fetchall()
+            if provider not in {row['provider'] for row in rows}:
+                raise IdentityConflict('not_linked')
+            if len(rows) <= 1:
+                raise IdentityConflict('last_login_method')
+            connection.execute('DELETE FROM cloud_external_identities WHERE owner_user_id=%s AND provider=%s', (owner, provider))
+            sessions.revoke_others_in_transaction(connection, owner, session['session_id'], now)
+    except psycopg.Error as exc:
+        raise SessionUnavailable('Login storage unavailable') from exc
 
 
 def account_identities(sessions, session_token):

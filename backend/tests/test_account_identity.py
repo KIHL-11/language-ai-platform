@@ -280,10 +280,12 @@ def test_wechat_and_account_routes_are_unavailable_without_configuration_and_in_
     monkeypatch.setenv('LANGUAGE_AI_DEPLOYMENT_MODE', 'personal')
     personal = client()
     assert personal.get('/api/account/providers').json() == {'email': False, 'wechat': False}
-    for path in ('/api/account/wechat/start', '/api/account/wechat/complete', '/api/account/reauth/email/start',
-                 '/api/account/identities/unlink'):
-        assert personal.post(path, json={}).status_code in (401, 422, 503)
-    assert personal.post('/api/account/wechat/start', json={}).status_code == 503
+    bodies = {'/api/account/wechat/start': {}, '/api/account/wechat/complete': {'code': 'c' * 16, 'state': 's' * 43},
+              '/api/account/reauth/email/start': None, '/api/account/wechat/link/start': {'confirm': 'link-wechat'},
+              '/api/account/identities/unlink': {'provider': 'wechat', 'confirm': 'unlink-wechat'}}
+    for path, body in bodies.items():
+        assert personal.post(path, json=body).status_code == 503, path
+    assert personal.get('/api/account/identities').status_code == 503
 
 
 def test_simulated_provider_cannot_be_enabled_outside_tests(monkeypatch):
@@ -486,3 +488,48 @@ def test_reauth_codes_are_purpose_bound_and_follow_the_current_email(wechat):
     assert browser.post('/api/account/reauth/email/verify', headers=secured(browser),
                         json={'challenge_id': started['challenge_id'], 'code': code}).status_code == 400
     assert browser.get('/api/account/identities').json()['reauthenticated_for'] > 0  # only the login's own proof
+
+
+def test_wechat_login_racing_an_unlink_gets_no_session(wechat):
+    """Unlink commits while a WeChat callback is mid-flight: the callback must lose."""
+    import threading
+    import time
+    from services.auth.email_login import new_client_binding
+    from services.auth.external_identity import IdentityNotLinked
+    repo, _, mailbox, provider = wechat
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    assert link(browser, provider).status_code == 200
+    accounts = app_module.app.state.wechat_account_service
+    binding = new_client_binding()
+    code, state = provider.approve(accounts.start_login(binding), OPENID)
+    outcome = {}
+    with psycopg.connect(repo.dsn) as unlinking:  # plays unlink: account lock + delete, not yet committed
+        unlinking.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f'language-ai-account:{owner}',))
+        unlinking.execute("DELETE FROM cloud_external_identities WHERE provider='wechat' AND owner_user_id=%s", (owner,))
+
+        def callback():
+            try:
+                outcome['result'] = accounts.complete(code, state, binding)
+            except Exception as exc:  # noqa: BLE001
+                outcome['result'] = exc
+        worker = threading.Thread(target=callback)
+        worker.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not count(
+                repo.dsn, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND datname=current_database()"):
+            time.sleep(0.02)
+        assert worker.is_alive()  # the callback is waiting on the account lock
+    worker.join(5)
+    assert isinstance(outcome['result'], IdentityNotLinked)
+    assert count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions WHERE owner_user_id=%s AND revoked_at IS NULL', owner) == 1
+
+
+def test_unlink_works_after_wechat_sign_in_is_switched_off(wechat):
+    _, _, mailbox, provider = wechat
+    browser, _ = login(mailbox)
+    assert link(browser, provider).status_code == 200
+    delattr(app_module.app.state, 'wechat_account_service')
+    assert client().get('/api/account/providers').json()['wechat'] is False
+    assert browser.post('/api/account/identities/unlink', json={'provider': 'wechat', 'confirm': 'unlink-wechat'},
+                        headers=secured(browser)).status_code == 204

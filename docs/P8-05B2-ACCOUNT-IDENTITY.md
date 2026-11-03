@@ -32,8 +32,8 @@ the server-side secret. The checks that apply:
 | subject | openid must match `^[A-Za-z0-9_-]{6,64}$`; stored as `<app id>:<openid>` (DB check), so a different WeChat application can never collide |
 | callback replay | state single use + provider code single use; both tested independently |
 | fresh proof | starting a link, finishing it and unlinking require an email proof from the last 10 minutes (`reauthenticated_at` on the session: set by email login or by the session-bound re-check code) |
-| explicit consent | link requires `confirm: "link-wechat"`, unlink `confirm: "unlink-wechat"`; the UI asks with an unchecked checkbox |
-| concurrency | per-account and per-subject advisory locks, `PK(provider,subject)` and `UNIQUE(owner_user_id,provider)`; four concurrent links of one WeChat yield exactly one |
+| explicit confirmation | the UI requires an unchecked checkbox to be ticked before it sends the request. The server-side `confirm: "link-wechat"` / `"unlink-wechat"` constants only prove a deliberate, CSRF-protected call (not a replayed generic POST); they are not proof of a human decision by themselves |
+| concurrency | per-account and per-subject advisory locks, `PK(provider,subject)` and `UNIQUE(owner_user_id,provider)`; four concurrent links of one WeChat yield exactly one. WeChat login, link and unlink all take the account lock before touching session rows, so a login racing an unlink gets no session (tested) and link/unlink cannot deadlock on lock order |
 
 The callback lands on the SPA root (`/?oauth=wechat&code&state`). The page
 removes the code from the address bar, then finishes with a same-origin
@@ -91,6 +91,18 @@ checks, a decision on `unionid`, and owner sign-off.
 | Other tabs not told about sign-in | **Fixed.** `signed-in` on the existing BroadcastChannel; other tabs re-check `/api/account/me`. |
 | No per-IP / global limits | **Open — Workstream F dependency** (below). |
 
+## Known limits found in review
+
+- `POST /api/account/wechat/start` has no rate limit; each call stores one
+  10-minute state row, bounded only by the purge job. A per-IP limit belongs to
+  the Workstream F dependency below.
+- Rotating `CLOUD_AUTH_CODE_KEY` invalidates codes issued in the last 10
+  minutes (learners request a new code). No dual-key verification exists.
+- Rolling back 0008 leaves open six-digit codes stored as HMAC digests, which
+  0007 code cannot check: about 10 minutes of failed sign-ins after a rollback.
+- The browser accepts any `https:` authorization URL from the same-origin
+  server. When a real adapter is wired, pin the host to `open.weixin.qq.com`.
+
 ## Purge
 
 `python -m services.auth.maintenance [--batch 500] [--max-batches 20] [--outbox]`
@@ -127,6 +139,8 @@ The role still has no access to learning tables (tested).
 Not implemented on purpose: limiting by `X-Forwarded-For` without a trusted
 proxy definition lets any client choose its own IP. Needed from Workstream F:
 
+0. Also covers `POST /api/account/wechat/start` (unlimited today) and the
+   email code send quota.
 1. The production topology: which reverse proxy/CDN terminates TLS, and its
    egress addresses or a private network boundary.
 2. A server setting such as `CLOUD_TRUSTED_PROXIES` (CIDRs); the client IP is

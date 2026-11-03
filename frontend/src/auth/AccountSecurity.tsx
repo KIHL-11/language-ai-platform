@@ -15,13 +15,21 @@ function explain(error: unknown): string {
   return 'Account settings are temporarily unavailable. Try again shortly.'
 }
 
+// A sent re-check code survives the workspace remounting on a same-account
+// refresh; it is only an id and an address, never the code.
+const pendingReauth = new Map<string, { id: string; email: string }>()
+
 // Linking and unlinking need a fresh email proof (valid 10 minutes) and an
 // explicit confirmation; the server enforces both.
-export function AccountSecurity({ notice }: { notice?: string | null }) {
+export function AccountSecurity({ userId, notice }: { userId: string; notice?: string | null }) {
   const [account, setAccount] = useState<AccountIdentities | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [challenge, setChallenge] = useState<{ id: string; email: string } | null>(null)
+  const [challenge, setPending] = useState<{ id: string; email: string } | null>(() => pendingReauth.get(userId) ?? null)
+  const setChallenge = (value: { id: string; email: string } | null) => {
+    if (value) pendingReauth.set(userId, value); else pendingReauth.delete(userId)
+    setPending(value)
+  }
   const [code, setCode] = useState('')
   const [confirmLink, setConfirmLink] = useState(false)
   const [confirmUnlink, setConfirmUnlink] = useState(false)

@@ -6,7 +6,7 @@ ALTER TABLE IF EXISTS cloud_browser_sessions DROP COLUMN IF EXISTS reauthenticat
 DROP INDEX IF EXISTS cloud_email_login_challenges_created;
 DO $$
 BEGIN
- IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='cloud_email_login_challenges' AND column_name='purpose') THEN
+ IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_email_login_challenges' AND column_name='purpose') THEN
   DELETE FROM cloud_email_login_challenges WHERE purpose='reauth' OR code_format='long';
   ALTER TABLE cloud_email_login_challenges
    DROP CONSTRAINT IF EXISTS cloud_email_login_challenges_owner,
@@ -14,6 +14,7 @@ BEGIN
  END IF;
  IF to_regclass('cloud_external_identities') IS NOT NULL THEN
   DROP INDEX IF EXISTS cloud_external_identities_one_per_provider;
+  CREATE INDEX IF NOT EXISTS cloud_external_identities_owner ON cloud_external_identities(owner_user_id,provider);
   DELETE FROM cloud_external_identities WHERE provider<>'email';
   ALTER TABLE cloud_external_identities DROP CONSTRAINT IF EXISTS cloud_external_identities_wechat_subject;
   ALTER TABLE cloud_external_identities DROP CONSTRAINT IF EXISTS cloud_external_identities_provider_check;

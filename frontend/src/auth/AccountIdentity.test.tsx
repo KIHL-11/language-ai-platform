@@ -140,6 +140,24 @@ describe('Sign-in methods', () => {
     expect(new Headers(linkStart[1]?.headers).get('X-CSRF-Token')).toBe('c'.repeat(64))
   })
 
+  it('keeps the view and the sent re-check code when the tab regains focus', async () => {
+    const { calls } = setup({
+      '/api/account/me': me(() => true),
+      '/api/account/identities': () => json({ identities: [{ provider: 'email', label: 'learner@example.test', linked_at: '2026-11-03T00:00:00+00:00' }], reauthenticated_for: 0, wechat_available: true }),
+      '/api/account/reauth/email/start': () => json({ challenge_id: CHALLENGE, email: 'learner@example.test', expires_in: 600, resend_after: 60 }, 202),
+    })
+    const user = userEvent.setup()
+    render(<CloudSessionProvider><p>Personal</p></CloudSessionProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Sign-in methods' }))
+    await user.click(await screen.findByRole('button', { name: 'Send confirmation code' }))
+    await screen.findByLabelText('Confirmation code')
+    const checks = calls().filter(([url]) => url === '/api/account/me').length
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(calls().filter(([url]) => url === '/api/account/me').length).toBe(checks + 1))
+    expect(await screen.findByLabelText('Confirmation code')).toBeInTheDocument()
+    expect(calls().filter(([url]) => url === '/api/account/reauth/email/start')).toHaveLength(1)
+  })
+
   it('removes WeChat only after confirmation and explains a refused last method', async () => {
     let wechat = true
     setup({

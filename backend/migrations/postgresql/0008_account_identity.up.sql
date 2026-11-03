@@ -9,6 +9,7 @@ ALTER TABLE cloud_external_identities ADD CONSTRAINT cloud_external_identities_w
  CHECK(provider<>'wechat' OR subject ~ '^wx[0-9a-f]{16}:[A-Za-z0-9_-]{6,64}$');
 -- At most one identity per provider per account: no silent second WeChat.
 CREATE UNIQUE INDEX cloud_external_identities_one_per_provider ON cloud_external_identities(owner_user_id,provider);
+DROP INDEX cloud_external_identities_owner;  -- superseded by the unique index
 
 -- Login codes: 'reauth' codes re-prove the signed-in account's own address
 -- and are bound to that session; 'long' codes are issued once an address hit
