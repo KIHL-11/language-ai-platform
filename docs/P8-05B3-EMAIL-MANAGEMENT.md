@@ -142,6 +142,20 @@ the old code:
   Indexes for the session purge and the OAuth-state cascade. A stable identity
   order. Clearer UI messages, and unknown results are rejected.
 
+Re-review of the fixes (`f49fe35`, separate reviewer agent): no
+Critical/High/Medium. It derived the lock order for every flow and confirmed
+the only inversion is Low 1 below. It also confirmed the raced-503 path is
+clean and retryable, and that a partial notice failure reports `failed` (both
+now tested).
+
+- **Low, fixed:** mass sign-out (change, unlink, revoke-all) now revokes only
+  live sessions, so it never locks the dead rows the purge deletes.
+- **Low, accepted:** two crossing changes (account A: Y→X while account B:
+  X→Y) take the two address locks in opposite orders. PostgreSQL detects the
+  deadlock within about 1 s, and both transactions roll back with nothing
+  moved; one returns 503. It needs control of both mailboxes. Fix if needed:
+  take both address locks in sorted order before reading the code row.
+
 Accepted, documented: a lock timeout ends the whole purge run (rerun picks it up);
 adding an address never signs other browsers out; a change does not remove a
 second address or WeChat that someone added earlier, so the UI asks the learner

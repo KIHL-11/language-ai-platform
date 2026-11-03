@@ -609,3 +609,117 @@ def test_change_of_the_second_address_notifies_both_and_code_mail_names_its_purp
     assert any('add this address to an account' in text and 'Never read it out' in text and 'ABCD-EFGH-JKMN' in text for text in texts)
     assert outbox.purge(datetime.now(timezone.utc)) == 1  # the expired code goes; the notice is kept for days
     assert any('security notice' in path.read_text() for path in (tmp_path / 'outbox').iterdir())
+
+
+def test_sign_in_that_raced_an_address_move_is_refused_cleanly_and_retryable(email_login):
+    """Forces the mapping to move between login's first read and its locked re-read."""
+    from services.auth import email_login as module
+    from services.auth.email_login import new_client_binding
+    from services.auth.sessions import SessionUnavailable
+    repo, clock, mailbox, service = email_login
+    _, first = login(mailbox, EMAIL)
+    clock.advance(seconds=1)
+    _, second = login(mailbox, OTHER)
+    clock.advance(minutes=2)
+    binding = new_client_binding()
+    challenge = service.start(EMAIL, binding).challenge_id
+    code = mailbox.latest(EMAIL).code
+    sessions_before = count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions')
+    original = module.account_lock
+
+    def moved(connection, owner):  # synthetic out-of-band move, committed before the re-read
+        with psycopg.connect(repo.dsn) as other:
+            other.execute("DELETE FROM cloud_external_identities WHERE subject=%s", (OTHER,))
+            other.execute("UPDATE cloud_external_identities SET owner_user_id=%s WHERE subject=%s", (second.json()['user_id'], EMAIL))
+        original(connection, owner)
+    module.account_lock = moved
+    try:
+        with pytest.raises(SessionUnavailable):
+            service.verify(challenge, code, binding)
+    finally:
+        module.account_lock = original
+    assert count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions') == sessions_before  # nothing minted
+    assert count(repo.dsn, 'SELECT closed_at IS NULL FROM cloud_email_login_challenges WHERE challenge_id=%s', challenge) is True
+    assert service.verify(challenge, code, binding).owner_user_id == second.json()['user_id'] != first.json()['user_id']
+
+
+def test_one_failed_notice_out_of_two_reports_failed(email_login):
+    _, clock, mailbox, _ = email_login
+    browser, _ = login(mailbox)
+    clock.advance(seconds=1)
+    assert claim(browser, mailbox, NEW).status_code == 200
+    clock.advance(minutes=1)
+    calls = []
+
+    def second_fails(*, email, kind):
+        calls.append(email)
+        if len(calls) == 2:
+            raise OSError('mail down')
+    mailbox.send_security_notice = second_fails
+    result = claim(browser, mailbox, 'third.place@example.test', replaces=NEW)
+    assert result.json() == {'result': 'changed', 'notice': 'failed'} and calls == [NEW, EMAIL]
+
+
+def test_mass_sign_out_leaves_dead_rows_to_the_purge_job(email_login):
+    from services.auth.sessions import digest
+    repo, clock, mailbox, _ = email_login
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    clock.advance(seconds=61)
+    idle, _ = login(mailbox)
+    for _ in range(2):  # keep 'browser' alive while 'idle' idle-expires (never revoked)
+        clock.advance(minutes=16)
+        assert browser.get('/api/account/me').status_code == 200
+    clock.advance(seconds=61)
+    live, _ = login(mailbox)
+    assert browser.post('/api/account/sessions/revoke-all', headers=secured(browser)).status_code == 204
+    assert live.get('/api/account/me').status_code == 401
+    assert count(repo.dsn, 'SELECT revoked_at IS NULL FROM cloud_browser_sessions WHERE token_hash=%s',
+                 digest(idle.cookies.get(COOKIE_NAME))) is True  # untouched, still unusable
+    assert idle.get('/api/account/me').status_code == 401
+    assert count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions WHERE owner_user_id=%s AND revoked_at IS NULL '
+                 'AND last_seen_at > %s', owner, clock() - __import__('datetime').timedelta(minutes=30)) == 0
+
+
+def test_two_address_cap_holds_when_two_adds_overlap(email_login):
+    """One add is paused right after it counted the account's addresses; the other must wait."""
+    import threading
+    import time
+    repo, clock, mailbox, service = email_login
+    first, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    clock.advance(seconds=61)
+    second, _ = login(mailbox)
+    pending = []
+    for browser, address in ((first, 'overlap.a@example.test'), (second, 'overlap.b@example.test')):
+        started = claim_start(browser, address).json()
+        pending.append((browser, started['challenge_id'], mailbox.latest(address).code))
+    entered, go = threading.Event(), threading.Event()
+    calls = []
+    original = type(service)._owner_emails
+
+    def counting(connection, account):
+        result = original(connection, account)
+        calls.append(1)
+        if len(calls) == 1:  # the first verify to count (the endpoint runs on a worker thread)
+            entered.set()
+            go.wait(10)
+        return result
+    service._owner_emails = counting
+    statuses = {}
+
+    def run(index):
+        statuses[index] = claim_verify(*pending[index]).status_code
+    try:
+        workers = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+        workers[0].start()
+        assert entered.wait(5)
+        workers[1].start()
+        time.sleep(0.5)
+        assert workers[1].is_alive()  # blocked on the account lock, not racing the count
+        go.set()
+        for worker in workers:
+            worker.join(15)
+    finally:
+        del service._owner_emails
+    assert sorted(statuses.values()) == [200, 422] and len(emails_of(repo, owner)) == 2
