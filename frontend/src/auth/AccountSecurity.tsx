@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { CloudAuthError, accountIdentities, startReauth, startWeChatLink, unlinkWeChat, verifyReauth } from './client'
 import type { AccountIdentities } from './client'
 import { codeComplete, normalizeCode } from './codes'
+import { EmailAddresses } from './EmailAddresses'
 
 function explain(error: unknown): string {
   if (error instanceof CloudAuthError) {
@@ -64,7 +65,7 @@ export function AccountSecurity({ userId, notice }: { userId: string; notice?: s
   return <main className="p-8">
     <h2>Sign-in methods</h2>
     {notice && <p role="status">{notice}</p>}
-    <ul>{account.identities.map((item) => <li key={item.provider}>{item.provider === 'email' ? `Email: ${item.label}` : 'WeChat'} (linked {new Date(item.linkedAt).toLocaleDateString()})</li>)}</ul>
+    <ul>{account.identities.map((item) => <li key={`${item.provider}:${item.label}`}>{item.provider === 'email' ? `Email: ${item.label}` : 'WeChat'} (linked {new Date(item.linkedAt).toLocaleDateString()})</li>)}</ul>
     {fresh ? <p>Email confirmed. You can change sign-in methods for about {Math.max(1, Math.round(account.reauthenticatedFor / 60))} more minutes.</p>
       : challenge ? <form onSubmit={submitCode}>
         <p>We sent a code to <strong>{challenge.email}</strong>.</p>
@@ -74,7 +75,8 @@ export function AccountSecurity({ userId, notice }: { userId: string; notice?: s
         {/* The code may have expired, been used up, or belong to an earlier sign-in. */}
         <button type="button" disabled={busy} onClick={() => void sendCode()}>Send a new code</button>
       </form>
-      : <p>To link or remove a sign-in method, first confirm your email address. <button type="button" disabled={busy} onClick={() => void sendCode()}>Send confirmation code</button></p>}
+      : <p>To add, change, link or remove a sign-in method, first confirm your email address. <button type="button" disabled={busy} onClick={() => void sendCode()}>Send confirmation code</button></p>}
+    <EmailAddresses emails={account.identities.filter((item) => item.provider === 'email').map((item) => item.label)} fresh={fresh} onChanged={load} />
     {account.wechatAvailable && !hasWeChat && <section aria-labelledby="link-wechat-heading">
       <h3 id="link-wechat-heading">Link WeChat</h3>
       <label><input type="checkbox" checked={confirmLink} onChange={(event) => setConfirmLink(event.target.checked)} /> I want the WeChat account I approve next to be able to sign in to this Language AI account.</label>

@@ -112,7 +112,10 @@ class BrowserSessionRepository:
         return row['owner_user_id']
 
     def revoke_others_in_transaction(self, connection, owner, keep_session_id, now):
-        connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND session_id<>%s AND revoked_at IS NULL',(now,owner,keep_session_id))
+        # Live rows only: dead ones can never authenticate, and leaving them to
+        # the purge job keeps mass sign-out and purge from locking the same rows.
+        connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND session_id<>%s AND revoked_at IS NULL '
+                           'AND expires_at>%s AND last_seen_at>%s',(now,owner,keep_session_id,now,now-IDLE_LIFETIME))
 
     def _row(self, connection, token):
         if not isinstance(token,str) or not TOKEN_PATTERN.fullmatch(token):
@@ -154,7 +157,9 @@ class BrowserSessionRepository:
         try:
             with self._connect() as connection:
                 account_lock(connection,owner)
-                connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND revoked_at IS NULL',(self._now(),owner))
+                now=self._now()
+                connection.execute('UPDATE cloud_browser_sessions SET revoked_at=%s WHERE owner_user_id=%s AND revoked_at IS NULL '
+                                   'AND expires_at>%s AND last_seen_at>%s',(now,owner,now,now-IDLE_LIFETIME))  # live rows only
         except psycopg.Error as exc: raise SessionUnavailable('Session storage unavailable') from exc
 
 

@@ -10,6 +10,7 @@ database, so a database copy alone does not let anyone recover open codes.
 """
 import hashlib
 import hmac
+import logging
 import stat
 import os
 import re
@@ -25,10 +26,12 @@ from urllib.parse import urlsplit
 
 import psycopg
 
+from services.auth.account import IdentityConflict, require_fresh_proof
 from services.auth.identity import InvalidAuthentication
 from services.auth.sessions import REAUTH_LIFETIME, BrowserSessionRepository, SessionUnavailable, account_lock
 
 
+LOG = logging.getLogger(__name__)
 CODE_LIFETIME = timedelta(minutes=10)
 RESEND_INTERVAL = timedelta(seconds=60)
 HOURLY_CHALLENGE_LIMIT = 5
@@ -47,6 +50,13 @@ LONG_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'
 LONG_CODE_LENGTH = 12
 LONG_CODE_PATTERN = re.compile(f'^[{LONG_CODE_ALPHABET}]{{{LONG_CODE_LENGTH}}}$')
 MIN_CODE_KEY_BYTES = 32
+MAX_EMAILS_PER_ACCOUNT = 2
+NOTICE_RETENTION = timedelta(days=7)
+CODE_SUBJECTS = {'login': 'Language AI sign-in code', 'reauth': 'Language AI: confirm it is you',
+                 'claim': 'Language AI: add this address to an account?'}
+CLAIM_WARNING = ('Someone signed in to Language AI asked to add this address to their account.\n'
+                 'Only enter this code yourself, on your own account. Never read it out to anyone.\n\n')
+CLAIM_CONFIRMATION = {None: 'add-email', 'change': 'change-email'}
 OUTBOX_NAME = re.compile(r'^(\d{8}T\d{6}Z)-[0-9a-f]{32}\.txt$')
 
 
@@ -121,7 +131,7 @@ def format_code(code):
 
 
 class LoginCodeMailer(Protocol):
-    def send_login_code(self, *, email: str, code: str, expires_at: datetime) -> None: ...
+    def send_login_code(self, *, email: str, code: str, expires_at: datetime, purpose: str = 'login') -> None: ...
 
 
 @dataclass(frozen=True)
@@ -129,6 +139,7 @@ class SandboxMessage:
     email: str
     code: str
     expires_at: datetime
+    purpose: str = 'login'
 
 
 class SandboxMailbox:
@@ -137,10 +148,15 @@ class SandboxMailbox:
     def __init__(self):
         self._lock = threading.Lock()
         self.messages: list[SandboxMessage] = []
+        self.notices: list[tuple[str, str]] = []
 
-    def send_login_code(self, *, email, code, expires_at):
+    def send_login_code(self, *, email, code, expires_at, purpose='login'):
         with self._lock:
-            self.messages.append(SandboxMessage(email, code, expires_at))
+            self.messages.append(SandboxMessage(email, code, expires_at, purpose))
+
+    def send_security_notice(self, *, email, kind):
+        with self._lock:
+            self.notices.append((email, kind))
 
     def latest(self, email):
         with self._lock:
@@ -155,7 +171,7 @@ class DirectoryMailbox:
         if not self.directory.is_absolute():
             raise ValueError('Sandbox mail directory must be absolute')
 
-    def send_login_code(self, *, email, code, expires_at):
+    def send_login_code(self, *, email, code, expires_at, purpose='login'):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         status = self.directory.stat()
         if status.st_mode & 0o077 or status.st_uid != os.getuid():
@@ -163,8 +179,20 @@ class DirectoryMailbox:
         target = self.directory / f'{expires_at.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.txt'
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
-            handle.write(f'To: {email}\nSubject: Language AI sign-in code\n\nCode: {format_code(code)}\n'
-                         f'Expires: {expires_at.isoformat()}\n')
+            handle.write(f'To: {email}\nSubject: {CODE_SUBJECTS.get(purpose, CODE_SUBJECTS["login"])}\n\n'
+                         + (CLAIM_WARNING if purpose == 'claim' else '')
+                         + f'Code: {format_code(code)}\nExpires: {expires_at.isoformat()}\n')
+
+    def send_security_notice(self, *, email, kind):
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        status = self.directory.stat()
+        if status.st_mode & 0o077 or status.st_uid != os.getuid():
+            raise OSError('Sandbox mail directory must be private to the service user')
+        stamp = datetime.now(timezone.utc) + NOTICE_RETENTION  # the name is the purge-after time
+        descriptor = os.open(self.directory / f'{stamp:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex}.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
+            handle.write(f'To: {email}\nSubject: Language AI account security notice\n\nEvent: {kind}\n'
+                         'If this was not you, sign in and sign out everywhere, then contact support.\n')
 
     def purge(self, now, *, grace=timedelta(hours=1), limit=1000):
         """Delete at most ``limit`` outbox files whose code expired before ``now - grace``.
@@ -246,21 +274,120 @@ class EmailLoginService:
         """Issue a code bound to ``binding``; only that browser can redeem it."""
         return self._issue(normalize_email(raw_email), _binding_digest(binding), 'login', None)
 
-    def start_reauth(self, session_token):
-        """Send a re-check code to the signed-in account's own address only."""
+    def start_reauth(self, session_token, raw_email=None):
+        """Send a re-check code to one of the signed-in account's own addresses only."""
         bound = _session_binding(session_token)
         try:
             with self.sessions._connect() as connection:
                 row, _ = self.sessions.session_in_transaction(connection, session_token)
-                email = self._email_in(connection, row['owner_user_id'])
+                emails = self._owner_emails(connection, row['owner_user_id'])
         except psycopg.Error as exc:
             raise SessionUnavailable('Login storage unavailable') from exc
-        if email is None:
-            raise EmailLoginRejected('No email identity')
+        if raw_email is None:
+            email = emails[0] if emails else None
+        else:
+            email = normalize_email(raw_email)
+        if email is None or email not in emails:
+            raise EmailLoginRejected('No such email identity')
         issued = self._issue(email, bound, 'reauth', row['owner_user_id'])
         return ReauthChallenge(issued.challenge_id, issued.expires_at, issued.resend_after, email)
 
-    def _issue(self, email, bound, purpose, owner):
+    def start_claim(self, session_token, raw_email, replaces, confirmation):
+        """Send a code to a new address the signed-in account wants to add or switch to.
+
+        Same response whether or not the address belongs to someone else; that
+        is only revealed once the caller has proven control of the mailbox.
+        """
+        bound = _session_binding(session_token)
+        email = normalize_email(raw_email)
+        replaced = normalize_email(replaces) if replaces is not None else None
+        if confirmation != CLAIM_CONFIRMATION['change' if replaced else None]:
+            raise IdentityConflict('confirmation_required')
+        try:
+            with self.sessions._connect() as connection:
+                session, now = self.sessions.session_in_transaction(connection, session_token)
+                require_fresh_proof(session, now)
+                emails = self._owner_emails(connection, session['owner_user_id'])
+        except psycopg.Error as exc:
+            raise SessionUnavailable('Login storage unavailable') from exc
+        if email in emails:
+            raise IdentityConflict('email_already_yours')
+        if replaced is not None and replaced not in emails:
+            raise IdentityConflict('not_linked')
+        if replaced is None and len(emails) >= MAX_EMAILS_PER_ACCOUNT:
+            raise IdentityConflict('email_limit')
+        return self._issue(email, bound, 'claim', session['owner_user_id'], replaced)
+
+    def verify_claim(self, challenge_id, code, session_token):
+        """Add or switch to the proven address in one transaction.
+
+        Returns ``(kind, notice)``. The change is committed before the security
+        notice is attempted; ``notice`` is 'sent', 'failed' or 'unavailable' and
+        a failure is logged, so callers can tell the learner the other address
+        was not told.
+        """
+        bound = _session_binding(session_token)
+
+        def accept(connection, row, now):
+            owner = row['owner_user_id']
+            if row['replaces_subject']:
+                # A login with the old address holds that address's lock and then
+                # waits for the account lock; taking the old address's lock first
+                # makes the two serialize instead of deadlocking.
+                _email_lock(connection, row['replaces_subject'])
+            account_lock(connection, owner)  # after the address locks, before the session row
+            try:
+                session, _ = self.sessions.session_in_transaction(connection, session_token)
+            except InvalidAuthentication as exc:
+                raise EmailLoginRejected('Invalid code') from exc
+            if session['owner_user_id'] != owner:
+                raise EmailLoginRejected('Invalid code')
+            require_fresh_proof(session, now)
+            mapped = connection.execute("SELECT owner_user_id FROM cloud_external_identities WHERE provider='email' AND subject=%s",
+                                        (row['email'],)).fetchone()
+            if mapped is not None:
+                raise IdentityConflict('email_already_yours' if mapped['owner_user_id'] == owner else 'email_in_use')
+            emails = self._owner_emails(connection, owner)
+            replaced = row['replaces_subject']
+            if replaced is None:
+                if len(emails) >= MAX_EMAILS_PER_ACCOUNT:
+                    raise IdentityConflict('email_limit')
+                connection.execute("INSERT INTO cloud_external_identities(provider,subject,owner_user_id,verified_at,created_at) "
+                                   "VALUES('email',%s,%s,%s,%s)", (row['email'], owner, now, now))
+                kind, notice_to = 'added', [emails[0]]
+            else:
+                changed = connection.execute(
+                    "UPDATE cloud_external_identities SET subject=%s, verified_at=GREATEST(%s,created_at) "
+                    "WHERE provider='email' AND subject=%s AND owner_user_id=%s", (row['email'], now, replaced, owner)).rowcount
+                if changed != 1:
+                    raise IdentityConflict('not_linked')
+                # The old mailbox may be the reason for the change: sign out every
+                # other browser and void every open code sent to it (login codes
+                # from any browser included), so nothing issued before the change
+                # can be redeemed after it.
+                self.sessions.revoke_others_in_transaction(connection, owner, session['session_id'], now)
+                connection.execute('UPDATE cloud_email_login_challenges SET closed_at=%s WHERE email=%s AND closed_at IS NULL',
+                                   (now, replaced))
+                # Tell the replaced address and, if it is a different one, the primary.
+                kind, notice_to = 'changed', [replaced] + [emails[0]] * (emails[0] != replaced)
+            connection.execute('UPDATE cloud_browser_sessions SET reauthenticated_at=%s WHERE session_id=%s',
+                               (now, session['session_id']))
+            return kind, notice_to
+        kind, notice_to = self._consume(challenge_id, code, bound, 'claim', accept)
+        notify = getattr(self.mailer, 'send_security_notice', None)
+        if not callable(notify):
+            LOG.warning('Security notice not sent (no adapter): email-%s for challenge %s', kind, challenge_id)
+            return kind, 'unavailable'
+        outcome = 'sent'
+        for address in notice_to:
+            try:
+                notify(email=address, kind=f'email-{kind}')
+            except Exception:  # noqa: BLE001  the change is already committed; report, never hide
+                LOG.warning('Security notice delivery failed: email-%s for challenge %s', kind, challenge_id, exc_info=True)
+                outcome = 'failed'
+        return kind, outcome
+
+    def _issue(self, email, bound, purpose, owner, replaces=None):
         now = self.sessions._now()
         challenge_id = str(uuid.uuid4())
         try:
@@ -280,15 +407,15 @@ class EmailLoginService:
                     throttled = None
                     connection.execute(
                         'INSERT INTO cloud_email_login_challenges(challenge_id,email,client_binding,code_hash,created_at,expires_at,'
-                        'purpose,owner_user_id,code_format) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                        'purpose,owner_user_id,code_format,replaces_subject) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
                         (challenge_id, email, bound, code_digest(self._code_key, challenge_id, code), now, now + CODE_LIFETIME,
-                         purpose, owner, 'long' if len(code) != 6 else 'short'))
+                         purpose, owner, 'long' if len(code) != 6 else 'short', replaces))
         except psycopg.Error as exc:
             raise SessionUnavailable('Login storage unavailable') from exc
         if throttled is not None:
             raise EmailLoginThrottled(max(1, int((throttled - now).total_seconds()) + 1))
         try:
-            self.mailer.send_login_code(email=email, code=code, expires_at=now + CODE_LIFETIME)
+            self.mailer.send_login_code(email=email, code=code, expires_at=now + CODE_LIFETIME, purpose=purpose)
         except Exception as exc:
             self._close(challenge_id)
             raise SessionUnavailable('Login code delivery unavailable') from exc
@@ -340,7 +467,7 @@ class EmailLoginService:
                 session, _ = self.sessions.session_in_transaction(connection, session_token)
             except InvalidAuthentication as exc:
                 raise EmailLoginRejected('Invalid code') from exc
-            if session['owner_user_id'] != row['owner_user_id'] or self._email_in(connection, row['owner_user_id']) != row['email']:
+            if session['owner_user_id'] != row['owner_user_id'] or row['email'] not in self._owner_emails(connection, row['owner_user_id']):
                 raise EmailLoginRejected('Invalid code')
             connection.execute('UPDATE cloud_browser_sessions SET reauthenticated_at=%s WHERE session_id=%s',
                                (now, session['session_id']))
@@ -407,10 +534,16 @@ class EmailLoginService:
         return owner, True
 
     @staticmethod
-    def _email_in(connection, owner):
-        row = connection.execute(
-            "SELECT subject FROM cloud_external_identities WHERE provider='email' AND owner_user_id=%s", (owner,)).fetchone()
-        return row['subject'] if row else None
+    def _owner_emails(connection, owner):
+        """The account's addresses, primary (oldest) first."""
+        rows = connection.execute("SELECT subject FROM cloud_external_identities WHERE provider='email' AND owner_user_id=%s "
+                                  'ORDER BY created_at, subject', (owner,)).fetchall()
+        return [row['subject'] for row in rows]
+
+    @classmethod
+    def _email_in(cls, connection, owner):
+        emails = cls._owner_emails(connection, owner)
+        return emails[0] if emails else None
 
     def email_for(self, owner):
         try:

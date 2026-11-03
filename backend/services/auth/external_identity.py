@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 
 import psycopg
 
+from services.auth.account import IdentityConflict, ReauthenticationRequired, account_lock, advisory_lock, require_fresh_proof
 from services.auth.email_login import BINDING_PATTERN, EmailLoginRejected, _binding_digest
 from services.auth.identity import InvalidAuthentication
 from services.auth.sessions import REAUTH_LIFETIME, BrowserSessionRepository, SessionPolicy, SessionUnavailable
@@ -43,16 +44,6 @@ class ExternalLoginRejected(RuntimeError):
 
 class IdentityNotLinked(RuntimeError):
     """The verified WeChat subject belongs to no account; no account is created."""
-
-
-class IdentityConflict(RuntimeError):
-    def __init__(self, code):
-        super().__init__(code)
-        self.code = code
-
-
-class ReauthenticationRequired(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -111,22 +102,12 @@ class WeChatOAuthAdapter:
 
 def _elevated(sessions, connection, session_token):
     session, now = sessions.session_in_transaction(connection, session_token)
-    _require_fresh_proof(session, now)
+    require_fresh_proof(session, now)
     return session, now
-
-
-def _require_fresh_proof(session, now):
-    proven = session.get('reauthenticated_at')
-    if proven is None or proven + REAUTH_LIFETIME <= now:
-        raise ReauthenticationRequired('Confirm your email address first')
 
 
 def _state_digest(state):
     return hashlib.sha256(f'language-ai-oauth-state-v1:{state}'.encode('ascii')).hexdigest()
-
-
-def _lock(connection, key):
-    connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
 
 
 @dataclass(frozen=True)
@@ -246,7 +227,7 @@ class WeChatAccountService:
             raise IdentityNotLinked('Sign in with email and link WeChat first')
         # Serialize with unlink, then re-read: a session is only issued while
         # the mapping still exists, so unlink's sign-out cannot be outrun.
-        _lock(connection, f'language-ai-account:{mapped["owner_user_id"]}')
+        account_lock(connection, mapped['owner_user_id'])
         mapped = connection.execute(
             "SELECT owner_user_id FROM cloud_external_identities WHERE provider='wechat' AND subject=%s FOR UPDATE", (subject,)).fetchone()
         if mapped is None:
@@ -259,15 +240,15 @@ class WeChatAccountService:
 
     def _link(self, connection, row, subject, session_token):
         owner = row['owner_user_id']
-        _lock(connection, f'language-ai-account:{owner}')  # before any session row, as in unlink
+        account_lock(connection, owner)  # before any session row, as in unlink
         try:
             session, now = self.sessions.session_in_transaction(connection, session_token)
         except InvalidAuthentication as exc:
             raise ExternalLoginRejected('Link must finish in the session that started it') from exc
         if str(session['session_id']) != str(row['session_id']) or session['owner_user_id'] != owner:
             raise ExternalLoginRejected('Link must finish in the session that started it')
-        _require_fresh_proof(session, now)
-        _lock(connection, f'language-ai-identity:wechat:{subject}')
+        require_fresh_proof(session, now)
+        advisory_lock(connection, f'language-ai-identity:wechat:{subject}')
         mapped = connection.execute(
             "SELECT owner_user_id FROM cloud_external_identities WHERE provider='wechat' AND subject=%s", (subject,)).fetchone()
         if mapped is not None:
@@ -298,7 +279,7 @@ def unlink_identity(sessions, session_token, provider, confirmation):
     try:
         with sessions._connect() as connection:
             owner = sessions.owner_hint(connection, session_token)
-            _lock(connection, f'language-ai-account:{owner}')
+            account_lock(connection, owner)
             session, now = _elevated(sessions, connection, session_token)
             rows = connection.execute('SELECT provider FROM cloud_external_identities WHERE owner_user_id=%s FOR UPDATE',
                                       (owner,)).fetchall()
@@ -318,7 +299,7 @@ def account_identities(sessions, session_token):
         with sessions._connect() as connection:
             session, now = sessions.session_in_transaction(connection, session_token)
             rows = connection.execute(
-                'SELECT provider,subject,created_at FROM cloud_external_identities WHERE owner_user_id=%s ORDER BY created_at',
+                'SELECT provider,subject,created_at FROM cloud_external_identities WHERE owner_user_id=%s ORDER BY created_at, subject',
                 (session['owner_user_id'],)).fetchall()
     except psycopg.Error as exc:
         raise SessionUnavailable('Login storage unavailable') from exc

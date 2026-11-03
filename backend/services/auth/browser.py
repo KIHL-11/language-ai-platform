@@ -242,11 +242,16 @@ def _throttled(exc):
     return HTTPException(status_code=429,detail={'code':'email_login_throttled','retry_after':exc.retry_after},headers={'Retry-After':str(exc.retry_after)})
 
 
+class ReauthStartRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    email:str|None=Field(default=None,min_length=3,max_length=320)  # one of the account's own addresses
+
+
 @router.post('/account/reauth/email/start',status_code=202)
-def start_email_reauth(request:Request,identity:IdentityDependency):
+def start_email_reauth(request:Request,identity:IdentityDependency,body:ReauthStartRequest|None=None):
     service=_email_service(request)
-    try: challenge=service.start_reauth(request.cookies.get(COOKIE_NAME,''))
-    except EmailLoginRejected as exc: raise HTTPException(status_code=422,detail={'code':'email_identity_missing'}) from exc
+    try: challenge=service.start_reauth(request.cookies.get(COOKIE_NAME,''),body.email if body else None)
+    except (EmailLoginRejected,InvalidEmailAddress) as exc: raise HTTPException(status_code=422,detail={'code':'email_identity_missing'}) from exc
     except InvalidAuthentication as exc: raise HTTPException(status_code=401,detail='Invalid session') from exc
     except EmailLoginThrottled as exc: raise _throttled(exc) from exc
     except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
@@ -276,7 +281,7 @@ def _account_error(exc):
     if isinstance(exc,ReauthenticationRequired):
         return HTTPException(status_code=428,detail={'code':'reauthentication_required','message':'Confirm your email address first.'})
     if isinstance(exc,IdentityConflict):
-        status=409 if exc.code in ('identity_conflict','provider_already_linked') else 422
+        status=409 if exc.code in ('identity_conflict','provider_already_linked','email_in_use') else 422
         return HTTPException(status_code=status,detail={'code':exc.code})
     if isinstance(exc,IdentityNotLinked):
         return HTTPException(status_code=409,detail={'code':'wechat_not_linked','message':'Sign in with email, then link WeChat in account settings.'})
@@ -356,3 +361,33 @@ def unlink_route(request:Request,body:UnlinkRequest,identity:IdentityDependency)
     try: unlink_identity(repository,request.cookies.get(COOKIE_NAME,''),body.provider,body.confirm)
     except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication,SessionUnavailable) as exc: raise _account_error(exc) from exc
     return Response(status_code=204)
+
+
+class EmailClaimRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    email:str=Field(min_length=3,max_length=320)
+    replaces:str|None=Field(default=None,min_length=3,max_length=320)
+    confirm:str=Field(max_length=32)
+
+
+@router.post('/account/email/claim/start',status_code=202)
+def start_email_claim(request:Request,body:EmailClaimRequest,identity:IdentityDependency):
+    service=_email_service(request)
+    try: challenge=service.start_claim(request.cookies.get(COOKIE_NAME,''),body.email,body.replaces,body.confirm)
+    except InvalidEmailAddress as exc: raise HTTPException(status_code=422,detail={'code':'email_invalid','message':'Enter a valid email address.'}) from exc
+    except EmailLoginThrottled as exc: raise _throttled(exc) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication) as exc: raise _account_error(exc) from exc
+    now=service.sessions._now()
+    return {'challenge_id':challenge.challenge_id,'expires_in':int((challenge.expires_at-now).total_seconds()),
+            'resend_after':int((challenge.resend_after-now).total_seconds())}
+
+
+@router.post('/account/email/claim/verify')
+def verify_email_claim(request:Request,body:EmailVerifyRequest,identity:IdentityDependency):
+    service=_email_service(request)
+    try: kind,notice=service.verify_claim(body.challenge_id,body.code,request.cookies.get(COOKIE_NAME,''))
+    except EmailLoginRejected as exc: raise HTTPException(status_code=400,detail={'code':'email_code_invalid','message':'The code is invalid or has expired.'}) from exc
+    except SessionUnavailable as exc: raise HTTPException(status_code=503,detail={'code':'email_login_unavailable'}) from exc
+    except (ReauthenticationRequired,IdentityConflict,InvalidAuthentication) as exc: raise _account_error(exc) from exc
+    return {'result':kind,'notice':notice}

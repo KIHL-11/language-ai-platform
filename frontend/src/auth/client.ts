@@ -252,3 +252,20 @@ export async function unlinkWeChat(): Promise<void> {
 
 export const cloudAuth = new CloudAuthClient()
 export const apiFetch = (input: string, init?: RequestInit) => cloudAuth.request(input, init)
+
+export type EmailClaimResult = { result: 'added' | 'changed'; notice: 'sent' | 'failed' | 'unavailable' }
+
+// Prove control of a new address for the signed-in account (needs a fresh email proof).
+export async function startEmailClaim(email: string, replaces: string | null): Promise<EmailChallenge> {
+  const value = await (await accountCall('/api/account/email/claim/start', 'POST', { email, replaces, confirm: replaces ? 'change-email' : 'add-email' })).json() as { challenge_id?: unknown; expires_in?: unknown; resend_after?: unknown }
+  if (typeof value.challenge_id !== 'string' || typeof value.expires_in !== 'number' || typeof value.resend_after !== 'number') throw new CloudAuthError(503, 'unavailable')
+  return { challengeId: value.challenge_id, expiresIn: value.expires_in, resendAfter: value.resend_after }
+}
+
+export async function verifyEmailClaim(challengeId: string, code: string): Promise<EmailClaimResult> {
+  const value = await (await accountCall('/api/account/email/claim/verify', 'POST', { challenge_id: challengeId, code })).json() as { result?: unknown; notice?: unknown }
+  if (value.result !== 'changed' && value.result !== 'added') throw new CloudAuthError(503, 'unavailable')
+  const result = value.result
+  const notice = value.notice === 'sent' || value.notice === 'unavailable' ? value.notice : 'failed'
+  return { result, notice }
+}
