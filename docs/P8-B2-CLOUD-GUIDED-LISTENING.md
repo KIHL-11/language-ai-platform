@@ -52,9 +52,9 @@ Daily Review state keep their own tables and semantics.
     sentence pick, or playing time), forward or back. Display settings follow
     the tab that changed them. Another tab's player is never moved.
     `ListeningWorkspace` passes `ownsPosition` with each write: true only
-    after such an action since this tab's last write. A timer tick claims
-    the position only when the media clock really advanced like playback
-    (more than 0.05 s and at most 2 s since the last tick). The app's own
+    after such an action since this tab's last write. Timer ticks claim the
+    position only after sustained playback: two consecutive ticks in which
+    the media clock advanced by more than 0.05 s and at most 2 s. The app's own
     isPlaying flag is not trusted, because media that ended or was paused by
     native or OS controls leaves it true. A frozen clock, a not-yet-loaded
     player and a load-time jump to the restored position claim nothing,
@@ -127,7 +127,7 @@ unchanged.
   - writes staying within the Library table;
   - the Personal contract, including a check that the file has no
     `revision`.
-- **Frontend:** 50 new tests across these files:
+- **Frontend:** 51 new tests across these files:
   - **`cloudProgressSync.test.ts`:**
     - merging;
     - coalescing;
@@ -165,7 +165,9 @@ unchanged.
     - a sentence pick is a claim;
     - media stopped without the Pause button doesn't claim;
     - native-control playback does claim;
-    - a load-time jump doesn't claim (review M1/L1 on `7ce79e6`).
+    - a load-time jump doesn't claim, whether large (0 to 20 s) or small
+      (0 to 1.5 s, which is inside the step window) (review M1/L1 on
+      `7ce79e6`, Low on `cfbebc4`).
   - **Personal regression:**
     - a plain Listening PATCH with study features on;
     - realtime voice still offered in Personal.
@@ -213,6 +215,12 @@ Review of `7ce79e6` (CI fix, listening ownership, fallback gate):
 - **Low (fixed):** native-control playback never claimed it.
 - **Both fixes:** claims now follow the media clock, and the tests are
   written first and mutation-checked.
+- **Re-check of `cfbebc4`, Low (fixed):** one small load-time jump inside
+  the step window still claimed. Claims now need two consecutive advancing
+  ticks; a single-tick mutant fails the new test.
+- **Accepted (missed claims only, never a wrong overwrite):**
+  - a native seek larger than 2 s;
+  - a hidden tab that Chrome throttles to about one tick a minute.
 
 ## Not covered
 

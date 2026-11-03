@@ -485,5 +485,25 @@ describe('Listening Workspace', () => {
 
       expect(saveProgress.mock.calls.map((call) => call[1])).toEqual(saveProgress.mock.calls.map(() => ({ ownsPosition: false })))
     })
+
+    it('a single small load-time jump inside the playback window is not a claim', async () => {
+      const restored = { ...libraryItem, listening_progress: { ...libraryItem.listening_progress, last_position_seconds: 1.5 } }
+      const fake = new FakeController()
+      fake.time = 0
+      fake.seek = vi.fn()
+      const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'youtube', message: null })
+      const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+      const user = userEvent.setup()
+      render(<ListeningWorkspace item={restored} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+      await screen.findByRole('button', { name: /^play$/i })
+      await act(() => ticks(2))
+      fake.time = 1.5 // the player settles on the restored position; nothing pressed
+      await act(() => ticks(3))
+
+      await user.click(screen.getByRole('button', { name: 'Show translation' }))
+
+      await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[0]).toMatchObject({ translation_visible: false }))
+      expect(saveProgress.mock.calls.map((call) => call[1])).toEqual(saveProgress.mock.calls.map(() => ({ ownsPosition: false })))
+    })
   })
 })

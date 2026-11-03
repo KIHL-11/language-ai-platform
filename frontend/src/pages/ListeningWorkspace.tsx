@@ -27,6 +27,7 @@ const PERSIST_INTERVAL_SECONDS = 5
 // throttled to one tick per second; 1.25x plays 1.25 s in that time).
 const MIN_PLAYBACK_STEP_SECONDS = 0.05
 const MAX_PLAYBACK_STEP_SECONDS = 2
+const SUSTAINED_PLAYBACK_TICKS = 2
 const PLAYBACK_RATES: ListeningPlaybackRate[] = [0.5, 0.75, 1, 1.25]
 
 interface AnchoredDictionarySelection {
@@ -109,6 +110,7 @@ export default function ListeningWorkspace({
   const lastQueuedPosition = useRef(item.listening_progress.last_position_seconds)
   const positionTouched = useRef(false)
   const lastTickTime = useRef<number | null>(null)
+  const advancingTicks = useRef(0)
   const writeTail = useRef<Promise<void>>(Promise.resolve())
   const currentSentence = sentences[currentIndex] ?? null
   const lessonDuration = Math.max(0, ...sentences.map((sentence) => sentence.end))
@@ -220,12 +222,15 @@ export default function ListeningWorkspace({
       // Only a clock that actually advances like playback claims the resume
       // point. isPlaying is not trusted: media that ended or was paused by
       // native/OS controls leaves it true, and native play leaves it false.
-      // A large jump (load-time seek, not-yet-loaded player) is no claim.
+      // Playback means sustained advance: one step (a load-time jump or a
+      // player settling near its seek target) is no claim, however small.
       const previous = lastTickTime.current
       lastTickTime.current = time
-      if (previous !== null && time - previous > MIN_PLAYBACK_STEP_SECONDS && time - previous <= MAX_PLAYBACK_STEP_SECONDS) {
-        positionTouched.current = true
-      }
+      const step = previous === null ? 0 : time - previous
+      advancingTicks.current = step > MIN_PLAYBACK_STEP_SECONDS && step <= MAX_PLAYBACK_STEP_SECONDS
+        ? advancingTicks.current + 1
+        : 0
+      if (advancingTicks.current >= SUSTAINED_PLAYBACK_TICKS) positionTouched.current = true
       setCurrentTime(time)
       const next = activeSentenceIndex(sentences, time, currentIndexRef.current)
       if (next >= 0 && next !== currentIndexRef.current) setCurrentIndex(next)
