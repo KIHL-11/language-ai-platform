@@ -38,14 +38,23 @@ describe('Cloud session integration', () => {
     render(<CloudSessionProvider><Personal /></CloudSessionProvider>)
     await screen.findByRole('heading', { name: 'Words & Chunks' })
     expect(personal).not.toHaveBeenCalled()
-    expect(mock.mock.calls.some(([url]) => String(url).includes('user_id=owner-a'))).toBe(true)
+    // The Study Bank request is sent from a passive effect, which can run just
+    // after the heading is committed: wait for it, then require that every
+    // owner claim is the session's.
+    const ownerClaims = () => mock.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('user_id='))
+    await waitFor(() => expect(ownerClaims().some((url) => url.startsWith('/api/study-bank/items?user_id=owner-a&'))).toBe(true))
+    expect(ownerClaims().every((url) => url.includes('user_id=owner-a&'))).toBe(true)
     await user.click(screen.getByRole('button', { name: 'My Library' }))
     expect(await screen.findByText('owner-a private title')).toBeInTheDocument()
     mock.mockImplementation((url: string) => url === '/api/account/me' ? Promise.resolve(json({ user_id: 'owner-b', csrf_token: 'b'.repeat(64) }, 200, 'owner-b')) : Promise.resolve(json({ items: [] }, 200, 'owner-b')))
+    const beforeSwitch = mock.mock.calls.length
     await act(() => cloudAuth.refresh())
     expect(screen.queryByText('owner-a private title')).not.toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
     expect(personal).not.toHaveBeenCalled()
+    const claimsAfterSwitch = () => mock.mock.calls.slice(beforeSwitch).map(([url]) => String(url)).filter((url) => url.includes('user_id='))
+    await waitFor(() => expect(claimsAfterSwitch().some((url) => url.includes('user_id=owner-b&'))).toBe(true))
+    expect(claimsAfterSwitch().filter((url) => !url.includes('user_id=owner-b&'))).toEqual([])
   })
 
   it('keeps missing sessions gated and public login unavailable', async () => {
