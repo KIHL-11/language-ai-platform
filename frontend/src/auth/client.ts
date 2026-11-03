@@ -157,6 +157,97 @@ export async function verifyEmailLogin(challengeId: string, code: string): Promi
   if (!response.ok) throw new CloudAuthError(response.status, response.status === 400 || response.status === 422 ? 'code-invalid' : 'unavailable')
   // The session cookie is HttpOnly; confirm it through the normal account check.
   await cloudAuth.refresh()
+  broadcastAuth('signed-in')
+}
+
+export const AUTH_CHANNEL = 'language-ai-auth-invalidation'
+// Other tabs re-check the account on 'signed-in' and drop private views on 'invalidate'.
+export function broadcastAuth(kind: 'invalidate' | 'signed-in') {
+  if (typeof BroadcastChannel === 'undefined') return
+  const channel = new BroadcastChannel(AUTH_CHANNEL)
+  channel.postMessage(kind)
+  channel.close()
+}
+
+async function detailCode(response: Response): Promise<string> {
+  const value = await response.json().catch(() => ({})) as { detail?: { code?: unknown } }
+  return typeof value.detail?.code === 'string' ? value.detail.code : 'unavailable'
+}
+
+function authorizationUrl(value: unknown): string {
+  const url = typeof value === 'object' && value ? (value as { authorization_url?: unknown }).authorization_url : undefined
+  if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new CloudAuthError(503, 'unavailable')
+  return url
+}
+
+export async function startWeChatLogin(): Promise<string> {
+  const response = await loginPost('/api/account/wechat/start', {})
+  if (!response.ok) throw new CloudAuthError(response.status, await detailCode(response))
+  return authorizationUrl(await response.json())
+}
+
+export type OAuthCallback = { code: string; state: string } | { cancelled: true }
+
+// WeChat returns to /?oauth=wechat&code=…&state=…; the code is removed from the
+// address bar before anything else runs so it does not linger in history.
+export function readOAuthCallback(): OAuthCallback | null {
+  const params = new URLSearchParams(location.search ?? '')
+  if (params.get('oauth') !== 'wechat') return null
+  history.replaceState(null, '', location.pathname ?? '/')
+  const code = params.get('code'), state = params.get('state')
+  return code && state ? { code, state } : { cancelled: true }
+}
+
+let pendingCompletion: { state: string; result: Promise<'login' | 'link'> } | null = null
+// Completes each callback once even if React mounts the provider twice.
+export function completeWeChat(callback: { code: string; state: string }): Promise<'login' | 'link'> {
+  if (pendingCompletion?.state === callback.state) return pendingCompletion.result
+  const result = (async () => {
+    const response = await loginPost('/api/account/wechat/complete', callback)
+    if (!response.ok) throw new CloudAuthError(response.status, await detailCode(response))
+    const value = await response.json() as { purpose?: unknown }
+    if (value.purpose === 'link') return 'link' as const
+    await cloudAuth.refresh()
+    broadcastAuth('signed-in')
+    return 'login' as const
+  })()
+  pendingCompletion = { state: callback.state, result }
+  return result
+}
+
+export type LinkedIdentity = { provider: 'email' | 'wechat'; label: string; linkedAt: string }
+export type AccountIdentities = { identities: LinkedIdentity[]; reauthenticatedFor: number; wechatAvailable: boolean }
+
+async function accountCall(path: string, method: 'GET' | 'POST', body?: unknown): Promise<Response> {
+  const response = await cloudAuth.request(path, body === undefined ? { method } : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  if (!response.ok) throw new CloudAuthError(response.status, response.status === 429 ? 'throttled' : await detailCode(response))
+  return response
+}
+
+export async function accountIdentities(): Promise<AccountIdentities> {
+  const value = await (await accountCall('/api/account/identities', 'GET')).json() as { identities?: unknown; reauthenticated_for?: unknown; wechat_available?: unknown }
+  const identities = Array.isArray(value.identities) ? value.identities.flatMap((item: { provider?: unknown; label?: unknown; linked_at?: unknown }): LinkedIdentity[] =>
+    (item.provider === 'email' || item.provider === 'wechat') && typeof item.label === 'string' && typeof item.linked_at === 'string'
+      ? [{ provider: item.provider, label: item.label, linkedAt: item.linked_at }] : []) : []
+  return { identities, reauthenticatedFor: typeof value.reauthenticated_for === 'number' ? value.reauthenticated_for : 0, wechatAvailable: value.wechat_available === true }
+}
+
+export async function startReauth(): Promise<EmailChallenge & { email: string }> {
+  const value = await (await accountCall('/api/account/reauth/email/start', 'POST')).json() as { challenge_id?: unknown; expires_in?: unknown; resend_after?: unknown; email?: unknown }
+  if (typeof value.challenge_id !== 'string' || typeof value.email !== 'string' || typeof value.expires_in !== 'number' || typeof value.resend_after !== 'number') throw new CloudAuthError(503, 'unavailable')
+  return { challengeId: value.challenge_id, expiresIn: value.expires_in, resendAfter: value.resend_after, email: value.email }
+}
+
+export async function verifyReauth(challengeId: string, code: string): Promise<void> {
+  await accountCall('/api/account/reauth/email/verify', 'POST', { challenge_id: challengeId, code })
+}
+
+export async function startWeChatLink(): Promise<string> {
+  return authorizationUrl(await (await accountCall('/api/account/wechat/link/start', 'POST', { confirm: 'link-wechat' })).json())
+}
+
+export async function unlinkWeChat(): Promise<void> {
+  await accountCall('/api/account/identities/unlink', 'POST', { provider: 'wechat', confirm: 'unlink-wechat' })
 }
 
 export const cloudAuth = new CloudAuthClient()

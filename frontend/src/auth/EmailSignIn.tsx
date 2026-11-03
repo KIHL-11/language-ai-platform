@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CloudAuthError, loginProviders, startEmailLogin, verifyEmailLogin } from './client'
+import { CloudAuthError, loginProviders, startEmailLogin, startWeChatLogin, verifyEmailLogin } from './client'
 import type { EmailChallenge } from './client'
+import { codeComplete, normalizeCode } from './codes'
 
 type Step = { kind: 'checking' } | { kind: 'not-configured' } | { kind: 'email' } | { kind: 'code'; email: string; challenge: EmailChallenge }
 
@@ -27,10 +28,15 @@ export function EmailSignIn() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [resendIn, setResendIn] = useState(0)
+  const [wechat, setWechat] = useState(false)
 
   useEffect(() => {
     let active = true
-    void loginProviders().then((providers) => { if (active) setStep(providers.email ? { kind: 'email' } : { kind: 'not-configured' }) })
+    void loginProviders().then((providers) => {
+      if (!active) return
+      setWechat(providers.wechat)
+      setStep(providers.email ? { kind: 'email' } : { kind: 'not-configured' })
+    })
       .catch(() => { if (active) setStep({ kind: 'not-configured' }) })
     return () => { active = false }
   }, [])
@@ -47,27 +53,35 @@ export function EmailSignIn() {
       setStep({ kind: 'code', email: address, challenge }); setCode(''); setResendIn(challenge.resendAfter)
     } catch (caught) { setError(message(caught)) } finally { setBusy(false) }
   }
+  async function signInWithWeChat() {
+    setBusy(true); setError(null)
+    try { location.assign(await startWeChatLogin()) } catch { setError('WeChat sign-in is temporarily unavailable. Try again shortly.'); setBusy(false) }
+  }
   async function submitEmail(event: FormEvent) { event.preventDefault(); await requestCode(email.trim()) }
   async function submitCode(event: FormEvent) {
     event.preventDefault()
     if (step.kind !== 'code') return
     setBusy(true); setError(null)
-    try { await verifyEmailLogin(step.challenge.challengeId, code) } catch (caught) { setError(message(caught)) } finally { setBusy(false) }
+    try { await verifyEmailLogin(step.challenge.challengeId, code.replace(/-/g, '')) } catch (caught) { setError(message(caught)) } finally { setBusy(false) }
   }
 
   if (step.kind === 'checking') return <p role="status">Checking sign-in options…</p>
   if (step.kind === 'not-configured') return <p>Email sign-in is not configured on this server yet. Ask the operator to enable a verified email provider.</p>
   return <section aria-labelledby="sign-in-heading">
     <h2 id="sign-in-heading">Sign in with email</h2>
-    {step.kind === 'email' ? <form onSubmit={(event) => void submitEmail(event)}>
-      <label htmlFor="sign-in-email">Email address</label>
-      <input id="sign-in-email" type="email" autoComplete="email" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} />
-      <button type="submit" disabled={busy}>Send sign-in code</button>
-    </form> : <form onSubmit={(event) => void submitCode(event)}>
-      <p>We sent a 6-digit code to <strong>{step.email}</strong>. It expires in {Math.round(step.challenge.expiresIn / 60)} minutes.</p>
+    {step.kind === 'email' ? <>
+      <form onSubmit={(event) => void submitEmail(event)}>
+        <label htmlFor="sign-in-email">Email address</label>
+        <input id="sign-in-email" type="email" autoComplete="email" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} />
+        <button type="submit" disabled={busy}>Send sign-in code</button>
+      </form>
+      {wechat && <p><button type="button" disabled={busy} onClick={() => void signInWithWeChat()}>Sign in with WeChat</button> Works after WeChat is linked in account settings.</p>}
+    </> : <form onSubmit={(event) => void submitCode(event)}>
+      <p>We sent a code to <strong>{step.email}</strong>. It expires in {Math.round(step.challenge.expiresIn / 60)} minutes.</p>
       <label htmlFor="sign-in-code">Sign-in code</label>
-      <input id="sign-in-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ''))} />
-      <button type="submit" disabled={busy || code.length !== 6}>Sign in</button>
+      <input id="sign-in-code" autoComplete="one-time-code" autoCapitalize="characters" spellCheck={false} maxLength={14} required aria-describedby="sign-in-code-hint" value={code} onChange={(event) => setCode(normalizeCode(event.target.value))} />
+      <p id="sign-in-code-hint">Enter the 6-digit code, or the longer 12-character code if the email shows one.</p>
+      <button type="submit" disabled={busy || !codeComplete(code)}>Sign in</button>
       <button type="button" disabled={busy || resendIn > 0} onClick={() => void requestCode(step.email)}>{resendIn > 0 ? `Resend code (${resendIn}s)` : 'Resend code'}</button>
       <button type="button" disabled={busy} onClick={() => { setStep({ kind: 'email' }); setError(null) }}>Use a different email</button>
     </form>}
