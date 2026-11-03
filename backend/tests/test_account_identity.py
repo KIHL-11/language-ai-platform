@@ -12,7 +12,7 @@ import app as app_module
 from services.auth.browser import configure_wechat_login
 from services.auth.email_login import DirectoryMailbox, EmailLoginRejected, LOGIN_COOKIE_NAME
 from services.auth.external_identity import (
-    WECHAT_ISSUER, ExternalLoginRejected, WeChatAccountService, WeChatOAuthAdapter, wechat_from_environment,
+    WECHAT_ISSUER, ExternalLoginRejected, WeChatAccountService, WeChatOAuthAdapter, unlink_identity, wechat_from_environment,
 )
 from services.auth.identity import InvalidAuthentication
 from services.auth.maintenance import purge_auth_records
@@ -533,3 +533,95 @@ def test_unlink_works_after_wechat_sign_in_is_switched_off(wechat):
     assert client().get('/api/account/providers').json()['wechat'] is False
     assert browser.post('/api/account/identities/unlink', json={'provider': 'wechat', 'confirm': 'unlink-wechat'},
                         headers=secured(browser)).status_code == 204
+
+
+def _blocked_on_lock(dsn, timeout=5):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if count(dsn, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND datname=current_database()"):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+@pytest.mark.parametrize('operation', ['rotate', 'revoke_all'])
+def test_rotation_and_revoke_all_wait_for_the_account_lock(wechat, operation):
+    """Unlink and revoke-all hold the account lock; rotation must not slip a new session past them."""
+    import threading
+    repo, _, mailbox, provider = wechat
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    token = browser.cookies.get(COOKIE_NAME)
+    done = {}
+    with psycopg.connect(repo.dsn) as holder:
+        holder.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f'language-ai-account:{owner}',))
+        worker = threading.Thread(target=lambda: done.setdefault(
+            'r', repo.rotate(token) if operation == 'rotate' else repo.revoke_all(owner)))
+        worker.start()
+        assert _blocked_on_lock(repo.dsn) and worker.is_alive()
+    worker.join(5)
+    assert 'r' in done
+
+
+def test_concurrent_rotation_never_outlives_unlink_signout(wechat):
+    import threading
+    repo, clock, mailbox, provider = wechat
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    for round_ in range(4):
+        assert link(browser, provider).status_code == 200
+        phone, _ = wechat_login(provider)
+        phone_token = phone.cookies.get(COOKIE_NAME)
+        results = {}
+        with psycopg.connect(repo.dsn) as holder:  # release both at once
+            holder.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f'language-ai-account:{owner}',))
+
+            def rotate():
+                try:
+                    results['rotated'] = repo.rotate(phone_token)
+                except InvalidAuthentication:
+                    results['rotated'] = None
+            workers = [threading.Thread(target=rotate), threading.Thread(
+                target=lambda: unlink_identity(repo, browser.cookies.get(COOKIE_NAME), 'wechat', 'unlink-wechat'))]
+            for worker in (workers if round_ % 2 else reversed(workers)):
+                worker.start()
+            assert _blocked_on_lock(repo.dsn)
+        for worker in workers:
+            worker.join(5)
+        assert count(repo.dsn, 'SELECT count(*) FROM cloud_browser_sessions WHERE owner_user_id=%s AND revoked_at IS NULL',
+                     owner) == 1  # only the browser that unlinked
+        assert results['rotated'] is None or count(
+            repo.dsn, 'SELECT revoked_at IS NOT NULL FROM cloud_browser_sessions WHERE token_hash=%s',
+            __import__('services.auth.sessions', fromlist=['digest']).digest(results['rotated'])) is True
+        clock.advance(minutes=1)
+        assert reauth(browser, mailbox).status_code == 200
+        clock.advance(minutes=1)
+
+
+def test_email_relogin_during_unlink_in_the_same_browser_does_not_deadlock(wechat):
+    import threading
+    from services.auth.email_login import new_client_binding
+    from services.auth.sessions import digest
+    repo, clock, mailbox, provider = wechat
+    browser, verified = login(mailbox)
+    owner = verified.json()['user_id']
+    assert link(browser, provider).status_code == 200
+    s1 = browser.cookies.get(COOKIE_NAME)
+    service = app_module.app.state.email_login_service
+    clock.advance(minutes=2)
+    binding = new_client_binding()
+    challenge = service.start(EMAIL, binding).challenge_id
+    code = mailbox.latest(EMAIL).code
+    outcome = {}
+    with psycopg.connect(repo.dsn) as unlinking:  # unlink's lock order: account lock, own session row, identities
+        unlinking.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f'language-ai-account:{owner}',))
+        unlinking.execute('SELECT * FROM cloud_browser_sessions WHERE token_hash=%s FOR UPDATE', (digest(s1),))
+        worker = threading.Thread(target=lambda: outcome.setdefault('login', service.verify(challenge, code, binding, replaces=s1)))
+        worker.start()
+        assert _blocked_on_lock(repo.dsn)
+        unlinking.execute('SELECT provider FROM cloud_external_identities WHERE owner_user_id=%s FOR UPDATE', (owner,))
+    worker.join(5)
+    assert outcome['login'].owner_user_id == owner
+    with pytest.raises(InvalidAuthentication):
+        repo.verify(s1)

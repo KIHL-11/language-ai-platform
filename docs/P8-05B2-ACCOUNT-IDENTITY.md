@@ -93,6 +93,33 @@ checks, a decision on `unionid`, and owner sign-off.
 
 ## Known limits found in review
 
+Second review (post-fix, `a4469c8`). Fixed in the follow-up commit:
+
+- **Medium, fixed:** a session rotating at the same moment could outlive unlink's or
+  revoke-all's sign-out. Rotation and revoke-all now take the account lock
+  first, like login, link and unlink (tests prove rotation waits, and concurrent
+  rotate + unlink leaves only the unlinking browser signed in).
+- **Low, fixed:** an email re-login in the same browser during an unlink could
+  deadlock. The previous session is now revoked before identity rows are touched.
+- **Low, fixed:** the re-check form could get stuck after a code expired or was
+  used up; it now offers "Send a new code" and drops expired pending codes.
+
+Still open:
+
+- **Medium, accepted as interim (owner decision 5), not a production approval:**
+  the 60 s / 5-per-hour send limits are per address across all browsers, so
+  anyone who knows an address can block new email sign-ins for it (about 1 h
+  at a time, renewable) and flood the mailbox. Real fix: per-client limits
+  (Workstream F) and, independently, a remembered-device cookie, registered on
+  successful sign-in, that gets its own quota.
+- **Low:** no global budget for short-code guesses across many addresses (about
+  10 guesses/day/address). Needs Workstream F.
+- **Low:** rolling back 0008 does not revoke sessions created by WeChat login
+  (they stay valid until expiry, at most 12 h), and deleting re-check/long-code
+  rows partly resets the daily failure count.
+- **Low:** if the browser's previous session is rotated during a new login,
+  the rotated copy is not revoked; it belongs to that browser's earlier sign-in.
+
 - `POST /api/account/wechat/start` has no rate limit; each call stores one
   10-minute state row, bounded only by the purge job. A per-IP limit belongs to
   the Workstream F dependency below.

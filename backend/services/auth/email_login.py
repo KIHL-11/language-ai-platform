@@ -319,9 +319,11 @@ class EmailLoginService:
         bound = _binding_digest(binding)
 
         def accept(connection, row, now):
+            # Revoke the previous session before touching identity rows: unlink
+            # locks session rows first, so the opposite order could deadlock.
+            self.sessions.revoke_token_in_transaction(connection, replaces, now)
             owner, created = self._map_identity(connection, row['email'], now)
-            return VerifiedLogin(owner, self.sessions.issue_in_transaction(
-                connection, owner, now, reauthenticated=True, replaces=replaces), created)
+            return VerifiedLogin(owner, self.sessions.issue_in_transaction(connection, owner, now, reauthenticated=True), created)
         return self._consume(challenge_id, code, bound, 'login', accept)
 
     def verify_reauth(self, challenge_id, code, session_token):

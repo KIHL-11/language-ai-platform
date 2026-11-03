@@ -17,7 +17,9 @@ function explain(error: unknown): string {
 
 // A sent re-check code survives the workspace remounting on a same-account
 // refresh; it is only an id and an address, never the code.
-const pendingReauth = new Map<string, { id: string; email: string }>()
+type Pending = { id: string; email: string; expiresAt: number }
+const pendingReauth = new Map<string, Pending>()
+const live = (value: Pending | undefined) => value && value.expiresAt > Date.now() ? value : null
 
 // Linking and unlinking need a fresh email proof (valid 10 minutes) and an
 // explicit confirmation; the server enforces both.
@@ -25,8 +27,8 @@ export function AccountSecurity({ userId, notice }: { userId: string; notice?: s
   const [account, setAccount] = useState<AccountIdentities | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [challenge, setPending] = useState<{ id: string; email: string } | null>(() => pendingReauth.get(userId) ?? null)
-  const setChallenge = (value: { id: string; email: string } | null) => {
+  const [challenge, setPending] = useState<Pending | null>(() => live(pendingReauth.get(userId)))
+  const setChallenge = (value: Pending | null) => {
     if (value) pendingReauth.set(userId, value); else pendingReauth.delete(userId)
     setPending(value)
   }
@@ -47,7 +49,7 @@ export function AccountSecurity({ userId, notice }: { userId: string; notice?: s
     setBusy(true); setError(null)
     try { await action() } catch (caught) { setError(explain(caught)) } finally { setBusy(false) }
   }
-  const sendCode = () => run(async () => { const started = await startReauth(); setChallenge({ id: started.challengeId, email: started.email }); setCode('') })
+  const sendCode = () => run(async () => { const started = await startReauth(); setChallenge({ id: started.challengeId, email: started.email, expiresAt: Date.now() + started.expiresIn * 1000 }); setCode('') })
   const submitCode = (event: FormEvent) => {
     event.preventDefault()
     if (!challenge) return
@@ -69,6 +71,8 @@ export function AccountSecurity({ userId, notice }: { userId: string; notice?: s
         <label htmlFor="reauth-code">Confirmation code</label>
         <input id="reauth-code" autoComplete="one-time-code" maxLength={14} required value={code} onChange={(event) => setCode(normalizeCode(event.target.value))} />
         <button type="submit" disabled={busy || !codeComplete(code)}>Confirm email</button>
+        {/* The code may have expired, been used up, or belong to an earlier sign-in. */}
+        <button type="button" disabled={busy} onClick={() => void sendCode()}>Send a new code</button>
       </form>
       : <p>To link or remove a sign-in method, first confirm your email address. <button type="button" disabled={busy} onClick={() => void sendCode()}>Send confirmation code</button></p>}
     {account.wechatAvailable && !hasWeChat && <section aria-labelledby="link-wechat-heading">

@@ -158,6 +158,26 @@ describe('Sign-in methods', () => {
     expect(calls().filter(([url]) => url === '/api/account/reauth/email/start')).toHaveLength(1)
   })
 
+  it('lets the learner request a new re-check code after a rejected one', async () => {
+    let starts = 0
+    setup({
+      '/api/account/me': me(() => true),
+      '/api/account/identities': () => json({ identities: [{ provider: 'email', label: 'learner@example.test', linked_at: '2026-11-03T00:00:00+00:00' }], reauthenticated_for: 0, wechat_available: true }),
+      '/api/account/reauth/email/start': () => { starts += 1; return json({ challenge_id: CHALLENGE, email: 'learner@example.test', expires_in: 600, resend_after: 60 }, 202) },
+      '/api/account/reauth/email/verify': () => json({ detail: { code: 'email_code_invalid' } }, 400),
+    })
+    const user = userEvent.setup()
+    render(<CloudSessionProvider><p>Personal</p></CloudSessionProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Sign-in methods' }))
+    const send = await screen.findByRole('button', { name: /Send (confirmation|a new) code/ })
+    await user.click(send)
+    await user.type(await screen.findByLabelText('Confirmation code'), '000000')
+    await user.click(screen.getByRole('button', { name: 'Confirm email' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid or has expired')
+    await user.click(screen.getByRole('button', { name: 'Send a new code' }))
+    await waitFor(() => expect(starts).toBe(2))
+  })
+
   it('removes WeChat only after confirmation and explains a refused last method', async () => {
     let wechat = true
     setup({
