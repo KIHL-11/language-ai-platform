@@ -31,9 +31,9 @@ Neither request accepts a user id; extra fields are rejected (422).
 
 | Control | Value |
 | --- | --- |
-| Code | 6 digits from `secrets`, stored only as a SHA-256 digest bound to the challenge id |
+| Code | 6 digits from `secrets`, stored only as an HMAC-SHA256 digest (key `CLOUD_AUTH_CODE_KEY`, not in the database) bound to the challenge id (P8-05B2) |
 | Lifetime | 10 minutes, single use |
-| Failed attempts | 5 per challenge, then the challenge is closed; 10 per address per rolling day, after which no new codes are issued **and no open code is accepted** until enough failures leave the window (`Retry-After` reports exactly when) |
+| Failed attempts | 5 per challenge, then the challenge is closed; 10 per address per rolling day, after which **no open six-digit code is accepted** and new codes are 12-character codes (~59 bits) that the daily cap does not block (P8-05B2; replaces the earlier 24 h refusal) |
 | Resend | 60 s between codes per address; 5 codes per address per rolling hour (429 + `Retry-After`) |
 | Superseding | a new code closes earlier open codes **from the same browser** only, and only after it was delivered |
 | Wrong browser | rejected without counting a failed attempt, so another client cannot lock a learner's code |
@@ -85,6 +85,7 @@ Email login is disabled unless explicitly configured. In addition to the P8-05A
 | `CLOUD_EMAIL_DELIVERY` | unset: disabled. `sandbox-directory`: local staging outbox. Anything else fails closed (503). |
 | `CLOUD_EMAIL_SANDBOX_DIR` | absolute directory private to the service user (no group/other bits); each code is written as a 0600 text file |
 | `LANGUAGE_AI_STAGING` | must be `1` for `sandbox-directory` |
+| `CLOUD_AUTH_CODE_KEY` | required with any delivery: hex, at least 32 random bytes, server-side secret |
 
 `sandbox-directory` is refused unless `LANGUAGE_AI_STAGING=1` and the origin host
 is `localhost`, `*.localhost` or `*.test`, so a misconfigured deployment cannot write real
@@ -107,6 +108,10 @@ sending domain with SPF/DKIM/DMARC, a bounce/complaint policy and the
 data-processing decision for sending addresses to that provider.
 
 ## Remaining work in Workstream A
+
+**P8-05B2 update:** WeChat (simulated), link/unlink, purge, the 24 h lockout,
+plain code digests, pre-login revocation and tab sync are addressed in
+`docs/P8-05B2-ACCOUNT-IDENTITY.md`. The list below is the P8-05B1 snapshot.
 
 - WeChat OAuth with simulated provider responses; account link/unlink with
   fresh proof for both identities.

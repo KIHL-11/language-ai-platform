@@ -35,7 +35,7 @@ describe('Email sign-in', () => {
     await user.click(screen.getByRole('button', { name: 'Send sign-in code' }))
     expect(await screen.findByText('learner@example.test')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Resend code \(60s\)/ })).toBeDisabled()
-    await user.type(screen.getByLabelText('Sign-in code'), '12a3456')
+    await user.type(screen.getByLabelText('Sign-in code'), '12-3456')
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByText('Signed in as learner@example.test')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign out everywhere' })).toBeInTheDocument()

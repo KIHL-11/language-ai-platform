@@ -13,6 +13,7 @@ on:
       - codex/p8-04b1-owner-scoped-speaking
       - codex/p8-05a-secure-cloud-sessions
       - codex/p8-05a2-cloud-frontend-session
+      - claude/p8-05b-email-auth
     paths-ignore:
       - "**/*.md"
   push:
@@ -27,6 +28,7 @@ on:
       - codex/p8-05a2-cloud-frontend-session
       - codex/p8-feature-complete-integration
       - claude/p8-05b-email-auth
+      - claude/p8-05b2-account-identity
   workflow_dispatch:
 
 permissions:
