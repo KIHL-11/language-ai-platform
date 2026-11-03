@@ -1,4 +1,4 @@
-# Checkpoint: P8-B2 Cloud Guided/Listening + progress OCC (Claude Code, 2026-11-04)
+# Checkpoint: P8-B2 Cloud Guided/Listening + progress OCC (Claude Code, 2026-11-04, final)
 
 Manual checkpoint (no `handoff.py` lease; that tool lives only in Draft PR #77).
 Status of record is Issue #75; this file is a pointer, not a status source.
@@ -7,61 +7,95 @@ Status of record is Issue #75; this file is a pointer, not a status source.
 
 | PR | Branch | Head | Base |
 | --- | --- | --- | --- |
-| #81 P8-B1 media integrity + cleanup worker | `claude/p8-b1-library-reliability` | `dfd243b` | main `eb7e902` |
-| #82 P8-B2 progress OCC + Cloud Guided/Listening | `claude/p8-b2-guided-listening` | `2462c10` (code; this file on top) | #81 |
+| #81 P8-B1 media integrity + cleanup worker | `claude/p8-b1-library-reliability` | `dfd243b` (accepted) | main `eb7e902` |
+| #82 P8-B2 progress OCC + Cloud Guided/Listening | `claude/p8-b2-guided-listening` | `a963ea1` (code; this file on top) | #81 |
 
-Worktree: `~/Downloads/language-ai-claude-p8-b2`. Workstream A (#78–#80) is a separate stack.
-Merge order: #81 then #82, only after owner acceptance and retargeting.
+Worktree: `~/Downloads/language-ai-claude-p8-b2`. Merge order: #81 then #82, only
+after owner acceptance and retargeting.
 
-## Owner decisions in force (2026-11-03/04)
+## Owner decisions in force (2026-11-04)
 
-1. B-1 accepted at `dfd243b` (CI 41660011509). PRs stay Draft; no merge or deploy.
-2. GitHub comments are not posted by the agent (an auto-mode denial must not be bypassed).
-   - B-1 drafts: `~/Downloads/language-ai-review-drafts/p8-b1/`.
-   - B-2 drafts: `~/Downloads/language-ai-review-drafts/p8-b2/`.
-3. **Starlette:** never depend on private `FileResponse` methods. Production must use a tested, locked version. The dependency audit (Workstream F) must check FastAPI/Starlette/AnyIO compatibility and keep regression evidence for Starlette 1.7.0 and 1.10.0. B-1 has that evidence; B-2 adds no media serving.
-4. No real data, mail, WeChat or paid AI.
+1. B-1 accepted at `dfd243b`. PRs stay Draft; no merge or deploy.
+2. GitHub comments are not posted by the agent; drafts are kept in
+   `~/Downloads/language-ai-review-drafts/p8-b1/` and `p8-b2/`.
+3. **Starlette:** no private `FileResponse` hooks. Production uses a tested,
+   locked version. The Workstream F dependency audit keeps evidence for 1.7.0
+   and 1.10.0.
+4. **Listening:** the resume point is the position from the most recent
+   playback action, forward or back. Another tab's player is never moved.
+   Guided progress is monotonic.
+5. **Before B-3:** Cloud must not fall back to Personal stores; recall and
+   chunk memory reopen only on owner-scoped cloud stores.
+6. No real data, mail, WeChat or paid AI.
+
+## What B-2 delivered (since the first checkpoint)
+
+- **`80105ef`:** the CI failure on `d2c981b` (run 41676494879) was test timing
+  (proven by a file probe: 1 run in 89). The test now waits for the request and
+  checks stronger owner claims; 100 consecutive runs pass.
+- **`7ce79e6`:** two fixes.
+  - **Listening ownership:** an idle tab no longer moves another tab's resume
+    point. This was proven failing first.
+  - **Cloud → Personal gate:** six routes now fail closed: chunk memory
+    list/recall/practice/archive, integration target languages, and the
+    speaking-suggestion save.
+- **`010829e` / `a963ea1`:** position claims follow the media clock and need
+  sustained playback (two advancing ticks). This fixes review M1/L1 and the
+  follow-up Low.
 
 ## Evidence
 
 - **Local** (macOS, Python 3.11, disposable PostgreSQL 17):
-  - Backend 815 passed / 9 skipped; frontend 417 / 56 files.
-  - Lint clean, build OK.
-- **Hosted CI:**
-  - `cf3771e`: run 41667750209, SUCCESS (814/9, 410/56).
-  - `aa90b82`: run 41669956153, SUCCESS.
-  - `2462c10`: run 41675359231, SUCCESS (815/9, 417/56).
-- **Mutation checks:** 21 mutants; all caught except one equivalent (the UPDATE `revision =` condition, unreachable behind the row lock and pre-check).
-- **Repeat runs:** concurrency test 30 runs with 0 failures; new frontend tests 3–5 runs each, all passing.
-- **Independent review** (separate reviewer agent, fresh context; no human or different-model review):
-  1. `cf3771e`: 1 High, 1 Medium, 4 Low. All resolved; L3 accepted.
-  2. `aa90b82`: 1 Medium (a step queued during the reload was dropped) and 1 Low (half-measure on listening position). Both resolved.
-  3. `2462c10`: no findings.
+  - Backend 821 passed / 9 skipped; frontend 429 / 56 files.
+  - Lint and typecheck clean; build OK.
+- **Hosted CI on the B-2 code head `a963ea1`:** run 41707396206, SUCCESS
+  (821/9, 429/56).
+- **Hosted CI on earlier B-2 heads:**
+  - `80105ef`: 41683432303
+  - `7ce79e6`: 41684782778
+  - `2462c10`: 41675359231
+  - `d2c981b`: 41676494879 FAILED (fixed in `80105ef`)
+- **Mutation checks:** 36 mutants. All fail the tests except one equivalent
+  (the UPDATE `revision =` condition).
+- **Independent review:** separate reviewer agent; no human or
+  different-model review.
+  - Seven rounds in all.
+  - Every High, Medium and Low was fixed or explicitly accepted.
+  - The last two rounds (`cfbebc4`, `a963ea1`) ended with one Low (fixed),
+    then no findings.
+  - It also listed every API route on the app: no other cloud route falls
+    back to a Personal store.
 
-## Open items
+## Open items and risks
 
-- **Owner decision:** Listening position follows the tab in use (last tab used sets the resume point). Guided progress is monotonic on conflict.
-- **Pre-existing gap:** in cloud, `/api/chunks/memory/active-recall` reads the Personal local stores. The cloud UI no longer calls it; it still needs to move behind an owner-scoped store (Workstream B/F).
-- **Accepted (L3):** the same-user focus re-check sends requests during `/me`. CSRF is bound to the session and private GETs are owner-checked.
+- **Accepted (L3):** the same-account focus re-check sends requests during
+  `/me`. CSRF is bound to the session and private GETs are owner-checked.
+- **Missed claims only, never a wrong overwrite:** a native seek larger than
+  2 s, and a hidden tab that Chrome throttles to about one tick a minute.
+- **Pre-existing:** the Play/Pause label can be stale after native or OS
+  pause or after the media ends.
 - **Not done:**
   - cloud dictionary, recall and Study Bank saves (B-3/B-4);
   - Shadowing in cloud;
-  - lesson creation and import (Workstream D);
-  - realtime voice (Workstream C);
+  - lesson creation and import (D);
+  - voice (C);
   - browser E2E (B-7).
-- **Issue #58:** items 1–4 are implemented across #81 and #82. Keep it open until the owner accepts #82.
+- **Issue #58:** items 1–4 are implemented across #81 and #82. Keep it open
+  until the owner accepts #82.
 
-## Next
+## B-3 start conditions (met once this file's commit has a green CI)
 
-- Owner: review #82 and the comment drafts, and decide on the Listening-position item.
-- Next increment per `docs/PHASE8-WORKSTREAM-B-PLAN.md`: **B-3**, a cloud dictionary adapter with a synthetic fixture lexicon plus the AI Chunk organizer on the cloud Library. Branch it from #82's head.
+- B-2 HEAD CI green and the review has no open findings.
+- B-3 branches from that HEAD in its own worktree.
+- **Scope:** a synthetic English/German dictionary adapter and Cloud AI Chunk.
+  - Any recall or chunk-memory reopening in cloud must use owner-scoped
+    PostgreSQL stores; the six gated routes stay closed until then.
 
 ## Resume
 
 ```bash
 cd ~/Downloads/language-ai-claude-p8-b2 && git fetch origin && git status
-gh pr view 82 && gh pr view 81 && gh issue view 58 && gh issue view 75 --comments
-# disposable PostgreSQL only; never a real database
+gh pr view 82 && gh issue view 58 && gh issue view 75 --comments
 AI_MODE=mock TEST_POSTGRES_DSN=postgresql://<user>@127.0.0.1:<port>/<scratch_db> \
   PYTHONPATH=backend <venv>/bin/python -m pytest -q backend/tests
 (cd frontend && npm ci && npm test && npm run lint && npm run build)
