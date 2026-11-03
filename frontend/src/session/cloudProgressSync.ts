@@ -19,7 +19,9 @@ export interface CloudProgressSyncOptions {
   generation: number
   onSaved?: (item: LibraryItem) => void
   // Guided progress was merged with a further saved state; the view should
-  // continue from `merged`.
+  // continue from `merged`. A caller that remounts here must also refuse
+  // late saves from the view it replaced (as CloudGuided does); this sync
+  // cannot tell them apart from the new view's.
   onGuidedMerged?: (item: LibraryItem, merged: LibraryProgress) => void
   onFailure?: (reason: CloudSyncFailure) => void
 }
