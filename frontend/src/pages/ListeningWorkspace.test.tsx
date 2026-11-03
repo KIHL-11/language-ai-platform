@@ -8,6 +8,7 @@ import { libraryItem } from '../testFixtures/libraryItem'
 import { studyCandidates, studyItem } from '../testFixtures/studyBank'
 import { dictionaryEntry } from '../testFixtures/dictionary'
 import ListeningWorkspace from './ListeningWorkspace'
+import type { ListeningProgress } from '../types/library'
 
 class FakeController implements MediaController {
   time = libraryItem.listening_progress.last_position_seconds
@@ -387,5 +388,122 @@ describe('Listening Workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
     await act(async () => { await Promise.resolve() })
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/listening-progress')).length).toBeLessThanOrEqual(1)
+  })
+
+  it('keeps the Personal Desktop write contract: plain PATCH, no revision, study features on', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(await screen.findByRole('button', { name: 'Blind' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/listening-progress'))).toBe(true))
+    const [, init] = fetchMock.mock.calls.find(([url]) => String(url).includes('/listening-progress'))!
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body).not.toHaveProperty('expected_revision')
+    expect(body).toMatchObject({ mode: 'blind' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/study-candidates'))).toBe(true)
+    expect(screen.getByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
+  })
+
+  it('tells the writer whether this tab moved the position (passive clock drift does not)', async () => {
+    const long = {
+      ...libraryItem,
+      lesson: { ...libraryItem.lesson, sentences: libraryItem.lesson.sentences.map((sentence, index) => ({ ...sentence, start: index * 10, end: index * 10 + 9 })) },
+      listening_progress: { ...libraryItem.listening_progress, last_position_seconds: 20 },
+    }
+    // A player that has not loaded yet reports 0 whatever the restored position.
+    const fake = new FakeController()
+    fake.time = 0
+    fake.seek = vi.fn()
+    const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'audio', message: null })
+    const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+    const user = userEvent.setup()
+    render(<ListeningWorkspace item={long} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+
+    await waitFor(() => expect(saveProgress).toHaveBeenCalled())
+    expect(saveProgress.mock.calls[0]).toEqual([expect.objectContaining({ last_position_seconds: 0 }), { ownsPosition: false }])
+
+    await user.click(screen.getByRole('button', { name: `Seek to ${long.lesson.sentences[1].text}` }))
+    await waitFor(() => expect(saveProgress.mock.calls.at(-1)).toEqual([expect.objectContaining({ last_position_seconds: 10 }), { ownsPosition: true }]))
+    await user.click(screen.getByRole('button', { name: 'Show translation' }))
+    await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[1]).toEqual({ ownsPosition: false }))
+  })
+
+  describe('position claims follow the media clock, not the Play button (review M1/L1)', () => {
+    function mount() {
+      const fake = new FakeController()
+      const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'audio', message: null })
+      const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+      render(<ListeningWorkspace item={libraryItem} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+      return { fake, saveProgress }
+    }
+    const ticks = (count: number) => new Promise((resolve) => setTimeout(resolve, count * 220))
+
+    it('a tab whose media stopped without its Pause button does not claim the position', async () => {
+      const user = userEvent.setup()
+      const { fake, saveProgress } = mount()
+      await user.click(await screen.findByRole('button', { name: /^play$/i }))
+      // Ended, or paused by native/OS controls: the clock freezes, no event reaches React.
+      fake.time = 1
+      await act(() => ticks(4))
+
+      await user.click(screen.getByRole('button', { name: 'Show translation' }))
+
+      await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[1]).toEqual({ ownsPosition: false }))
+    })
+
+    it('playback the app did not start (native controls) still claims the position', async () => {
+      const user = userEvent.setup()
+      const { fake, saveProgress } = mount()
+      await screen.findByRole('button', { name: /^play$/i })
+      fake.time = 0.2
+      const advance = setInterval(() => { fake.time = Math.min(fake.time + 0.2, 2.9) }, 200)
+      try { await act(() => ticks(5)) } finally { clearInterval(advance) }
+
+      await user.click(screen.getByRole('button', { name: 'Show translation' }))
+
+      await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[1]).toEqual({ ownsPosition: true }))
+    })
+
+    it('a load-time jump to the restored position is not a claim', async () => {
+      const long = {
+        ...libraryItem,
+        lesson: { ...libraryItem.lesson, sentences: libraryItem.lesson.sentences.map((sentence, index) => ({ ...sentence, start: index * 10, end: index * 10 + 9 })) },
+        listening_progress: { ...libraryItem.listening_progress, last_position_seconds: 20 },
+      }
+      const fake = new FakeController()
+      fake.time = 0
+      fake.seek = vi.fn()
+      const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'youtube', message: null })
+      const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+      render(<ListeningWorkspace item={long} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+      // A tick has seen the not-yet-loaded player at 0 (its drift write).
+      await waitFor(() => expect(saveProgress).toHaveBeenCalledWith(expect.objectContaining({ last_position_seconds: 0 }), { ownsPosition: false }))
+
+      // The player finishes loading at the restored position: a 20 s jump.
+      fake.time = 20
+      await waitFor(() => expect(saveProgress).toHaveBeenCalledWith(expect.objectContaining({ last_position_seconds: 20 }), expect.anything()))
+
+      expect(saveProgress.mock.calls.map((call) => call[1])).toEqual(saveProgress.mock.calls.map(() => ({ ownsPosition: false })))
+    })
+
+    it('a single small load-time jump inside the playback window is not a claim', async () => {
+      const restored = { ...libraryItem, listening_progress: { ...libraryItem.listening_progress, last_position_seconds: 1.5 } }
+      const fake = new FakeController()
+      fake.time = 0
+      fake.seek = vi.fn()
+      const factory: ListeningControllerFactory = vi.fn().mockResolvedValue({ controller: fake, kind: 'youtube', message: null })
+      const saveProgress = vi.fn(async (_progress: ListeningProgress, _meta: { ownsPosition: boolean }) => undefined)
+      const user = userEvent.setup()
+      render(<ListeningWorkspace item={restored} onBack={vi.fn()} controllerFactory={factory} saveProgress={saveProgress} studyFeatures={false} />)
+      await screen.findByRole('button', { name: /^play$/i })
+      await act(() => ticks(2))
+      fake.time = 1.5 // the player settles on the restored position; nothing pressed
+      await act(() => ticks(3))
+
+      await user.click(screen.getByRole('button', { name: 'Show translation' }))
+
+      await waitFor(() => expect(saveProgress.mock.calls.at(-1)?.[0]).toMatchObject({ translation_visible: false }))
+      expect(saveProgress.mock.calls.map((call) => call[1])).toEqual(saveProgress.mock.calls.map(() => ({ ownsPosition: false })))
+    })
   })
 })

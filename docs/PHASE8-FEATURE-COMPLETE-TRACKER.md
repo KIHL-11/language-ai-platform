@@ -9,7 +9,7 @@ This is a development tracker, not owner acceptance or production approval.
 | --- | --- | --- | --- |
 | F foundation | strict session JSONB checks; dependency inventory | In progress | synthetic direct-SQL negative tests; fresh audit pending |
 | A | email challenges, verified subject mapping, sandbox mail, simulated WeChat flow, account UX | Pending | no real provider registration or mail delivery authorized |
-| B | Library/media reliability, upload safeguards, owner Guided/Listening/curation | Pending | Issue #58 synthetic media; no personal media migration |
+| B | Library/media reliability, upload safeguards, owner Guided/Listening/curation | In progress | B-1 (#81, accepted 2026-11-03, CI 41660011509). B-2 (#82): progress OCC, Cloud Guided/Listening, Cloud→Personal fallback gate; code head `a963ea1` CI 41707396206. Issue #58 open until #82 is accepted. Next: B-3 synthetic dictionary + Cloud AI Chunk. Synthetic media only |
 | C | bounded model/voice adapters, budgets, idempotency, mock interruption | Pending | paid/live calls remain disabled |
 | D | export/preview/trial import, rollback/restore, deletion/session controls | Pending | synthetic account data only |
 | E | default-off registry, consent, RBAC aggregates and synthetic dashboard | Pending | legal/data-region/retention approval separate |

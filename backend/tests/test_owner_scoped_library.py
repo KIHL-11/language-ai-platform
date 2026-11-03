@@ -215,6 +215,7 @@ def test_real_postgres_adapter_scopes_uniqueness_and_crud_by_owner(
             OWNER_B,
             first.id,
             first.progress.model_copy(update={"is_training": True}).model_dump(),
+            expected_revision=same_owner.revision,
         )
     with pytest.raises(KeyError):
         postgres_repository.delete_for_owner(OWNER_B, first.id)
@@ -248,11 +249,14 @@ def test_cloud_api_list_create_update_delete_are_non_enumerating(
         fetched = client.get(f"/api/library/items/{owner_a['id']}")
         progress = client.patch(
             f"/api/library/items/{owner_a['id']}/progress",
-            json=owner_a["progress"],
+            json={**owner_a["progress"], "expected_revision": owner_a["revision"]},
         )
         listening = client.patch(
             f"/api/library/items/{owner_a['id']}/listening-progress",
-            json=owner_a["listening_progress"],
+            json={
+                **owner_a["listening_progress"],
+                "expected_revision": owner_a["revision"],
+            },
         )
         deleted = client.delete(f"/api/library/items/{owner_a['id']}")
 
@@ -274,11 +278,12 @@ def test_cloud_api_list_create_update_delete_are_non_enumerating(
     }
     with _as_owner(OWNER_A, postgres_repository):
         progress = client.patch(
-            f"/api/library/items/{owner_a['id']}/progress", json=own_progress
+            f"/api/library/items/{owner_a['id']}/progress",
+            json={**own_progress, "expected_revision": owner_a["revision"]},
         )
         listening = client.patch(
             f"/api/library/items/{owner_a['id']}/listening-progress",
-            json=own_listening,
+            json={**own_listening, "expected_revision": progress.json()["revision"]},
         )
     assert progress.status_code == 200
     assert progress.json()["progress"]["stage_index"] == 1

@@ -23,6 +23,11 @@ import DictionaryPanel from '../components/DictionaryPanel'
 
 const CLOCK_INTERVAL_MS = 200
 const PERSIST_INTERVAL_SECONDS = 5
+// Clock steps between ticks that count as playback (background tabs may be
+// throttled to one tick per second; 1.25x plays 1.25 s in that time).
+const MIN_PLAYBACK_STEP_SECONDS = 0.05
+const MAX_PLAYBACK_STEP_SECONDS = 2
+const SUSTAINED_PLAYBACK_TICKS = 2
 const PLAYBACK_RATES: ListeningPlaybackRate[] = [0.5, 0.75, 1, 1.25]
 
 interface AnchoredDictionarySelection {
@@ -46,6 +51,14 @@ interface ListeningWorkspaceProps {
   onBack: () => void
   controllerFactory?: ListeningControllerFactory
   onShadowing?: (sentenceId: number) => void
+  // Cloud injects a revision-checked writer; Personal keeps the plain PATCH.
+  // `ownsPosition` is true only when this tab played, paused, sought or
+  // picked a sentence since its last write, so a writer can keep another
+  // tab's resume point when this one merely changed a setting or drifted.
+  saveProgress?: (progress: ListeningProgress, meta: { ownsPosition: boolean }) => Promise<unknown>
+  // Dictionary lookups and Words & Chunks use Personal-only routes until the
+  // cloud dictionary and Study Bank provenance land (B-3/B-4).
+  studyFeatures?: boolean
 }
 
 export default function ListeningWorkspace({
@@ -53,6 +66,8 @@ export default function ListeningWorkspace({
   onBack,
   controllerFactory = createListeningController,
   onShadowing,
+  saveProgress,
+  studyFeatures = true,
 }: ListeningWorkspaceProps) {
   const sentences = useMemo(() => practiceableSentences(item.lesson.sentences), [item.lesson.sentences])
   const restoredIndex = item.listening_progress.current_sentence_id === null
@@ -84,7 +99,7 @@ export default function ListeningWorkspace({
   const [candidateError, setCandidateError] = useState<string | null>(null)
   const [savingCandidate, setSavingCandidate] = useState<string | null>(null)
   const [dictionarySelection, setDictionarySelection] = useState<AnchoredDictionarySelection | null>(null)
-  const [learnerId] = useState(getOrCreateLearnerId)
+  const [learnerId] = useState(() => studyFeatures ? getOrCreateLearnerId() : '')
   const mediaHostRef = useRef<HTMLDivElement>(null)
   const transcriptRows = useRef(new Map<number, HTMLLIElement>())
   const currentIndexRef = useRef(currentIndex)
@@ -93,6 +108,9 @@ export default function ListeningWorkspace({
   const progressRef = useRef<ListeningProgress>(item.listening_progress)
   const mountedRef = useRef(true)
   const lastQueuedPosition = useRef(item.listening_progress.last_position_seconds)
+  const positionTouched = useRef(false)
+  const lastTickTime = useRef<number | null>(null)
+  const advancingTicks = useRef(0)
   const writeTail = useRef<Promise<void>>(Promise.resolve())
   const currentSentence = sentences[currentIndex] ?? null
   const lessonDuration = Math.max(0, ...sentences.map((sentence) => sentence.end))
@@ -129,10 +147,12 @@ export default function ListeningWorkspace({
     progressRef.current = snapshot
     if (!force && Math.abs(snapshot.last_position_seconds - lastQueuedPosition.current) < PERSIST_INTERVAL_SECONDS) return
     lastQueuedPosition.current = snapshot.last_position_seconds
+    const meta = { ownsPosition: positionTouched.current }
+    positionTouched.current = false
     writeTail.current = writeTail.current.catch(() => undefined).then(async () => {
-      await updateListeningProgress(item.id, snapshot)
+      await (saveProgress ? saveProgress(snapshot, meta) : updateListeningProgress(item.id, snapshot))
     }).catch(() => undefined)
-  }, [item.id])
+  }, [item.id, saveProgress])
 
   useEffect(() => {
     mountedRef.current = true
@@ -199,6 +219,18 @@ export default function ListeningWorkspace({
         void controller.play().catch(() => setIsPlaying(false))
         time = range.start
       }
+      // Only a clock that actually advances like playback claims the resume
+      // point. isPlaying is not trusted: media that ended or was paused by
+      // native/OS controls leaves it true, and native play leaves it false.
+      // Playback means sustained advance: one step (a load-time jump or a
+      // player settling near its seek target) is no claim, however small.
+      const previous = lastTickTime.current
+      lastTickTime.current = time
+      const step = previous === null ? 0 : time - previous
+      advancingTicks.current = step > MIN_PLAYBACK_STEP_SECONDS && step <= MAX_PLAYBACK_STEP_SECONDS
+        ? advancingTicks.current + 1
+        : 0
+      if (advancingTicks.current >= SUSTAINED_PLAYBACK_TICKS) positionTouched.current = true
       setCurrentTime(time)
       const next = activeSentenceIndex(sentences, time, currentIndexRef.current)
       if (next >= 0 && next !== currentIndexRef.current) setCurrentIndex(next)
@@ -208,6 +240,7 @@ export default function ListeningWorkspace({
   }, [controller, persist, sentences])
 
   useEffect(() => {
+    if (!studyFeatures) return
     let active = true
     void listStudyCandidates(item.id, learnerId).then((values) => {
       if (active) setCandidates(values)
@@ -215,7 +248,7 @@ export default function ListeningWorkspace({
       if (active) setCandidateError('Words & Chunks are temporarily unavailable. Listening still works.')
     })
     return () => { active = false }
-  }, [item.id, learnerId])
+  }, [item.id, learnerId, studyFeatures])
 
   useEffect(() => {
     if (!autoFollow || !currentSentence) return
@@ -234,6 +267,7 @@ export default function ListeningWorkspace({
     setDictationResult(null)
     setBlindRevealed(false)
     controller?.seek(sentence.start)
+    positionTouched.current = true
     persist(true, {
       last_position_seconds: sentence.start,
       current_sentence_id: sentence.id,
@@ -246,6 +280,7 @@ export default function ListeningWorkspace({
     const next = Math.min(duration, Math.max(0, controller.getCurrentTime() + delta))
     controller.seek(next)
     setCurrentTime(next)
+    positionTouched.current = true
     persist(true, { last_position_seconds: next })
   }, [controller, lessonDuration, persist])
 
@@ -255,6 +290,7 @@ export default function ListeningWorkspace({
       controller.pause()
       setIsPlaying(false)
       setCurrentTime(controller.getCurrentTime())
+      positionTouched.current = true
       persist(true, { last_position_seconds: controller.getCurrentTime() })
     } else {
       void controller.play().then(() => setIsPlaying(true)).catch(() => {
@@ -392,14 +428,14 @@ export default function ListeningWorkspace({
           <div className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
             <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(sentences.length).padStart(2, '0')}</p>
             {currentSentence ? <>
-              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={currentSentence.id} learnerId={learnerId} onLookup={openDictionary} />}</p>
+              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : studyFeatures ? <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={currentSentence.id} learnerId={learnerId} onLookup={openDictionary} /> : currentSentence.text}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
               {mode === 'blind' && <button type="button" onClick={() => setBlindRevealed((value) => !value)} className="mt-3 text-sm font-semibold text-[#176b5b]">{blindRevealed ? 'Hide again' : 'Reveal text'}</button>}
               {onShadowing && <button type="button" onClick={() => onShadowing(currentSentence.id)} className="mt-3 ml-3 text-sm font-semibold text-[#176b5b]">Practice Sync Shadowing</button>}
             </> : <p className="mt-3">This Lesson has no transcript sentences.</p>}
           </div>
 
-          {dictionarySelection && !hideText && sourceVisible && <DictionaryPanel selection={dictionarySelection.selection} anchor={dictionarySelection.anchor} onClose={closeDictionary} onStudyItemSaved={reflectSavedWord} />}
+          {studyFeatures && dictionarySelection && !hideText && sourceVisible && <DictionaryPanel selection={dictionarySelection.selection} anchor={dictionarySelection.anchor} onClose={closeDictionary} onStudyItemSaved={reflectSavedWord} />}
 
           <div className="mt-5 flex flex-wrap gap-2" aria-label="Listening mode">
             {(['listen', 'blind', 'dictation'] as const).map((value) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => changeMode(value)} className="h-10 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white">{value[0].toUpperCase() + value.slice(1)}</button>)}
@@ -414,7 +450,7 @@ export default function ListeningWorkspace({
             {dictationResult && <div aria-live="polite" className="mt-4"><p className="font-semibold">Accuracy {dictationResult.accuracy}%</p><div aria-label="Target word comparison" className="mt-2 flex flex-wrap gap-1">{dictationResult.targetWords.map((word, index) => <span key={`${word.value}-${index}`} className={word.status === 'correct' ? 'bg-[#e2eee9] px-1' : 'bg-[#fbe7e5] px-1 line-through'}>{word.value}</span>)}</div></div>}
           </form>}
 
-          <section aria-labelledby="sentence-study-title" className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
+          {studyFeatures && <section aria-labelledby="sentence-study-title" className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
             <h2 id="sentence-study-title" className="text-lg font-semibold">Words & Chunks</h2>
             {candidateError && <p role="alert" className="mt-3 text-sm text-[#8f1d14]">{candidateError}</p>}
             {!candidateError && sentenceCandidates.length === 0 && <p className="mt-3 text-sm text-[#66726e]">No recommended or review candidates for this sentence.</p>}
@@ -422,7 +458,7 @@ export default function ListeningWorkspace({
               const values = sentenceCandidates.filter((candidate) => candidate.kind === kind)
               return values.length > 0 && <div key={kind} className="mt-4"><h3 className="text-sm font-semibold">{kind === 'word' ? 'Words' : 'Chunks'}</h3><ul className="mt-2 space-y-2">{values.map((candidate) => <li key={candidate.candidate_id} className="flex items-center justify-between gap-3 border-t border-[#dfe7e3] pt-2"><span><strong>{candidate.text}</strong> · {candidate.meaning || 'Meaning unavailable'} <small>({candidate.quality})</small></span>{candidate.already_saved ? <span className="text-sm text-[#176b5b]">Saved</span> : <button type="button" disabled={savingCandidate === candidate.candidate_id} onClick={() => void saveCandidate(candidate)} className="h-8 border border-[#176b5b] px-3">Save</button>}</li>)}</ul></div>
             })}
-          </section>
+          </section>}
         </section>
 
         <section aria-labelledby="synchronized-transcript-title" className="min-w-0">
@@ -435,7 +471,7 @@ export default function ListeningWorkspace({
               const active = index === currentIndex
               return <li ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} key={sentence.id} aria-current={active ? 'true' : undefined} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
                 <button type="button" aria-label={`Seek to ${sentence.text}`} onClick={() => selectSentence(index)} className="block text-xs tabular-nums text-[#66726e] hover:underline focus-visible:outline-2 focus-visible:outline-[#176b5b]">{formatTime(sentence.start)}</button>
-                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={sentence.id} learnerId={learnerId} onLookup={openDictionary} />}</span>
+                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : studyFeatures ? <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={sentence.id} learnerId={learnerId} onLookup={openDictionary} /> : sentence.text}</span>
                 <span className={`mt-1 block text-sm ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : sentence.translation}</span>
               </li>
             })}

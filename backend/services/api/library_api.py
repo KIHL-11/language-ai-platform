@@ -10,6 +10,7 @@ from services.library.access import LibraryAccessDependency
 from services.library.owner_repository import OwnerScopedLibraryRepository
 from services.library.postgres import (
     CloudLibraryUnavailableError,
+    LibraryRevisionConflictError,
     MediaIntegrityError,
     OwnerNotProvisionedError,
 )
@@ -20,6 +21,7 @@ from services.library.store import (
 )
 from services.library.verified_response import VerifiedAudioResponse
 from services.schemas.library import (
+    CloudLibraryItem,
     LibraryItem,
     LibraryListResponse,
     LibraryProgressRequest,
@@ -45,6 +47,14 @@ def _store_error(operation):
         return operation()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Library item not found") from exc
+    except LibraryRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "library_revision_conflict",
+                "message": "This Library item changed in another session. Reload it and try again.",
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except LibraryConflictError as exc:
@@ -77,6 +87,23 @@ def _store_error(operation):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# Cloud responses add ``revision``; Personal responses keep the exact
+# LibraryItem shape. Most specific first so a cloud item keeps its revision.
+LibraryItemResponse = CloudLibraryItem | LibraryItem
+
+
+def _required_revision(expected_revision: int | None) -> int:
+    if expected_revision is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "library_revision_required",
+                "message": "Cloud progress updates require expected_revision.",
+            },
+        )
+    return expected_revision
+
+
 def _cloud_repository(access) -> tuple[OwnerScopedLibraryRepository, str]:
     repository = access.cloud_repository
     owner_user_id = access.owner_user_id
@@ -85,7 +112,7 @@ def _cloud_repository(access) -> tuple[OwnerScopedLibraryRepository, str]:
     return repository, owner_user_id
 
 
-@router.post("/library/items", response_model=LibraryItem)
+@router.post("/library/items", response_model=LibraryItemResponse)
 def save_library_item(
     request: LibrarySaveRequest, access: LibraryAccessDependency
 ):
@@ -115,7 +142,7 @@ def list_library_items(access: LibraryAccessDependency):
     return LibraryListResponse(items=_store_error(library_store.list_summaries))
 
 
-@router.get("/library/items/{item_id}", response_model=LibraryItem)
+@router.get("/library/items/{item_id}", response_model=LibraryItemResponse)
 def get_library_item(item_id: str, access: LibraryAccessDependency):
     if access.is_cloud:
         repository, owner_user_id = _cloud_repository(access)
@@ -127,44 +154,56 @@ def get_library_item(item_id: str, access: LibraryAccessDependency):
     return library_store.item_for_response(item)
 
 
-@router.patch("/library/items/{item_id}/progress", response_model=LibraryItem)
+@router.patch(
+    "/library/items/{item_id}/progress", response_model=LibraryItemResponse
+)
 def update_library_progress(
     item_id: str,
     request: LibraryProgressRequest,
     access: LibraryAccessDependency,
 ):
+    progress = request.model_dump(exclude={"expected_revision"})
     if access.is_cloud:
         repository, owner_user_id = _cloud_repository(access)
+        expected_revision = _required_revision(request.expected_revision)
         item = _store_error(
             lambda: repository.update_progress_for_owner(
-                owner_user_id, item_id, request.model_dump()
+                owner_user_id,
+                item_id,
+                progress,
+                expected_revision=expected_revision,
             )
         )
         return repository.item_for_response(item)
-    item = _store_error(
-        lambda: library_store.update_progress(item_id, request.model_dump())
-    )
+    # Personal Desktop has one writer per machine; a revision is ignored.
+    item = _store_error(lambda: library_store.update_progress(item_id, progress))
     return library_store.item_for_response(item)
 
 
-@router.patch("/library/items/{item_id}/listening-progress", response_model=LibraryItem)
+@router.patch(
+    "/library/items/{item_id}/listening-progress",
+    response_model=LibraryItemResponse,
+)
 def update_library_listening_progress(
     item_id: str,
     request: ListeningProgressRequest,
     access: LibraryAccessDependency,
 ):
+    progress = request.model_dump(exclude={"expected_revision"})
     if access.is_cloud:
         repository, owner_user_id = _cloud_repository(access)
+        expected_revision = _required_revision(request.expected_revision)
         item = _store_error(
             lambda: repository.update_listening_progress_for_owner(
-                owner_user_id, item_id, request.model_dump()
+                owner_user_id,
+                item_id,
+                progress,
+                expected_revision=expected_revision,
             )
         )
         return repository.item_for_response(item)
     item = _store_error(
-        lambda: library_store.update_listening_progress(
-            item_id, request.model_dump()
-        )
+        lambda: library_store.update_listening_progress(item_id, progress)
     )
     return library_store.item_for_response(item)
 

@@ -7,6 +7,7 @@ from services.auth.identity import (
     IdentityDependency,
     PersonalStorageDependency,
     owner_user_id,
+    require_personal_storage,
 )
 from services.retrieval.chunk_memory import (
     DEFAULT_ACTIVE_RECALL_LIMIT,
@@ -111,6 +112,9 @@ def list_chunk_memory(
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
     user_id = owner_user_id(identity, user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     chunks = chunk_memory_service.list_chunks(
         user_id,
         language,
@@ -132,6 +136,9 @@ def select_active_recall_memory(
     ] = DEFAULT_ACTIVE_RECALL_LIMIT,
 ):
     user_id = owner_user_id(identity, user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     from services.api import study_bank_api
 
     try:
@@ -166,6 +173,9 @@ def record_chunk_practice(
     chunk_id: str, request: ChunkPracticeRequest, identity: IdentityDependency
 ):
     user_id = owner_user_id(identity, request.user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     return _memory_or_404(
         lambda: chunk_memory_service.record_practice(
             user_id, chunk_id, request.outcome
@@ -178,6 +188,9 @@ def set_chunk_memory_active(
     chunk_id: str, request: ChunkActiveRequest, identity: IdentityDependency
 ):
     user_id = owner_user_id(identity, request.user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     return _memory_or_404(
         lambda: chunk_memory_service.set_active(
             user_id, chunk_id, request.active

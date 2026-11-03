@@ -7,6 +7,7 @@ import { getDevStageOverride } from '../training/devStageJump'
 import { createTrainingState } from '../training/trainingMachine'
 import type { TrainingSessionState } from '../training/trainingMachine'
 import type { Lesson } from '../types/lesson'
+import type { ChunkMemoryClient } from '../api/chunkMemory'
 import TrainingSession from './TrainingSession'
 
 interface LessonViewerProps {
@@ -17,6 +18,8 @@ interface LessonViewerProps {
     isTraining: boolean,
     state: TrainingSessionState,
   ) => void
+  memoryClient?: ChunkMemoryClient
+  voiceEnabled?: boolean
 }
 
 const AI_STATUS_LABELS: Record<Lesson['ai']['status'], string> = {
@@ -36,6 +39,8 @@ export default function LessonViewer({
   initialIsTraining = false,
   initialTrainingState,
   onSessionChange,
+  memoryClient,
+  voiceEnabled,
 }: LessonViewerProps) {
   const devStageOverride = getDevStageOverride(
     window.location.search,
@@ -74,6 +79,8 @@ export default function LessonViewer({
         initialState={trainingState}
         onStateChange={handleStateChange}
         onExit={handleExit}
+        {...(memoryClient ? { memoryClient } : {})}
+        {...(voiceEnabled === undefined ? {} : { voiceEnabled })}
       />
     )
   }

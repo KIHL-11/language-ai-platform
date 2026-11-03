@@ -167,3 +167,16 @@ export const chunkMemoryClient: ChunkMemoryClient = {
   fetchActiveRecallChunks,
   recordChunkPractice,
 }
+
+// Cloud Guided training: saved-language recall reads Personal stores keyed by
+// a local learner id, so in cloud it reports "unavailable" without any
+// network call. ActiveRecall then lets the learner continue.
+function cloudRecallUnavailable(): Promise<never> {
+  return Promise.reject(new Error('Saved language recall is not available in cloud yet.'))
+}
+
+export const cloudUnavailableMemoryClient: ChunkMemoryClient = {
+  importLessonChunks: cloudRecallUnavailable,
+  fetchActiveRecallChunks: cloudRecallUnavailable,
+  recordChunkPractice: cloudRecallUnavailable,
+}

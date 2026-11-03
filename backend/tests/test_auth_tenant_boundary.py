@@ -121,7 +121,10 @@ def test_async_trusted_verifier_is_supported(monkeypatch):
     _install_verifier(monkeypatch, verifier)
     response = client.get("/api/chunks/memory", params={"user_id": "owner-a"})
 
-    assert response.status_code == 200
+    # Authenticated and owner-checked, then stopped by the storage gate: chunk
+    # memory has no owner-scoped cloud store yet (no Personal fallback).
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
 
 
 @pytest.mark.parametrize(
@@ -425,9 +428,10 @@ def test_chunk_resource_ids_are_non_enumerating_and_unchanged(tmp_path, monkeypa
             json={"user_id": "owner-a", "outcome": "success"},
         )
 
-    assert listed.status_code == 200
-    assert listed.json() == {"chunks": []}
-    assert archive.status_code == practice.status_code == 404
+    # Cloud never reaches the Personal chunk store, not even for its own id.
+    for response in (listed, archive, practice):
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
     assert chunk_store.path.read_bytes() == before
 
 
@@ -524,3 +528,46 @@ def test_unverifiable_cross_resource_provenance_writes_fail_closed(path, payload
         else "cloud_tenant_storage_not_configured"
     )
     assert response.json()["detail"]["code"] == expected
+
+
+class _UntouchablePersonalStore:
+    """Any attribute access means a cloud request reached a Personal store."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"cloud request touched a Personal store ({name})")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("GET", "/api/chunks/memory?user_id=owner-a", None),
+        ("GET", "/api/chunks/memory/active-recall?user_id=owner-a&language=en", None),
+        ("PATCH", "/api/chunks/memory/chunk-1/practice", {"user_id": "owner-a", "outcome": "success"}),
+        ("PATCH", "/api/chunks/memory/chunk-1", {"user_id": "owner-a", "active": False}),
+        ("GET", "/api/integration/target-languages?user_id=owner-a&source_language=en", None),
+        (
+            "POST",
+            "/api/integration/speaking/sessions/session-1/suggestions/0/save",
+            {"user_id": "owner-a", "target_language": "zh-CN"},
+        ),
+    ],
+)
+def test_cloud_never_falls_back_to_personal_chunk_or_study_stores(
+    monkeypatch, method, path, json
+):
+    """B-3 gate: chunk memory, recall and integration saves stay closed in
+    cloud, even for the authenticated owner's own id, until an owner-scoped
+    cloud store backs them."""
+    for module, name in (
+        (chunk_api, "chunk_memory_service"),
+        (study_bank_api, "study_bank_store"),
+        (speaking_api, "speaking_store"),
+        (library_api, "library_store"),
+    ):
+        monkeypatch.setattr(module, name, _UntouchablePersonalStore())
+
+    with _as_cloud_user("owner-a"):
+        response = client.request(method, path, json=json)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"

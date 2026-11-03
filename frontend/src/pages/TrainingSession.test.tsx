@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TRAINING_STAGE_LABELS } from '../training/trainingMachine'
 import type { Lesson, TrainingStage } from '../types/lesson'
 import TrainingSession from './TrainingSession'
+import type { VoiceLiveDialogueProvider } from '../training/voiceLiveDialogueProvider'
 
 const lesson: Lesson = {
   id: 'retell-flow',
@@ -135,6 +136,23 @@ describe('TrainingSession Retell flow', () => {
     expect(screen.getByText('Stages completed: 1 / 1')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Review Lesson' }))
     expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers no realtime voice when voice is disabled, even if the build configures it', () => {
+    vi.stubEnv('VITE_LIVE_DIALOGUE_PROVIDER', 'realtime')
+    const liveDialogueLesson: Lesson = { ...lesson, id: 'cloud-voice-off', training_order: ['live_dialogue'] }
+    const voice = {} as unknown as VoiceLiveDialogueProvider
+    try {
+      const { unmount } = render(<TrainingSession lesson={liveDialogueLesson} audioUrl={null} onExit={vi.fn()} voiceLiveDialogueProvider={voice} voiceEnabled={false} />)
+      expect(screen.queryByRole('button', { name: 'Realtime Voice Practice' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Start Conversation' })).toBeInTheDocument()
+      unmount()
+      // Personal default is unchanged: a supplied provider is still offered.
+      render(<TrainingSession lesson={liveDialogueLesson} audioUrl={null} onExit={vi.fn()} voiceLiveDialogueProvider={voice} />)
+      expect(screen.getByRole('button', { name: 'Realtime Voice Practice' })).toBeInTheDocument()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })
 

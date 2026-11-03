@@ -8,6 +8,18 @@ export class CloudAuthError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status }
 }
 
+// The server answered 409 for the current identity (for example a stale
+// revision). Distinct from the 409 raised locally when the identity changed.
+export class CloudConflictError extends CloudAuthError {
+  constructor() { super(409, 'Request conflicts with saved state') }
+}
+
+export interface CloudRequestOptions {
+  // Refuse to send unless the session is still this generation, so a write
+  // started under one sign-in can never go out under the next one.
+  generation?: number
+}
+
 export class CloudAuthClient {
   private state: AuthState = { status: 'loading', generation: 0 }
   private csrf: string | null = null
@@ -40,7 +52,12 @@ export class CloudAuthClient {
     } catch { if (generation === this.state.generation) this.clear('unavailable') }
   }
   async refresh() {
-    this.cloud = true; this.clear('loading')
+    this.cloud = true
+    // Re-checking the same signed-in account (window focus, rotation) keeps
+    // the generation, so open learning views and their writes survive. Any
+    // other outcome still clears everything, exactly as a first check does.
+    const previous = this.state.status === 'authenticated' ? this.state.userId : null
+    if (previous === null) this.clear('loading')
     const generation = this.state.generation
     try {
       const response = await fetch('/api/account/me', { credentials: 'same-origin', redirect: 'error', cache: 'no-store', signal: this.controller.signal })
@@ -49,14 +66,17 @@ export class CloudAuthClient {
       const value = await response.json() as { user_id?: unknown; csrf_token?: unknown }
       if (generation !== this.state.generation) return
       if (typeof value.user_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.user_id) || typeof value.csrf_token !== 'string' || !/^[a-f0-9]{64}$/.test(value.csrf_token)) throw new Error('Invalid account')
+      if (value.user_id === previous) { this.csrf = value.csrf_token; return }
+      if (previous !== null) this.clear('loading')
       this.csrf = value.csrf_token
-      this.publish({ status: 'authenticated', userId: value.user_id, generation })
+      this.publish({ status: 'authenticated', userId: value.user_id, generation: this.state.generation })
     } catch { if (generation === this.state.generation) this.clear('unavailable') }
   }
-  async request(input: string, init?: RequestInit): Promise<Response> {
+  async request(input: string, init?: RequestInit, options: CloudRequestOptions = {}): Promise<Response> {
     if (this.state.status === 'personal') return init === undefined ? fetch(input) : fetch(input, init)
     init ??= {}
     if (!this.cloud || this.state.status !== 'authenticated' || !this.csrf) throw new CloudAuthError(401, 'Cloud session unavailable')
+    if (options.generation !== undefined && options.generation !== this.state.generation) throw new CloudAuthError(409, 'Identity changed')
     const url = new URL(input, location.href)
     if (url.origin !== location.origin || url.username || url.password) throw new CloudAuthError(403, 'Cross-origin cloud request refused')
     const owner = this.state.userId
@@ -83,7 +103,8 @@ export class CloudAuthClient {
       this.clear(response.status === 401 ? 'expired' : 'csrf-invalid')
       throw new CloudAuthError(response.status, 'Cloud authorization rejected')
     }
-    if (response.status === 409 || response.status === 503) throw new CloudAuthError(response.status, response.status === 409 ? 'Request conflicts with saved state' : 'Cloud service unavailable')
+    if (response.status === 409) throw new CloudConflictError()
+    if (response.status === 503) throw new CloudAuthError(503, 'Cloud service unavailable')
     const privatePath = /^\/api\/(library|study-bank|review|ai|integration)(\/|$)/.test(url.pathname) || /^\/api\/topics\/[^/]+\/(preview|attempts)(\/|$)/.test(url.pathname)
     const responseOwner = response.headers.get('X-Authenticated-User')
     if (response.ok && ((privatePath && responseOwner !== owner) || (responseOwner !== null && responseOwner !== owner))) {
@@ -115,4 +136,4 @@ export class CloudAuthClient {
 }
 
 export const cloudAuth = new CloudAuthClient()
-export const apiFetch = (input: string, init?: RequestInit) => cloudAuth.request(input, init)
+export const apiFetch = (input: string, init?: RequestInit, options?: CloudRequestOptions) => cloudAuth.request(input, init, options)

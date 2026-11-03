@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   chunkMemoryClient,
+  cloudUnavailableMemoryClient,
   type ChunkMemoryClient,
 } from '../api/chunkMemory'
 import ActiveRecall from '../components/training/ActiveRecall'
@@ -39,6 +40,9 @@ interface TrainingSessionProps {
   devMode?: boolean
   initialState?: TrainingSessionState
   onStateChange?: (state: TrainingSessionState) => void
+  // Cloud passes false: realtime voice stays off until Workstream C budgets
+  // exist, whatever the build's VITE_LIVE_DIALOGUE_PROVIDER says.
+  voiceEnabled?: boolean
 }
 
 const SENTENCE_STAGES = new Set<TrainingStage>([
@@ -58,6 +62,7 @@ export default function TrainingSession({
   devMode = true,
   initialState,
   onStateChange,
+  voiceEnabled = true,
 }: TrainingSessionProps) {
   const isDevelopment = import.meta.env.DEV && devMode
   const initialDevStage = getDevStageOverride(
@@ -65,7 +70,10 @@ export default function TrainingSession({
     isDevelopment,
   )
   const progressionLock = useRef(false)
-  const [learnerId] = useState(getOrCreateLearnerId)
+  // Cloud recall never uses a local learner id, so none is created there.
+  const [learnerId] = useState(() =>
+    memoryClient === cloudUnavailableMemoryClient ? '' : getOrCreateLearnerId(),
+  )
   const [devOverride, setDevOverride] = useState<{
     stage: TrainingStage
     sentenceIndex: number
@@ -75,8 +83,8 @@ export default function TrainingSession({
       ? { stage: initialDevStage, sentenceIndex: 0, revision: 0 }
       : null,
   )
-  const [configuredVoiceProvider] = useState(
-    createConfiguredRealtimeDialogueProvider,
+  const [configuredVoiceProvider] = useState(() =>
+    voiceEnabled ? createConfiguredRealtimeDialogueProvider() : undefined,
   )
   const {
     state,
@@ -337,7 +345,7 @@ export default function TrainingSession({
         key={`live-dialogue-${devOverride?.revision ?? 0}`}
         lesson={lesson}
         provider={liveDialogueProvider}
-        voiceProvider={voiceLiveDialogueProvider ?? configuredVoiceProvider}
+        voiceProvider={voiceEnabled ? voiceLiveDialogueProvider ?? configuredVoiceProvider : undefined}
         onComplete={advanceOneStage}
       />
     )

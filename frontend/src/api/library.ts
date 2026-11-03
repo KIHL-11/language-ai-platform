@@ -1,4 +1,4 @@
-import { apiFetch } from '../auth/client'
+import { apiFetch, type CloudRequestOptions } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import { createPersonalSession } from '../session/personalSession'
 import type { Lesson, TrainingStage } from '../types/lesson'
@@ -95,6 +95,7 @@ function isItem(value: unknown): value is LibraryItem {
     typeof value.lesson.id === 'string' && typeof value.lesson.title === 'string' &&
     isProgress(value.progress) && isListeningProgress(value.listening_progress) &&
     isShadowingProgress(value.shadowing_progress) &&
+    (value.revision === undefined || (Number.isInteger(value.revision) && Number(value.revision) >= 1)) &&
     (value.persistent_audio.status === 'available' || value.persistent_audio.status === 'unavailable'))) {
     return false
   }
@@ -172,9 +173,26 @@ export async function listLibraryItems(): Promise<LibraryItemSummary[]> {
   return value.items
 }
 
-export async function getLibraryItem(itemId: string): Promise<LibraryItem> {
+export interface ProgressWriteOptions extends CloudRequestOptions {
+  // Cloud progress writes must name the revision they were based on; the
+  // server answers 409 (CloudConflictError) when it has moved on.
+  expectedRevision?: number
+}
+
+function progressBody<T extends object>(progress: T, options: ProgressWriteOptions): string {
+  return JSON.stringify(
+    options.expectedRevision === undefined
+      ? progress
+      : { ...progress, expected_revision: options.expectedRevision },
+  )
+}
+
+export async function getLibraryItem(
+  itemId: string,
+  options: CloudRequestOptions = {},
+): Promise<LibraryItem> {
   const value = await jsonResponse(
-    await apiFetch(`${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}`),
+    await apiFetch(`${API_BASE_URL}/api/library/items/${encodeURIComponent(itemId)}`, undefined, options),
     'Loading Library Lesson failed',
   )
   if (!isItem(value)) throw new Error('Library Lesson returned an unexpected response.')
@@ -184,6 +202,7 @@ export async function getLibraryItem(itemId: string): Promise<LibraryItem> {
 export async function updateLibraryProgress(
   itemId: string,
   progress: LibraryProgress,
+  options: ProgressWriteOptions = {},
 ): Promise<LibraryItem> {
   const value = await jsonResponse(
     await apiFetch(
@@ -191,8 +210,9 @@ export async function updateLibraryProgress(
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(progress),
+        body: progressBody(progress, options),
       },
+      { generation: options.generation },
     ),
     'Saving Library progress failed',
   )
@@ -203,6 +223,7 @@ export async function updateLibraryProgress(
 export async function updateListeningProgress(
   itemId: string,
   progress: ListeningProgress,
+  options: ProgressWriteOptions = {},
 ): Promise<LibraryItem> {
   const value = await jsonResponse(
     await apiFetch(
@@ -210,8 +231,9 @@ export async function updateListeningProgress(
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(progress),
+        body: progressBody(progress, options),
       },
+      { generation: options.generation },
     ),
     'Saving listening progress failed',
   )

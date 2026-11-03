@@ -6,6 +6,7 @@ from services.auth.identity import (
     IdentityDependency,
     PersonalStorageDependency,
     owner_user_id,
+    require_personal_storage,
 )
 from services.integration.recommendations import IntegrationService
 from services.library.store import LibraryStoreError
@@ -74,6 +75,9 @@ def target_languages(
     identity: IdentityDependency,
 ):
     user_id = owner_user_id(identity, user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     try:
         return TargetLanguageList(
             target_languages=_service().target_languages(user_id, source_language)
@@ -95,6 +99,9 @@ def save_speaking_suggestion(
     from services.api import chunk_api, speaking_api, study_bank_api
 
     user_id = owner_user_id(identity, request.user_id)
+    # No Cloud -> Personal store fallback: identity is checked first (401/403
+    # unchanged), then cloud fails closed until an owner-scoped store exists.
+    require_personal_storage(identity)
     try:
         session = speaking_api.speaking_store.get(user_id, session_id)
     except KeyError as exc:
