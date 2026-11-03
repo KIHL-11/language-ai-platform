@@ -52,8 +52,13 @@ Daily Review state keep their own tables and semantics.
     sentence pick, or playing time), forward or back. Display settings follow
     the tab that changed them. Another tab's player is never moved.
     `ListeningWorkspace` passes `ownsPosition` with each write: true only
-    after such an action since this tab's last write, and never for a
-    paused or not-yet-loaded player whose clock drifts. Without that claim
+    after such an action since this tab's last write. A timer tick claims
+    the position only when the media clock really advanced like playback
+    (more than 0.05 s and at most 2 s since the last tick). The app's own
+    isPlaying flag is not trusted, because media that ended or was paused by
+    native or OS controls leaves it true. A frozen clock, a not-yet-loaded
+    player and a load-time jump to the restored position claim nothing,
+    while native-control playback that really advances does. Without that claim
     the sync writes the latest saved position (refreshed on a 409 reload),
     so an idle background tab that toggles a setting, drifts or closes its
     view cannot move the active tab's resume point. A queued claim survives
@@ -122,7 +127,7 @@ unchanged.
   - writes staying within the Library table;
   - the Personal contract, including a check that the file has no
     `revision`.
-- **Frontend:** 47 new tests across these files:
+- **Frontend:** 50 new tests across these files:
   - **`cloudProgressSync.test.ts`:**
     - merging;
     - coalescing;
@@ -154,8 +159,13 @@ unchanged.
     - an idle tab toggling a setting or leaving keeps another tab's resume
       point, and a deliberate rewind becomes the resume point.
   - **`CloudGuided.test.tsx`:** a replaced view's late callback is ignored.
-  - **`ListeningWorkspace.test.tsx`:** passive clock drift is not a position
-    claim; a sentence pick is; a display change is not.
+  - **`ListeningWorkspace.test.tsx`:**
+    - passive clock drift is not a position claim, and nor is a display
+      change;
+    - a sentence pick is a claim;
+    - media stopped without the Pause button doesn't claim;
+    - native-control playback does claim;
+    - a load-time jump doesn't claim (review M1/L1 on `7ce79e6`).
   - **Personal regression:**
     - a plain Listening PATCH with study features on;
     - realtime voice still offered in Personal.
@@ -194,6 +204,16 @@ covering one write (Low). Both are resolved below.
 | Low | same-user focus re-check no longer blocks requests during `/me` | accepted: CSRF is session-bound (a switched cookie gets 403) and private GETs are owner-checked; noted below |
 | Low | a failed Back left the error invisible | returns to the list with the error |
 
+Review of `7ce79e6` (CI fix, listening ownership, fallback gate):
+- **CI fix and backend sweep:** clean. Every API route on the app was
+  listed with its dependency tree; no other cloud-reachable route falls back
+  to a Personal store.
+- **Medium (fixed):** media that stopped without the Pause button kept
+  claiming the position.
+- **Low (fixed):** native-control playback never claimed it.
+- **Both fixes:** claims now follow the media clock, and the tests are
+  written first and mutation-checked.
+
 ## Not covered
 
 - The cloud dictionary, saved-language recall and Study Bank saves from
@@ -206,6 +226,9 @@ covering one write (Low). Both are resolved below.
   realtime voice (Workstream C).
 - A browser E2E; jsdom tests drive the real components against a mocked
   server.
+- **Play/Pause label (pre-existing):** media that ends or is paused by native
+  controls leaves the button saying "Pause". It no longer affects saved
+  data, since claims follow the clock.
 - **Two tabs both playing:** each makes real playback actions, so the most
   recent writer sets the resume point. That is the owner's chosen
   semantics. Moving the other tab's player is deliberately not done.
