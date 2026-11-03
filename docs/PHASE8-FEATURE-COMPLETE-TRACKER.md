@@ -9,7 +9,7 @@ This is a development tracker, not owner acceptance or production approval.
 | --- | --- | --- | --- |
 | F foundation | strict session JSONB checks; dependency inventory | In progress | synthetic direct-SQL negative tests; fresh audit pending |
 | A | email challenges, verified subject mapping, sandbox mail, simulated WeChat flow, account UX | Pending | no real provider registration or mail delivery authorized |
-| B | Library/media reliability, upload safeguards, owner Guided/Listening/curation | Pending | Issue #58 synthetic media; no personal media migration |
+| B | Library/media reliability, upload safeguards, owner Guided/Listening/curation | In progress | B-1 media integrity + cleanup worker: Draft #81 (accepted 2026-11-03, CI 41660011509). B-2 progress OCC + Cloud Guided/Listening: Draft PR on `claude/p8-b2-guided-listening`. Issue #58 open until B-2 is reviewed. Synthetic media only; no personal media migration |
 | C | bounded model/voice adapters, budgets, idempotency, mock interruption | Pending | paid/live calls remain disabled |
 | D | export/preview/trial import, rollback/restore, deletion/session controls | Pending | synthetic account data only |
 | E | default-off registry, consent, RBAC aggregates and synthetic dashboard | Pending | legal/data-region/retention approval separate |

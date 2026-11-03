@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CloudAuthClient } from './client'
+import { CloudAuthClient, CloudConflictError } from './client'
 
 const csrf = 'a'.repeat(64)
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
@@ -123,5 +123,57 @@ describe('Cloud authentication client', () => {
     resolve(new Response(null, { status: 204 }))
     await expect(pending).rejects.toMatchObject({ status: 409 })
     expect(client.getSnapshot()).toMatchObject({ status: 'authenticated', userId: 'owner-b' })
+  })
+
+  it('re-checks the same account without a new generation or a loading state', async () => {
+    const client = await authenticated()
+    const generation = client.getSnapshot().generation
+    const published: string[] = []
+    client.subscribe(() => published.push(client.getSnapshot().status))
+    fetchMock.mockResolvedValueOnce(json({ user_id: 'owner-a', csrf_token: 'c'.repeat(64) }))
+
+    await client.refresh()
+
+    expect(client.getSnapshot()).toMatchObject({ status: 'authenticated', userId: 'owner-a', generation })
+    expect(published).toEqual([])
+    fetchMock.mockResolvedValueOnce(json({ ok: true }))
+    await client.request('/api/items', { method: 'POST' })
+    expect(fetchMock.mock.calls.at(-1)![1].headers.get('X-CSRF-Token')).toBe('c'.repeat(64))
+  })
+
+  it.each([
+    ['a different account', () => json({ user_id: 'owner-b', csrf_token: 'b'.repeat(64) }), 'authenticated'],
+    ['an expired session', () => json({}, 401), 'expired'],
+  ])('still clears everything when the re-check finds %s', async (_name, reply, status) => {
+    const client = await authenticated()
+    const generation = client.getSnapshot().generation
+    fetchMock.mockResolvedValueOnce(reply())
+    await client.refresh()
+    expect(client.getSnapshot().status).toBe(status)
+    expect(client.getSnapshot().generation).toBeGreaterThan(generation)
+  })
+
+  it('refuses a generation-bound write once the sign-in changed, before any request', async () => {
+    const client = await authenticated()
+    const generation = client.getSnapshot().generation
+    fetchMock.mockResolvedValueOnce(json({ user_id: 'owner-b', csrf_token: 'b'.repeat(64) }))
+    await client.refresh()
+    const count = fetchMock.mock.calls.length
+
+    await expect(client.request('/api/library/items/x/progress', { method: 'PATCH', body: '{}' }, { generation }))
+      .rejects.toMatchObject({ status: 409, message: 'Identity changed' })
+    expect(fetchMock).toHaveBeenCalledTimes(count)
+  })
+
+  it('distinguishes a server conflict from a local identity change', async () => {
+    const client = await authenticated()
+    fetchMock.mockResolvedValueOnce(json({ detail: { code: 'library_revision_conflict' } }, 409))
+    const conflict = await client.request('/api/items', { method: 'PATCH' }).catch((error: unknown) => error)
+    expect(conflict).toBeInstanceOf(CloudConflictError)
+
+    const generation = client.getSnapshot().generation
+    client.invalidate()
+    const local = await client.request('/api/items', { method: 'PATCH' }, { generation }).catch((error: unknown) => error)
+    expect(local).not.toBeInstanceOf(CloudConflictError)
   })
 })

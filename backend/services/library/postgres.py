@@ -29,6 +29,7 @@ from services.library.store import (
 )
 from services.schemas.lesson import Lesson
 from services.schemas.library import (
+    CloudLibraryItem,
     LibraryItem,
     LibraryItemSummary,
     ListeningProgress,
@@ -71,6 +72,10 @@ class MediaIntegrityError(LibraryStoreError):
 
 class MediaNamespaceError(LibraryStoreError):
     """An object key does not belong to the owner/item it is used for."""
+
+
+class LibraryRevisionConflictError(LibraryStoreError):
+    """A progress write named a revision the item no longer has (HTTP 409)."""
 
 
 class MediaRootUnavailableError(LibraryStoreError):
@@ -376,14 +381,36 @@ class PostgresOwnerScopedLibraryRepository:
         return self._row_to_item(result)
 
     def update_progress_for_owner(
-        self, owner_user_id: str, item_id: str, progress_value: Any
+        self,
+        owner_user_id: str,
+        item_id: str,
+        progress_value: Any,
+        *,
+        expected_revision: int,
     ) -> LibraryItem:
-        return self._update_progress(owner_user_id, item_id, progress_value, listening=False)
+        return self._update_progress(
+            owner_user_id,
+            item_id,
+            progress_value,
+            expected_revision=expected_revision,
+            listening=False,
+        )
 
     def update_listening_progress_for_owner(
-        self, owner_user_id: str, item_id: str, progress_value: Any
+        self,
+        owner_user_id: str,
+        item_id: str,
+        progress_value: Any,
+        *,
+        expected_revision: int,
     ) -> LibraryItem:
-        return self._update_progress(owner_user_id, item_id, progress_value, listening=True)
+        return self._update_progress(
+            owner_user_id,
+            item_id,
+            progress_value,
+            expected_revision=expected_revision,
+            listening=True,
+        )
 
     def delete_for_owner(self, owner_user_id: str, item_id: str) -> None:
         self._validate_owner(owner_user_id)
@@ -675,10 +702,28 @@ class PostgresOwnerScopedLibraryRepository:
         item_id: str,
         progress_value: Any,
         *,
+        expected_revision: int,
         listening: bool,
     ) -> LibraryItem:
+        """Write one progress column only if the item is still at
+        ``expected_revision``.
+
+        The row is locked before the revision is compared and the UPDATE
+        repeats the comparison, so two writers holding the same revision can
+        never both succeed: the second waits for the lock, then sees the new
+        revision and gets ``LibraryRevisionConflictError`` (HTTP 409). A
+        cross-owner or unknown item is a KeyError (404) before any revision
+        is compared, so the revision cannot be probed across owners.
+        """
+
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 1
+        ):
+            raise ValueError("expected_revision must be a positive integer")
         try:
             with self._connect() as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
@@ -691,6 +736,10 @@ class PostgresOwnerScopedLibraryRepository:
                 ).fetchone()
                 if row is None:
                     raise KeyError(item_id)
+                if row["revision"] != expected_revision:
+                    raise LibraryRevisionConflictError(
+                        "Library item changed since it was read"
+                    )
                 item = self._row_to_item(row)
                 if listening:
                     value = validated_listening_progress(progress_value, item.lesson)
@@ -698,26 +747,34 @@ class PostgresOwnerScopedLibraryRepository:
                 else:
                     value = validated_progress(progress_value, item.lesson)
                     column = "progress_json"
-                connection.execute(
+                updated = connection.execute(
                     f"""
                     UPDATE cloud_library_items
                     SET {column} = %s, updated_at = %s, revision = revision + 1
-                    WHERE owner_user_id = %s AND item_id = %s
+                    WHERE owner_user_id = %s AND item_id = %s AND revision = %s
+                    RETURNING revision
                     """,
                     (
                         Jsonb(value.model_dump(mode="json")),
                         self._now(),
                         owner_user_id,
                         item_id,
+                        expected_revision,
                     ),
-                )
+                ).fetchone()
+                if updated is None:
+                    # Unreachable while the row lock is held; kept so the
+                    # write itself can never succeed on a stale revision.
+                    raise LibraryRevisionConflictError(
+                        "Library item changed since it was read"
+                    )
                 result = connection.execute(
                     self._item_select(
                         "WHERE item.owner_user_id = %s AND item.item_id = %s"
                     ),
                     (owner_user_id, item_id),
                 ).fetchone()
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, LibraryRevisionConflictError):
             raise
         except psycopg.Error as exc:
             raise CloudLibraryUnavailableError("Cloud Library is unavailable") from exc
@@ -952,6 +1009,7 @@ class PostgresOwnerScopedLibraryRepository:
         return f"""
             SELECT
                 item.item_id, item.source_key, item.created_at, item.updated_at,
+                item.revision,
                 item.lesson_json, item.progress_json,
                 item.listening_progress_json, item.shadowing_progress_json,
                 media.filename AS audio_filename,
@@ -968,9 +1026,10 @@ class PostgresOwnerScopedLibraryRepository:
     @staticmethod
     def _row_to_item(row: dict[str, Any]) -> LibraryItem:
         filename = row.get("audio_filename")
-        return LibraryItem.model_validate(
+        return CloudLibraryItem.model_validate(
             {
                 "id": str(row["item_id"]),
+                "revision": row["revision"],
                 "source_key": row["source_key"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],

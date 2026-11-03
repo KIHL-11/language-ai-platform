@@ -39,6 +39,9 @@ interface TrainingSessionProps {
   devMode?: boolean
   initialState?: TrainingSessionState
   onStateChange?: (state: TrainingSessionState) => void
+  // Cloud passes false: realtime voice stays off until Workstream C budgets
+  // exist, whatever the build's VITE_LIVE_DIALOGUE_PROVIDER says.
+  voiceEnabled?: boolean
 }
 
 const SENTENCE_STAGES = new Set<TrainingStage>([
@@ -58,6 +61,7 @@ export default function TrainingSession({
   devMode = true,
   initialState,
   onStateChange,
+  voiceEnabled = true,
 }: TrainingSessionProps) {
   const isDevelopment = import.meta.env.DEV && devMode
   const initialDevStage = getDevStageOverride(
@@ -75,8 +79,8 @@ export default function TrainingSession({
       ? { stage: initialDevStage, sentenceIndex: 0, revision: 0 }
       : null,
   )
-  const [configuredVoiceProvider] = useState(
-    createConfiguredRealtimeDialogueProvider,
+  const [configuredVoiceProvider] = useState(() =>
+    voiceEnabled ? createConfiguredRealtimeDialogueProvider() : undefined,
   )
   const {
     state,
@@ -337,7 +341,7 @@ export default function TrainingSession({
         key={`live-dialogue-${devOverride?.revision ?? 0}`}
         lesson={lesson}
         provider={liveDialogueProvider}
-        voiceProvider={voiceLiveDialogueProvider ?? configuredVoiceProvider}
+        voiceProvider={voiceEnabled ? voiceLiveDialogueProvider ?? configuredVoiceProvider : undefined}
         onComplete={advanceOneStage}
       />
     )

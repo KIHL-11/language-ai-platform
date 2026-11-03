@@ -83,6 +83,8 @@ export interface LibraryItem {
   persistent_audio: PersistentAudio
   listening_progress: ListeningProgress
   shadowing_progress: ShadowingProgress
+  // Cloud only: optimistic-concurrency revision for progress writes.
+  revision?: number
 }
 
 export interface LibraryItemSummary {

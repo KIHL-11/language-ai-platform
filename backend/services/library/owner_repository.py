@@ -53,11 +53,21 @@ class OwnerScopedLibraryRepository(Protocol):
     ) -> LibraryItem: ...
 
     def update_progress_for_owner(
-        self, owner_user_id: str, item_id: str, progress_value: Any
+        self,
+        owner_user_id: str,
+        item_id: str,
+        progress_value: Any,
+        *,
+        expected_revision: int,
     ) -> LibraryItem: ...
 
     def update_listening_progress_for_owner(
-        self, owner_user_id: str, item_id: str, progress_value: Any
+        self,
+        owner_user_id: str,
+        item_id: str,
+        progress_value: Any,
+        *,
+        expected_revision: int,
     ) -> LibraryItem: ...
 
     def delete_for_owner(self, owner_user_id: str, item_id: str) -> None: ...

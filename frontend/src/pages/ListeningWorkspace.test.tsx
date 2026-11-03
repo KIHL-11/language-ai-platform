@@ -388,4 +388,18 @@ describe('Listening Workspace', () => {
     await act(async () => { await Promise.resolve() })
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/listening-progress')).length).toBeLessThanOrEqual(1)
   })
+
+  it('keeps the Personal Desktop write contract: plain PATCH, no revision, study features on', async () => {
+    const user = userEvent.setup()
+    setup()
+    await user.click(await screen.findByRole('button', { name: 'Blind' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/listening-progress'))).toBe(true))
+    const [, init] = fetchMock.mock.calls.find(([url]) => String(url).includes('/listening-progress'))!
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body).not.toHaveProperty('expected_revision')
+    expect(body).toMatchObject({ mode: 'blind' })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/study-candidates'))).toBe(true)
+    expect(screen.getByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
+  })
 })

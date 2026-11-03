@@ -47,6 +47,16 @@ class LibraryItem(LibraryModel):
     shadowing_progress: ShadowingProgress = Field(default_factory=ShadowingProgress)
 
 
+class CloudLibraryItem(LibraryItem):
+    """Cloud item with its optimistic-concurrency revision.
+
+    A subclass, not a field on LibraryItem, so the Personal Desktop JSON
+    file keeps its exact shape.
+    """
+
+    revision: int = Field(ge=1)
+
+
 class LibraryItemSummary(LibraryModel):
     id: str
     lesson_id: str
@@ -86,10 +96,12 @@ class LibraryProgressRequest(LibraryModel):
     completed_stages: list[TrainingStage]
     training_order: list[TrainingStage]
     lesson_memory_imported: bool
+    # Required in cloud mode (409 without it); ignored by Personal Desktop.
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class ListeningProgressRequest(ListeningProgress):
-    pass
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class TranscriptRepairRequest(LibraryModel):
