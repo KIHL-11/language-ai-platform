@@ -131,7 +131,7 @@ export function CloudGuided({ item, generation, onBack }: { item: LibraryItem; g
   </section>
 }
 
-function CloudListening({ item, generation, onBack }: { item: LibraryItem; generation: number; onBack: () => void }) {
+function CloudListening({ item, generation, userId, onBack }: { item: LibraryItem; generation: number; userId: string; onBack: () => void }) {
   const [failure, setFailure] = useState<CloudSyncFailure | null>(null)
   const getSync = useCloudSync(item, generation, { onFailure: setFailure })
   // Stable: ListeningWorkspace flushes on every change of this function.
@@ -141,7 +141,7 @@ function CloudListening({ item, generation, onBack }: { item: LibraryItem; gener
   )
   return <>
     {failure && <p role="alert" className="mx-auto mt-4 max-w-5xl px-5 text-sm text-[#8f1d14]">{FAILURE_MESSAGES[failure]}</p>}
-    <ListeningWorkspace item={item} onBack={onBack} saveProgress={saveProgress} studyFeatures={false} dictionaryLookup />
+    <ListeningWorkspace item={item} onBack={onBack} saveProgress={saveProgress} studyFeatures={false} dictionaryLookup contextualOwnerId={userId} />
   </>
 }
 
@@ -201,7 +201,7 @@ export default function CloudLibrary({ generation, userId }: { generation: numbe
     </main>
   }
   if (view.kind === 'listening') {
-    return <CloudListening key={view.item.id} item={view.item} generation={generation} onBack={() => void open(view.item.id, 'detail')} />
+    return <CloudListening key={view.item.id} item={view.item} generation={generation} userId={userId} onBack={() => void open(view.item.id, 'detail')} />
   }
 
   return <main className="mx-auto max-w-5xl px-5 py-6">

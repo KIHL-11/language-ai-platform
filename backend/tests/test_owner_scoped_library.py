@@ -519,21 +519,30 @@ def test_cloud_requests_do_not_mutate_personal_json_or_claim_unowned_media(
 
 
 @pytest.mark.parametrize(
-    "path",
+    "path,code",
     [
-        "/api/library/items/not-owned/study-candidates?user_id=synthetic-owner-a",
-        "/api/library/items/not-owned/study-bank/words/status"
-        "?user_id=synthetic-owner-a&sentence_id=1&word=tenant",
+        # Still unmigrated: study candidates read the Personal stores.
+        (
+            "/api/library/items/not-owned/study-candidates?user_id=synthetic-owner-a",
+            "cloud_tenant_storage_not_configured",
+        ),
+        # Migrated in B-4 to the owner's PostgreSQL Study Bank: without that
+        # repository configured it still fails closed.
+        (
+            "/api/library/items/not-owned/study-bank/words/status"
+            "?user_id=synthetic-owner-a&sentence_id=1&word=tenant",
+            "cloud_study_bank_storage_not_configured",
+        ),
     ],
 )
-def test_unmigrated_library_provenance_routes_remain_fail_closed(
-    path, postgres_repository
+def test_library_provenance_routes_fail_closed_without_cloud_storage(
+    path, code, postgres_repository
 ):
     with _as_owner(OWNER_A, postgres_repository):
         response = client.get(path)
 
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "cloud_tenant_storage_not_configured"
+    assert response.json()["detail"]["code"] == code
 
 
 def test_no_local_to_cloud_import_endpoint_is_exposed():

@@ -35,6 +35,11 @@ interface AnchoredDictionarySelection {
   anchor: HTMLButtonElement
 }
 
+// Only a known owner makes a word selection contextual (Save Word/status).
+function contextualFor(libraryItemId: string, owner: string | undefined) {
+  return owner ? { libraryItemId, learnerId: owner } : {}
+}
+
 function formatTime(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
@@ -60,8 +65,12 @@ interface ListeningWorkspaceProps {
   // routes until cloud Study Bank provenance lands (B-4).
   studyFeatures?: boolean
   // Clicking a word opens the dictionary. Cloud turns this on without study
-  // features: the panel then shows the entry but offers no Study Bank save.
+  // features (no Words & Chunks candidates).
   dictionaryLookup?: boolean
+  // Cloud: the session owner. Turns on the dictionary panel's Save Word,
+  // saved status and Restore against the owner's cloud Study Bank; the
+  // server derives lemma, meaning and provenance itself.
+  contextualOwnerId?: string
 }
 
 export default function ListeningWorkspace({
@@ -72,6 +81,7 @@ export default function ListeningWorkspace({
   saveProgress,
   studyFeatures = true,
   dictionaryLookup = studyFeatures,
+  contextualOwnerId,
 }: ListeningWorkspaceProps) {
   const sentences = useMemo(() => practiceableSentences(item.lesson.sentences), [item.lesson.sentences])
   const restoredIndex = item.listening_progress.current_sentence_id === null
@@ -432,7 +442,7 @@ export default function ListeningWorkspace({
           <div className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
             <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(sentences.length).padStart(2, '0')}</p>
             {currentSentence ? <>
-              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} {...(studyFeatures ? { libraryItemId: item.id, learnerId } : {})} sentenceId={currentSentence.id} onLookup={openDictionary} /> : currentSentence.text}</p>
+              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} {...contextualFor(item.id, studyFeatures ? learnerId : contextualOwnerId)} sentenceId={currentSentence.id} onLookup={openDictionary} /> : currentSentence.text}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
               {mode === 'blind' && <button type="button" onClick={() => setBlindRevealed((value) => !value)} className="mt-3 text-sm font-semibold text-[#176b5b]">{blindRevealed ? 'Hide again' : 'Reveal text'}</button>}
               {onShadowing && <button type="button" onClick={() => onShadowing(currentSentence.id)} className="mt-3 ml-3 text-sm font-semibold text-[#176b5b]">Practice Sync Shadowing</button>}
@@ -475,7 +485,7 @@ export default function ListeningWorkspace({
               const active = index === currentIndex
               return <li ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} key={sentence.id} aria-current={active ? 'true' : undefined} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
                 <button type="button" aria-label={`Seek to ${sentence.text}`} onClick={() => selectSentence(index)} className="block text-xs tabular-nums text-[#66726e] hover:underline focus-visible:outline-2 focus-visible:outline-[#176b5b]">{formatTime(sentence.start)}</button>
-                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} {...(studyFeatures ? { libraryItemId: item.id, learnerId } : {})} sentenceId={sentence.id} onLookup={openDictionary} /> : sentence.text}</span>
+                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} {...contextualFor(item.id, studyFeatures ? learnerId : contextualOwnerId)} sentenceId={sentence.id} onLookup={openDictionary} /> : sentence.text}</span>
                 <span className={`mt-1 block text-sm ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : sentence.translation}</span>
               </li>
             })}

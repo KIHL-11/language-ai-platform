@@ -2,7 +2,7 @@ import re
 import unicodedata
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from services.auth.identity import PersonalStorageDependency, owner_user_id
 from services.library.store import LibraryStoreError
@@ -26,6 +26,8 @@ from services.study_bank.contextual_words import (
     ContextualDictionaryUnavailableError,
     ContextualWordError,
     ContextualWordService,
+    OwnerLibraryView,
+    OwnerStudyBankView,
 )
 from services.study_bank.candidates import generate_candidates
 from services.study_bank.store import (
@@ -38,6 +40,10 @@ from services.study_bank.access import StudyBankAccessDependency
 from services.study_bank.postgres import (
     CloudStudyBankUnavailableError,
     StudyBankOwnerNotProvisionedError,
+)
+from services.library.postgres import (
+    CloudLibraryUnavailableError,
+    OwnerNotProvisionedError as CloudLibraryOwnerNotProvisionedError,
 )
 
 
@@ -69,9 +75,45 @@ def _contextual_word_service() -> ContextualWordService:
     )
 
 
-def _contextual_input(item_id: str, user_id: str, sentence_id: int, word: str):
+def _cloud_contextual_word_service(http_request: Request, access) -> ContextualWordService:
+    """Cloud M5.2: the owner's PostgreSQL Library and Study Bank plus the
+    cloud dictionary. Never the Personal JSON stores or local dictionary."""
+    from services.api import dictionary_api
+
+    if access.repository is None or access.library_repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "cloud_study_bank_storage_not_configured",
+                "message": "Cloud Study Bank storage is not configured.",
+            },
+        )
+    dictionary = dictionary_api._cloud_dictionary(http_request, access.identity)
+    return ContextualWordService(
+        OwnerLibraryView(access.library_repository, access.owner_user_id),
+        OwnerStudyBankView(access.repository, access.owner_user_id),
+        dictionary,
+    )
+
+
+def _contextual_access(http_request: Request, access, claimed_user_id: str):
+    """(owner, service): the session owner and the service for this mode.
+    The client's user_id must equal the session owner in cloud (403)."""
+    owner = owner_user_id(access.identity, claimed_user_id)
+    if not access.is_cloud:
+        return owner, _contextual_word_service()
+    return owner, _cloud_contextual_word_service(http_request, access)
+
+
+def _contextual_input(
+    item_id: str,
+    user_id: str,
+    sentence_id: int,
+    word: str,
+    service: ContextualWordService | None = None,
+):
     try:
-        return _contextual_word_service().build_input(
+        return (service or _contextual_word_service()).build_input(
             item_id, user_id, sentence_id, word
         )
     except KeyError as exc:
@@ -80,6 +122,16 @@ def _contextual_input(item_id: str, user_id: str, sentence_id: int, word: str):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ContextualDictionaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except CloudLibraryOwnerNotProvisionedError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "cloud_owner_not_provisioned", "message": "The authenticated cloud account is not provisioned."},
+        ) from exc
+    except CloudLibraryUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "cloud_tenant_storage_unavailable", "message": "Cloud tenant Library storage is unavailable."},
+        ) from exc
     except LibraryStoreError as exc:
         raise HTTPException(status_code=500, detail="Could not read Learning Library") from exc
 
@@ -105,6 +157,12 @@ def _store_error(operation):
         ) from exc
     except StudyBankStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _contextual_store(access, operation):
+    """Cloud storage errors use the cloud Study Bank mapping (404/422/409/503);
+    Personal keeps the M5.2 mapping unchanged."""
+    return _store_error(operation) if access.is_cloud else _contextual_store_error(operation)
 
 
 def _contextual_store_error(operation):
@@ -151,10 +209,12 @@ def contextual_word_status(
     user_id: Annotated[str, Query(min_length=1, max_length=128)],
     sentence_id: Annotated[int, Query(gt=0)],
     word: Annotated[str, Query(min_length=1, max_length=100)],
-    _storage: PersonalStorageDependency,
+    access: StudyBankAccessDependency,
+    http_request: Request,
 ):
-    value = _contextual_input(item_id, user_id, sentence_id, word)
-    item = _contextual_store_error(lambda: _contextual_word_service().status(value))
+    owner, service = _contextual_access(http_request, access, user_id)
+    value = _contextual_input(item_id, owner, sentence_id, word, service)
+    item = _contextual_store(access, lambda: service.status(value))
     if item is None:
         return ContextualWordStatusResult(status="unsaved")
     return ContextualWordStatusResult(
@@ -170,12 +230,15 @@ def contextual_word_status(
 def save_contextual_word(
     item_id: str,
     request: ContextualWordSaveRequest,
-    _storage: PersonalStorageDependency,
+    access: StudyBankAccessDependency,
+    http_request: Request,
 ):
-    value = _contextual_input(
-        item_id, request.user_id, request.sentence_id, request.word
-    )
-    item, created = _contextual_store_error(lambda: _contextual_word_service().save(value))
+    owner, service = _contextual_access(http_request, access, request.user_id)
+    # The server derives lemma, meaning and provenance from the authorized
+    # Library sentence and dictionary; the client names only item, sentence
+    # and surface word.
+    value = _contextual_input(item_id, owner, request.sentence_id, request.word, service)
+    item, created = _contextual_store(access, lambda: service.save(value))
     return ContextualWordSaveResult(item=item, created=created)
 
 

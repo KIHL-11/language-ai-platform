@@ -112,3 +112,33 @@ class ContextualWordService:
     def save(self, value: StudyItemInput) -> tuple[StudyItem, bool]:
         items, created = self.study_bank.save_items([value])
         return items[0], created == 1
+
+
+class OwnerLibraryView:
+    """The narrow Library read ContextualWordService needs, bound to one
+    trusted owner: an unknown or other-owner item is a KeyError (404)."""
+
+    def __init__(self, repository, owner_user_id: str):
+        self._repository = repository
+        self._owner = owner_user_id
+
+    def get_item(self, library_item_id: str) -> LibraryItem:
+        return self._repository.get_for_owner(self._owner, library_item_id)
+
+
+class OwnerStudyBankView:
+    """The narrow Study Bank surface ContextualWordService needs, bound to
+    one trusted owner of the PostgreSQL repository. It refuses any value that
+    names another user, so a client user_id can never redirect a write."""
+
+    def __init__(self, repository, owner_user_id: str):
+        self._repository = repository
+        self._owner = owner_user_id
+
+    def list_items(self, user_id: str, active: bool | None = None) -> list[StudyItem]:
+        if user_id != self._owner:
+            raise ValueError("Study Bank owner does not match authenticated account")
+        return self._repository.list_items(self._owner, kind="word", active=active)
+
+    def save_items(self, values: list[StudyItemInput]) -> tuple[list[StudyItem], int]:
+        return self._repository.save_items_for_owner(self._owner, values)
