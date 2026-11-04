@@ -149,6 +149,16 @@ there is no cloud path to the Personal stores, no forgery, and that the
 | Low | concurrency test mutated app state per thread | one override around the pool |
 | Low | no in-flight account-switch or cap test | both added |
 
+The re-review of `43b3464` found nothing at Medium or above. Two notes
+remain open and are not blocking:
+- **Low:** the ambiguity check compares every candidate lemma, not only the
+  tied ones. A word whose chosen lemma has two tied senses, while another
+  lemma ranked lower, is refused although its identity is clear. That fails
+  safe (refused, not merged) and is left to DQ-03, since fixing it needs the
+  dictionary service to expose the tied set.
+- **Pre-existing:** in cloud status, a row that fails validation would echo
+  pydantic's error text in a 422.
+
 ## Not covered (next increments)
 
 - **B-5:** Daily Review concurrency across tabs, and each learner's time zone.
