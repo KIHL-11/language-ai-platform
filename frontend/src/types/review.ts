@@ -14,6 +14,8 @@ export interface ReviewFilters {
   userId: string
   language?: SourceLanguage
   kind?: StudyKind
+  // Cloud: the learner's IANA time zone; new cards become a per-local-day quota.
+  timeZone?: string
 }
 
 export interface ReviewRatingResult {

@@ -31,6 +31,7 @@ function params(filters: ReviewFilters): URLSearchParams {
   const result = new URLSearchParams({ user_id: filters.userId })
   if (filters.language) result.set('language', filters.language)
   if (filters.kind) result.set('kind', filters.kind)
+  if (filters.timeZone) result.set('time_zone', filters.timeZone)
   return result
 }
 

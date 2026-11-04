@@ -9,6 +9,7 @@ from services.review.service import (
     DEFAULT_SESSION_LIMIT,
     MAX_SESSION_LIMIT,
     ReviewService,
+    parse_time_zone,
 )
 from services.schemas.lesson import SourceLanguage
 from services.schemas.review import (
@@ -77,8 +78,16 @@ def review_queue(
     kind: Literal["word", "chunk"] | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_SESSION_LIMIT)] = DEFAULT_SESSION_LIMIT,
     new_limit: Annotated[int, Query(ge=0, le=MAX_SESSION_LIMIT)] = DEFAULT_NEW_LIMIT,
+    # The learner's IANA time zone (B-5). In cloud, new_limit then becomes a
+    # quota per local calendar day; Personal ignores it.
+    time_zone: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ):
     user_id = owner_user_id(access.identity, user_id)
+    if time_zone is not None:
+        try:
+            parse_time_zone(time_zone)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     store = _store_for_access(access)
     try:
         return ReviewQueue(items=_service(store).queue(
@@ -87,6 +96,7 @@ def review_queue(
             kind=kind,
             limit=limit,
             new_limit=new_limit,
+            time_zone=time_zone,
         ))
     except StudyBankStoreError as exc:
         raise _review_error(exc) from exc

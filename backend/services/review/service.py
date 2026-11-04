@@ -1,5 +1,6 @@
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from services.schemas.review import ReviewSummary
 from services.schemas.study_bank import ReviewRating, StudyItem
@@ -10,6 +11,32 @@ from services.study_bank.store import utc_now
 DEFAULT_SESSION_LIMIT = 20
 DEFAULT_NEW_LIMIT = 10
 MAX_SESSION_LIMIT = 100
+
+
+def parse_time_zone(name: str) -> ZoneInfo:
+    """A learner's IANA time zone (for example "Europe/Berlin"); ValueError
+    for anything else, including offsets and abbreviations."""
+    if not name or len(name) > 64 or name.startswith(("/", ".")) or ".." in name:
+        raise ValueError("time_zone must be an IANA time zone name")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("time_zone must be an IANA time zone name") from exc
+
+
+def local_day_bounds(now: datetime, zone: ZoneInfo) -> tuple[datetime, datetime]:
+    """The learner-local calendar day containing ``now``, as a UTC half-open
+    interval. Each midnight is resolved on its own, so a day is 23 or 25
+    hours across a DST change. Where a transition skips local midnight (for
+    example America/Santiago), zoneinfo resolves the missing 00:00 with the
+    pre-transition offset, which is exactly the transition instant, so the
+    day starts at the first local time that exists."""
+    local_date = now.astimezone(zone).date()
+
+    def start_of(day) -> datetime:
+        return datetime.combine(day, time(0), tzinfo=zone).astimezone(timezone.utc)
+
+    return start_of(local_date), start_of(local_date + timedelta(days=1))
 
 
 class ReviewService:
@@ -42,6 +69,7 @@ class ReviewService:
         kind: str | None = None,
         limit: int = DEFAULT_SESSION_LIMIT,
         new_limit: int = DEFAULT_NEW_LIMIT,
+        time_zone: str | None = None,
     ) -> list[StudyItem]:
         if not 1 <= limit <= MAX_SESSION_LIMIT:
             raise ValueError(f"limit must be between 1 and {MAX_SESSION_LIMIT}")
@@ -66,7 +94,9 @@ class ReviewService:
             (item for item in items if item.review.review_count == 0),
             key=lambda item: (item.created_at, item.id),
         )
-        return selected + new[:min(remaining, new_limit)]
+        return selected + new[:min(remaining, self._new_today(
+            user_id, now, new_limit, time_zone, kind=kind, language=language,
+        ))]
 
     def rate(
         self,
@@ -81,6 +111,17 @@ class ReviewService:
             rating,
             expected_review_count,
         )
+
+    def _new_today(self, user_id, now, new_limit, time_zone, *, kind, language) -> int:
+        """New cards still allowed today. With a learner time zone and a store
+        that records first reviews (cloud), new_limit is a daily quota across
+        sessions and tabs; otherwise (Personal) it stays per session."""
+        count = getattr(self.store, "count_first_reviews", None)
+        if time_zone is None or not callable(count):
+            return new_limit
+        start, end = local_day_bounds(now, parse_time_zone(time_zone))
+        introduced = count(user_id, start, end, kind=kind, language=language)
+        return max(0, new_limit - introduced)
 
     def _now(self) -> datetime:
         value = self.clock()

@@ -7,6 +7,7 @@ import {
   ReviewApiError,
 } from '../api/review'
 import { getSessionLearnerId } from '../auth/identity'
+import { cloudAuth, CloudConflictError } from '../auth/client'
 import { formatNextReview } from '../review/formatNextReview'
 import type { SourceLanguage } from '../types/lesson'
 import type { ReviewRating, ReviewSummary } from '../types/review'
@@ -20,6 +21,18 @@ function promptFor(item: StudyItem): string {
   const translation = item.provenance.find((source) => source.source_type === 'media' && source.sentence_translation.trim())
   if (translation?.source_type === 'media') return translation.sentence_translation
   return `Recall this saved ${item.kind}.`
+}
+
+// Cloud sends the browser's IANA time zone so the daily new-card quota
+// follows the learner's calendar; Personal requests are unchanged.
+function learnerTimeZone(): { timeZone?: string } {
+  if (cloudAuth.getSnapshot().status !== 'authenticated') return {}
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return timeZone ? { timeZone } : {}
+  } catch {
+    return {}
+  }
 }
 
 export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: SourceLanguage, targetIds: string[]) => void }) {
@@ -41,6 +54,7 @@ export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: Sour
     userId: learnerId,
     ...(language === 'all' ? {} : { language }),
     ...(kind === 'all' ? {} : { kind }),
+    ...learnerTimeZone(),
   }
 
   async function refreshSummary() {
@@ -106,7 +120,10 @@ export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: Sour
       setRevealed(false)
       if (index + 1 >= cards.length) await refreshSummary()
     } catch (caught) {
-      if (caught instanceof ReviewApiError && caught.status === 409) {
+      // Another tab rated this card first. In cloud the client raises
+      // CloudConflictError; an identity change is a different 409 and the
+      // workspace remounts, so it is not treated as a card conflict.
+      if (caught instanceof CloudConflictError || (caught instanceof ReviewApiError && caught.status === 409)) {
         setError('This card changed elsewhere. The review queue has been refreshed.')
         try {
           const queue = await getReviewQueue(filters)

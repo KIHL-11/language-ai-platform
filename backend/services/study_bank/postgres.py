@@ -333,6 +333,7 @@ class PostgresOwnerScopedStudyBankRepository:
                         repetition_count=%s, lapse_count=%s, review_count=%s,
                         again_count=%s, hard_count=%s, good_count=%s, easy_count=%s,
                         last_reviewed_at=%s, last_rating=%s, updated_at=%s,
+                        first_reviewed_at=COALESCE(first_reviewed_at, %s),
                         revision=revision + 1
                     WHERE owner_user_id=%s AND item_id=%s
                     RETURNING *
@@ -342,11 +343,47 @@ class PostgresOwnerScopedStudyBankRepository:
                         review.repetition_count, review.lapse_count, review.review_count,
                         review.again_count, review.hard_count, review.good_count,
                         review.easy_count, review.last_reviewed_at, review.last_rating,
-                        now, owner_user_id, item_id,
+                        # Only a first rating sets it (B-5 daily new-card quota).
+                        now, now if item.review.review_count == 0 else None,
+                        owner_user_id, item_id,
                     ),
                 ).fetchone()
                 return self._row_to_item(updated), previous_due
         except (KeyError, StudyBankConflictError, StudyBankOwnerNotProvisionedError):
+            raise
+        except psycopg.Error as exc:
+            raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
+    def count_first_reviews(
+        self,
+        owner_user_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        kind: str | None = None,
+        language: str | None = None,
+    ) -> int:
+        """Cards whose first rating fell in [start, end): new cards already
+        introduced during one learner-local day."""
+        self._validate_owner(owner_user_id)
+        clauses = ["owner_user_id = %s", "first_reviewed_at >= %s", "first_reviewed_at < %s"]
+        values: list[object] = [owner_user_id, start, end]
+        if kind is not None:
+            clauses.append("kind = %s")
+            values.append(kind)
+        if language is not None:
+            clauses.append("source_language = %s")
+            values.append(language)
+        try:
+            with self._connect() as connection:
+                self._set_owner_context(connection, owner_user_id)
+                self._assert_owner_provisioned(connection, owner_user_id)
+                row = connection.execute(
+                    f"SELECT count(*) AS total FROM cloud_study_items WHERE {' AND '.join(clauses)}",
+                    values,
+                ).fetchone()
+                return int(row["total"])
+        except StudyBankOwnerNotProvisionedError:
             raise
         except psycopg.Error as exc:
             raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc

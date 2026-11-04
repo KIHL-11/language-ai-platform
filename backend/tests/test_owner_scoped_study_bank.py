@@ -129,6 +129,7 @@ def cloud_repositories(tmp_path):
     _migration(dsn, "0001_owner_scoped_library.up.sql")
     _migration(dsn, "0010_library_media_cleanup_worker.up.sql")
     _migration(dsn, "0002_owner_scoped_study_bank.up.sql")
+    _migration(dsn, "0012_review_first_reviewed_at.up.sql")
     with psycopg.connect(dsn) as connection:
         connection.cursor().executemany(
             "INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s)",
@@ -188,6 +189,7 @@ def test_migration_is_reversible_and_constraints_are_owner_scoped():
     _migration(dsn, "0001_owner_scoped_library.up.sql")
     _migration(dsn, "0010_library_media_cleanup_worker.up.sql")
     _migration(dsn, "0002_owner_scoped_study_bank.up.sql")
+    _migration(dsn, "0012_review_first_reviewed_at.up.sql")
     with psycopg.connect(dsn) as connection:
         constraints = {
             row[0] for row in connection.execute(
