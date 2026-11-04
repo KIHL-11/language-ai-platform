@@ -20,10 +20,17 @@ class ContextualWordService:
         library: LearningLibraryStore,
         study_bank: StudyBankStore,
         dictionary: DictionaryService,
+        *,
+        cloud: bool = False,
     ):
         self.library = library
         self.study_bank = study_bank
         self.dictionary = dictionary
+        # Cloud (B-4) is stricter than Personal M5.2, which keeps its
+        # behaviour: an ambiguous lookup whose candidates are different
+        # lemmas has no safe card identity, so saving it is refused rather
+        # than merging unrelated words.
+        self.cloud = cloud
 
     @staticmethod
     def _sentence(item: LibraryItem, sentence_id: int):
@@ -70,6 +77,14 @@ class ContextualWordService:
             raise ContextualWordError("No source-grounded dictionary entry was found")
         if entry.language != item.lesson.source_language:
             raise ContextualWordError("Dictionary entry language does not match the Library item")
+        if (
+            self.cloud
+            and entry.status == "ambiguous"
+            and len({value.casefold() for value in entry.lemma_candidates}) > 1
+        ):
+            raise ContextualWordError(
+                "ambiguous_lemma: this form matches several dictionary words in this sentence"
+            )
         chinese = entry.explanations.chinese
         meaning = (
             chinese.value
@@ -101,6 +116,10 @@ class ContextualWordService:
 
     def status(self, value: StudyItemInput) -> StudyItem | None:
         _, identity = normalized_identity(value)
+        find = getattr(self.study_bank, "find_by_identity", None)
+        if callable(find):
+            # Exactly the card a save would write to (includes target language).
+            return find(value, identity)
         return next((
             item
             for item in self.study_bank.list_items(value.user_id, active=None)
@@ -112,3 +131,44 @@ class ContextualWordService:
     def save(self, value: StudyItemInput) -> tuple[StudyItem, bool]:
         items, created = self.study_bank.save_items([value])
         return items[0], created == 1
+
+
+class OwnerLibraryView:
+    """The narrow Library read ContextualWordService needs, bound to one
+    trusted owner: an unknown or other-owner item is a KeyError (404)."""
+
+    def __init__(self, repository, owner_user_id: str):
+        self._repository = repository
+        self._owner = owner_user_id
+
+    def get_item(self, library_item_id: str) -> LibraryItem:
+        return self._repository.get_for_owner(self._owner, library_item_id)
+
+
+class OwnerStudyBankView:
+    """The narrow Study Bank surface ContextualWordService needs, bound to
+    one trusted owner of the PostgreSQL repository. It refuses any value that
+    names another user, so a client user_id can never redirect a write."""
+
+    def __init__(self, repository, owner_user_id: str):
+        self._repository = repository
+        self._owner = owner_user_id
+
+    def list_items(self, user_id: str, active: bool | None = None) -> list[StudyItem]:
+        if user_id != self._owner:
+            raise ValueError("Study Bank owner does not match authenticated account")
+        return self._repository.list_items(self._owner, kind="word", active=active)
+
+    def save_items(self, values: list[StudyItemInput]) -> tuple[list[StudyItem], int]:
+        return self._repository.save_items_for_owner(self._owner, values)
+
+    def find_by_identity(self, value: StudyItemInput, identity: str) -> StudyItem | None:
+        if value.user_id != self._owner:
+            raise ValueError("Study Bank owner does not match authenticated account")
+        return self._repository.get_by_identity(
+            self._owner,
+            kind=value.kind,
+            source_language=value.source_language,
+            target_language=value.target_language,
+            normalized_text=identity,
+        )

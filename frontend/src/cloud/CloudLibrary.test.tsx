@@ -6,6 +6,7 @@ import { cloudAuth } from '../auth/client'
 import { CloudSessionProvider } from '../auth/CloudSessionProvider'
 import { libraryItem, librarySummary } from '../testFixtures/libraryItem'
 import { dictionaryEntry } from '../testFixtures/dictionary'
+import { studyItem } from '../testFixtures/studyBank'
 import type { LibraryItem, LibraryProgress } from '../types/library'
 
 vi.mock('../api/apiBase', () => ({ API_BASE_URL: '' }))
@@ -314,27 +315,154 @@ describe('Cloud Library learning', () => {
       status, headers: { 'X-Authenticated-User': 'owner-a' },
     }))
 
-    it('looks up a subtitle word through the session client, with no Study Bank save', async () => {
-      const { fetchMock } = cloudServer()
-      const lookups: Array<{ body: Record<string, unknown>; csrf: string | null }> = []
-      route(fetchMock, (url, init) => url === '/api/dictionary/lookup'
-        ? (lookups.push({ body: JSON.parse(String(init.body)), csrf: new Headers(init.headers).get('X-CSRF-Token') }),
-          owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence' }))
-        : null)
-      const user = userEvent.setup()
+    function wordRoutes(fetchMock: ReturnType<typeof vi.fn>, initial: 'unsaved' | 'archived') {
+      const calls: Array<{ url: string; method: string; body: Record<string, unknown> | null; csrf: string | null }> = []
+      const card = { ...studyItem, id: 'study-word-1', text: 'Sentence', lemma: 'sentence', normalized_text: 'sentence', revision: 4,
+        active: initial !== 'archived' }
+      route(fetchMock, (url, init) => {
+        const method = (init.method ?? 'GET').toUpperCase()
+        const body = init.body ? JSON.parse(String(init.body)) : null
+        if (url === '/api/dictionary/lookup') return owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence' })
+        if (!/study-bank/.test(url)) return null
+        calls.push({ url, method, body, csrf: new Headers(init.headers).get('X-CSRF-Token') })
+        if (url.includes('/study-bank/words/status')) {
+          return owned(initial === 'archived' ? { status: 'archived', item: card } : { status: 'unsaved', item: null })
+        }
+        if (url.endsWith('/study-bank/words') && method === 'POST') return owned({ item: { ...card, active: true }, created: true })
+        if (url.startsWith('/api/study-bank/items/study-word-1') && method === 'PATCH') return owned({ ...card, active: true, revision: 5 })
+        return null
+      })
+      return calls
+    }
+
+    async function openWord(user: ReturnType<typeof userEvent.setup>) {
       await openLesson(user)
       await user.click(screen.getByRole('button', { name: 'Open listening' }))
-      const before = fetchMock.mock.calls.length
-
       await user.click((await screen.findAllByRole('button', { name: 'Look up Sentence' }))[0])
+      return screen.findByRole('dialog')
+    }
 
-      expect(await screen.findByRole('dialog')).toBeInTheDocument()
-      expect(lookups[0]).toMatchObject({ body: { language: 'en', word: 'Sentence' }, csrf: 'a'.repeat(64) })
-      const since = fetchMock.mock.calls.slice(before).map(([url]) => String(url))
-      expect(since.filter((url) => /study|contextual|chunks\/memory/.test(url))).toEqual([])
-      expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
-      // No Study Bank section at all (B-4), not even a status check.
-      expect(screen.queryByText(/Saved status|Checking saved status|Previously Saved|Save Failed/)).not.toBeInTheDocument()
+    it('saves a subtitle word to the cloud Study Bank as the session owner (B-4)', async () => {
+      const { fetchMock } = cloudServer()
+      const calls = wordRoutes(fetchMock, 'unsaved')
+      localStorage.clear()
+      const user = userEvent.setup()
+      await openWord(user)
+
+      await user.click(await screen.findByRole('button', { name: 'Save Word' }))
+
+      expect(await screen.findByText('Saved')).toBeInTheDocument()
+      const status = calls.find((call) => call.url.includes('/study-bank/words/status'))!
+      const save = calls.find((call) => call.method === 'POST' && call.url.endsWith('/study-bank/words'))!
+      expect(status.url).toMatch(new RegExp(`^${ITEM_URL}/study-bank/words/status\\?`))
+      expect(new URL(status.url, 'https://learn.example').searchParams.get('user_id')).toBe('owner-a')
+      expect(save).toMatchObject({ url: `${ITEM_URL}/study-bank/words`, method: 'POST', csrf: 'a'.repeat(64) })
+      // The client names only the sentence and surface word; never lemma,
+      // meaning, provenance or a local learner id.
+      expect(Object.keys(save.body ?? {}).sort()).toEqual(['sentence_id', 'user_id', 'word'])
+      expect(save.body).toMatchObject({ user_id: 'owner-a', word: 'Sentence' })
+      expect(localStorage.getItem('language_ai_learner_id_v1')).toBeNull()
+    })
+
+    it('an archived word offers an explicit Restore with its revision, never an implicit save', async () => {
+      const { fetchMock } = cloudServer()
+      const calls = wordRoutes(fetchMock, 'archived')
+      const user = userEvent.setup()
+      await openWord(user)
+
+      await user.click(await screen.findByRole('button', { name: /restore/i }))
+
+      expect(await screen.findByText('Saved')).toBeInTheDocument()
+      expect(calls.filter((call) => call.method === 'POST')).toEqual([])
+      const restore = calls.find((call) => call.method === 'PATCH')!
+      expect(restore.body).toEqual({ active: true, expected_revision: 4 })
+      expect(new URL(restore.url, 'https://learn.example').searchParams.get('user_id')).toBe('owner-a')
+    })
+
+    it('drops a word\'s saved state when the account changes', async () => {
+      const { fetchMock, state } = cloudServer()
+      const calls = wordRoutes(fetchMock, 'unsaved')
+      const user = userEvent.setup()
+      await openWord(user)
+      await screen.findByRole('button', { name: 'Save Word' })
+      const before = calls.length
+
+      state.owner = 'owner-b'
+      await act(() => cloudAuth.refresh())
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Save Word' })).not.toBeInTheDocument()
+      expect(calls.slice(before).filter((call) => call.url.includes('user_id=owner-a') || call.body?.user_id === 'owner-a')).toEqual([])
+    })
+
+    it('offers no Save Word when the form matches several lemmas (review M1)', async () => {
+      const { fetchMock } = cloudServer()
+      const calls = wordRoutes(fetchMock, 'unsaved')
+      route(fetchMock, (url) => url === '/api/dictionary/lookup'
+        ? owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence', status: 'ambiguous', lemma_candidates: ['leaf', 'leave'] })
+        : null)
+      const user = userEvent.setup()
+      await openWord(user)
+
+      expect(await screen.findByText(/matches several dictionary words/)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Save Word' })).not.toBeInTheDocument()
+      expect(calls.filter((call) => call.url.includes('/study-bank/words'))).toEqual([])
+    })
+
+    it('reloads a word changed elsewhere before restoring it (review L2)', async () => {
+      const { fetchMock } = cloudServer()
+      let statusCalls = 0
+      const patches: Array<Record<string, unknown>> = []
+      const card = { ...studyItem, id: 'study-word-1', text: 'Sentence', active: false, revision: 4 }
+      route(fetchMock, (url, init) => {
+        if (url === '/api/dictionary/lookup') return owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence' })
+        if (url.includes('/study-bank/words/status')) {
+          statusCalls += 1
+          return owned({ status: 'archived', item: { ...card, revision: statusCalls === 1 ? 4 : 6 } })
+        }
+        if (url.startsWith('/api/study-bank/items/study-word-1') && init.method === 'PATCH') {
+          const body = JSON.parse(String(init.body))
+          patches.push(body)
+          return body.expected_revision === 6 ? owned({ ...card, active: true, revision: 7 }) : owned({ detail: 'stale' }, 409)
+        }
+        return null
+      })
+      const user = userEvent.setup()
+      await openWord(user)
+
+      await user.click(await screen.findByRole('button', { name: /restore/i }))
+      await waitFor(() => expect(statusCalls).toBe(2))
+      await user.click(await screen.findByRole('button', { name: /restore/i }))
+
+      expect(await screen.findByText('Saved')).toBeInTheDocument()
+      expect(patches.map((body) => body.expected_revision)).toEqual([4, 6])
+    })
+
+    it('never shows a word status that arrives after the account changed (review L4)', async () => {
+      const { fetchMock, state } = cloudServer()
+      let release!: () => void
+      route(fetchMock, (url) => {
+        if (url === '/api/dictionary/lookup') return owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence' })
+        if (url.includes('/study-bank/words/status')) {
+          return new Promise<Response>((done) => {
+            release = () => done(new Response(JSON.stringify({ status: 'archived', item: { ...studyItem, active: false } }), {
+              headers: { 'X-Authenticated-User': 'owner-a' },
+            }))
+          })
+        }
+        return null
+      })
+      const user = userEvent.setup()
+      await openWord(user)
+      await waitFor(() => expect(release).toBeTypeOf('function'))
+
+      state.owner = 'owner-b'
+      await act(() => cloudAuth.refresh())
+      await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 20)) })
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /restore/i })).not.toBeInTheDocument()
+      expect(screen.queryByText('Previously saved · Archived')).not.toBeInTheDocument()
     })
 
     it('finds chunks in the lesson with provenance, saves edits only, then accepts', async () => {

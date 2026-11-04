@@ -127,6 +127,33 @@ class PostgresOwnerScopedStudyBankRepository:
         except psycopg.Error as exc:
             raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
 
+    def get_by_identity(
+        self,
+        owner_user_id: str,
+        *,
+        kind: str,
+        source_language: str,
+        target_language: str,
+        normalized_text: str,
+    ) -> StudyItem | None:
+        """The one card a save with this identity would write to (the upsert's
+        unique key), or None. Uses the unique index, not a scan."""
+        self._validate_owner(owner_user_id)
+        try:
+            with self._connect() as connection:
+                self._set_owner_context(connection, owner_user_id)
+                self._assert_owner_provisioned(connection, owner_user_id)
+                row = connection.execute(
+                    f"{self._select_sql()} WHERE owner_user_id=%s AND kind=%s "
+                    "AND source_language=%s AND target_language=%s AND normalized_text=%s",
+                    (owner_user_id, kind, source_language, target_language, normalized_text),
+                ).fetchone()
+                return None if row is None else self._row_to_item(row)
+        except StudyBankOwnerNotProvisionedError:
+            raise
+        except psycopg.Error as exc:
+            raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
     def assert_readable(self) -> None:
         try:
             with self._connect() as connection:

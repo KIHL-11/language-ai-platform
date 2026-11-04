@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom'
 
 import { lookupDictionary, PronunciationSynthesisError, synthesizePronunciation } from '../api/dictionary'
+import { cloudAuth, CloudConflictError } from '../auth/client'
 import {
   getContextualWordStatus,
   saveContextualWord,
@@ -106,12 +107,18 @@ function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }
     loadSaveStatus()
   }
 
+  // Cloud refuses to save a form whose candidates are different lemmas (the
+  // card identity is undecided); Personal keeps its M5.2 behaviour.
+  const lemmaUndecided = cloudAuth.getSnapshot().status === 'authenticated' &&
+    entry?.status === 'ambiguous' &&
+    new Set(entry.lemma_candidates.map((value) => value.toLocaleLowerCase())).size > 1
+
   useEffect(() => {
-    if (!entry || !['found', 'ambiguous'].includes(entry.status) || !contextualSelection(selection)) return
+    if (!entry || !['found', 'ambiguous'].includes(entry.status) || !contextualSelection(selection) || lemmaUndecided) return
     const controller = new AbortController()
     loadSaveStatus(controller.signal)
     return () => controller.abort()
-  }, [entry, loadSaveStatus, selection])
+  }, [entry, lemmaUndecided, loadSaveStatus, selection])
 
   useEffect(() => {
     closeRef.current?.focus({ preventScroll: true })
@@ -256,8 +263,11 @@ function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }
       setStudyItem(restored)
       setSaveState('saved')
       onStudyItemSaved?.(restored)
-    } catch {
-      setSaveState('restore-error')
+    } catch (reason) {
+      // The card changed elsewhere (its revision moved): reload its state so
+      // a retry uses the current revision instead of failing forever.
+      if (reason instanceof CloudConflictError) retrySaveStatus()
+      else setSaveState('restore-error')
     }
   }
 
@@ -329,7 +339,8 @@ function DictionaryPanelContent({ selection, anchor, onClose, onStudyItemSaved }
       </div>
       {pronunciationError && <p role="alert" className="mt-2 text-xs text-[#8f1d14]">{pronunciationError}</p>}
 
-      {contextualSelection(selection) && <div className="mt-3 border-t border-[#dfe7e3] pt-3" aria-live="polite">
+      {contextualSelection(selection) && lemmaUndecided && <p role="status" className="mt-3 border-t border-[#dfe7e3] pt-3 text-xs text-[#66726e]">This form matches several dictionary words in this sentence, so it can&apos;t be saved yet.</p>}
+      {contextualSelection(selection) && !lemmaUndecided && <div className="mt-3 border-t border-[#dfe7e3] pt-3" aria-live="polite">
         {saveState === 'checking' && <p role="status" className="text-xs text-[#66726e]">Checking saved status…</p>}
         {saveState === 'unsaved' && <button type="button" onClick={() => void saveWord()} className="h-9 rounded-md bg-[#176b5b] px-3 text-sm font-semibold text-white">Save Word</button>}
         {saveState === 'saving' && <button type="button" disabled className="h-9 rounded-md bg-[#9aaba5] px-3 text-sm font-semibold text-white">Saving…</button>}
