@@ -56,9 +56,12 @@ interface ListeningWorkspaceProps {
   // picked a sentence since its last write, so a writer can keep another
   // tab's resume point when this one merely changed a setting or drifted.
   saveProgress?: (progress: ListeningProgress, meta: { ownsPosition: boolean }) => Promise<unknown>
-  // Dictionary lookups and Words & Chunks use Personal-only routes until the
-  // cloud dictionary and Study Bank provenance land (B-3/B-4).
+  // Words & Chunks (study candidates and saving words) use Personal-only
+  // routes until cloud Study Bank provenance lands (B-4).
   studyFeatures?: boolean
+  // Clicking a word opens the dictionary. Cloud turns this on without study
+  // features: the panel then shows the entry but offers no Study Bank save.
+  dictionaryLookup?: boolean
 }
 
 export default function ListeningWorkspace({
@@ -68,6 +71,7 @@ export default function ListeningWorkspace({
   onShadowing,
   saveProgress,
   studyFeatures = true,
+  dictionaryLookup = studyFeatures,
 }: ListeningWorkspaceProps) {
   const sentences = useMemo(() => practiceableSentences(item.lesson.sentences), [item.lesson.sentences])
   const restoredIndex = item.listening_progress.current_sentence_id === null
@@ -428,14 +432,14 @@ export default function ListeningWorkspace({
           <div className="mt-5 border-y border-[#ccd6d1] bg-white p-5">
             <p className="text-xs font-semibold tracking-wider text-[#66726e]">CURRENT SENTENCE {String(currentIndex + 1).padStart(2, '0')} / {String(sentences.length).padStart(2, '0')}</p>
             {currentSentence ? <>
-              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : studyFeatures ? <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={currentSentence.id} learnerId={learnerId} onLookup={openDictionary} /> : currentSentence.text}</p>
+              <p className={`mt-3 text-xl font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={currentSentence.text} sentence={currentSentence.text} language={item.lesson.source_language} {...(studyFeatures ? { libraryItemId: item.id, learnerId } : {})} sentenceId={currentSentence.id} onLookup={openDictionary} /> : currentSentence.text}</p>
               <p className={`mt-2 ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_10px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : currentSentence.translation}</p>
               {mode === 'blind' && <button type="button" onClick={() => setBlindRevealed((value) => !value)} className="mt-3 text-sm font-semibold text-[#176b5b]">{blindRevealed ? 'Hide again' : 'Reveal text'}</button>}
               {onShadowing && <button type="button" onClick={() => onShadowing(currentSentence.id)} className="mt-3 ml-3 text-sm font-semibold text-[#176b5b]">Practice Sync Shadowing</button>}
             </> : <p className="mt-3">This Lesson has no transcript sentences.</p>}
           </div>
 
-          {studyFeatures && dictionarySelection && !hideText && sourceVisible && <DictionaryPanel selection={dictionarySelection.selection} anchor={dictionarySelection.anchor} onClose={closeDictionary} onStudyItemSaved={reflectSavedWord} />}
+          {dictionaryLookup && dictionarySelection && !hideText && sourceVisible && <DictionaryPanel selection={dictionarySelection.selection} anchor={dictionarySelection.anchor} onClose={closeDictionary} onStudyItemSaved={reflectSavedWord} />}
 
           <div className="mt-5 flex flex-wrap gap-2" aria-label="Listening mode">
             {(['listen', 'blind', 'dictation'] as const).map((value) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => changeMode(value)} className="h-10 border border-[#176b5b] px-4 aria-pressed:bg-[#176b5b] aria-pressed:text-white">{value[0].toUpperCase() + value.slice(1)}</button>)}
@@ -471,7 +475,7 @@ export default function ListeningWorkspace({
               const active = index === currentIndex
               return <li ref={(element) => { if (element) transcriptRows.current.set(sentence.id, element); else transcriptRows.current.delete(sentence.id) }} key={sentence.id} aria-current={active ? 'true' : undefined} className="w-full border-l-4 border-transparent bg-white p-4 text-left aria-[current=true]:border-[#176b5b] aria-[current=true]:bg-[#e8f1ed]">
                 <button type="button" aria-label={`Seek to ${sentence.text}`} onClick={() => selectSentence(index)} className="block text-xs tabular-nums text-[#66726e] hover:underline focus-visible:outline-2 focus-visible:outline-[#176b5b]">{formatTime(sentence.start)}</button>
-                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : studyFeatures ? <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} libraryItemId={item.id} sentenceId={sentence.id} learnerId={learnerId} onLookup={openDictionary} /> : sentence.text}</span>
+                <span className={`mt-1 block font-medium ${hideText || !sourceVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : ''}`}>{hideText || !sourceVisible ? 'Source text hidden' : dictionaryLookup ? <ClickableText text={sentence.text} sentence={sentence.text} language={item.lesson.source_language} {...(studyFeatures ? { libraryItemId: item.id, learnerId } : {})} sentenceId={sentence.id} onLookup={openDictionary} /> : sentence.text}</span>
                 <span className={`mt-1 block text-sm ${hideText || !translationVisible ? 'select-none text-transparent [text-shadow:0_0_8px_#80908a]' : 'text-[#596560]'}`}>{hideText || !translationVisible ? 'Translation hidden' : sentence.translation}</span>
               </li>
             })}

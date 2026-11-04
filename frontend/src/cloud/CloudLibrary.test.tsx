@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cloudAuth } from '../auth/client'
 import { CloudSessionProvider } from '../auth/CloudSessionProvider'
 import { libraryItem, librarySummary } from '../testFixtures/libraryItem'
+import { dictionaryEntry } from '../testFixtures/dictionary'
 import type { LibraryItem, LibraryProgress } from '../types/library'
 
 vi.mock('../api/apiBase', () => ({ API_BASE_URL: '' }))
@@ -301,6 +302,119 @@ describe('Cloud Library learning', () => {
 
       await waitFor(() => expect(state.item.listening_progress.last_position_seconds).toBe(first.start))
       expect(state.item.listening_progress.current_sentence_id).toBe(first.id)
+    })
+  })
+
+  describe('B-3: dictionary and AI chunks from the cloud lesson', () => {
+    function route(fetchMock: ReturnType<typeof vi.fn>, extra: (url: string, init: RequestInit) => Promise<Response> | null) {
+      const original = fetchMock.getMockImplementation() as (url: string, init?: RequestInit) => Promise<Response>
+      fetchMock.mockImplementation((url: string, init: RequestInit = {}) => extra(url, init) ?? original(url, init))
+    }
+    const owned = (value: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(value), {
+      status, headers: { 'X-Authenticated-User': 'owner-a' },
+    }))
+
+    it('looks up a subtitle word through the session client, with no Study Bank save', async () => {
+      const { fetchMock } = cloudServer()
+      const lookups: Array<{ body: Record<string, unknown>; csrf: string | null }> = []
+      route(fetchMock, (url, init) => url === '/api/dictionary/lookup'
+        ? (lookups.push({ body: JSON.parse(String(init.body)), csrf: new Headers(init.headers).get('X-CSRF-Token') }),
+          owned({ ...dictionaryEntry, query: 'Sentence', surface_form: 'Sentence' }))
+        : null)
+      const user = userEvent.setup()
+      await openLesson(user)
+      await user.click(screen.getByRole('button', { name: 'Open listening' }))
+      const before = fetchMock.mock.calls.length
+
+      await user.click((await screen.findAllByRole('button', { name: 'Look up Sentence' }))[0])
+
+      expect(await screen.findByRole('dialog')).toBeInTheDocument()
+      expect(lookups[0]).toMatchObject({ body: { language: 'en', word: 'Sentence' }, csrf: 'a'.repeat(64) })
+      const since = fetchMock.mock.calls.slice(before).map(([url]) => String(url))
+      expect(since.filter((url) => /study|contextual|chunks\/memory/.test(url))).toEqual([])
+      expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
+      // No Study Bank section at all (B-4), not even a status check.
+      expect(screen.queryByText(/Saved status|Checking saved status|Previously Saved|Save Failed/)).not.toBeInTheDocument()
+    })
+
+    it('finds chunks in the lesson with provenance, saves edits only, then accepts', async () => {
+      const { fetchMock } = cloudServer()
+      const candidate = {
+        candidate_id: 'candidate-1', state: 'proposed', version: 1, source_language: 'en',
+        text: 'sentence', normalized_identity: 'sentence', suggested_meaning_zh: '句子', usage_note: '', example: '',
+        explanation_of_value: '', quality_flags: [], proposal_model: 'mock', proposal_version: '1',
+        existing_study_item_id: null, existing_study_item_active: null, accepted_study_item_id: null,
+        evidence: { source_type: 'library_sentence', quote: 'Sentence 1.', source_label: 'Daily lesson', evidence_start: 0,
+          evidence_end: 8, library_item_id: libraryItem.id, lesson_id: libraryItem.lesson.id, sentence_id: 1, start: 0, end: 1 },
+      }
+      const requests: Array<{ url: string; body: Record<string, unknown> }> = []
+      route(fetchMock, (url, init) => {
+        if (!url.startsWith('/api/ai/chunk-suggestions')) return null
+        const body = init.body ? JSON.parse(String(init.body)) : {}
+        requests.push({ url, body })
+        if (url === '/api/ai/chunk-suggestions') {
+          return owned({ batch_id: 'batch-1', user_id: 'owner-a', source_language: 'en', source_type: 'library_passage',
+            source_label: 'Daily lesson', created_at: '2026-11-04T00:00:00Z', expires_at: null, status: 'ready', candidates: [candidate] })
+        }
+        const next = body.action === 'edit'
+          ? { ...candidate, version: 2, suggested_meaning_zh: body.edit.suggested_meaning_zh }
+          : { ...candidate, version: 3, state: 'accepted', accepted_study_item_id: 'study-1' }
+        return owned({ candidate: next, study_item: null, created: false, warnings: [] })
+      })
+      const user = userEvent.setup()
+      await openLesson(user)
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      await user.click(await screen.findByRole('button', { name: 'Find chunks in this lesson' }))
+
+      expect(requests[0].body).toMatchObject({
+        user_id: 'owner-a', source_language: libraryItem.lesson.source_language,
+        source: { source_type: 'library_passage', library_item_id: libraryItem.id },
+      })
+      expect(await screen.findByLabelText('Candidate source')).toHaveTextContent('Sentence 1 · 0:00 · Daily lesson')
+      const meaning = screen.getByLabelText('Chinese explanation')
+      expect(screen.getByRole('button', { name: 'Save edits' })).toBeDisabled()
+      await user.clear(meaning)
+      await user.type(meaning, '句子（已编辑）')
+      await user.click(screen.getByRole('button', { name: 'Save edits' }))
+
+      expect(await screen.findByText(/Edits saved/)).toBeInTheDocument()
+      expect(requests[1].body).toMatchObject({ action: 'edit', expected_version: 1, user_id: 'owner-a',
+        edit: { suggested_meaning_zh: '句子（已编辑）' } })
+      expect(screen.getByText('proposed')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Accept' }))
+      await waitFor(() => expect(requests[2]?.body).toMatchObject({ action: 'accept', expected_version: 2 }))
+    })
+
+    it('reloads a candidate changed in another tab instead of overwriting it', async () => {
+      const { fetchMock } = cloudServer()
+      const candidate = {
+        candidate_id: 'candidate-1', state: 'proposed', version: 1, source_language: 'en',
+        text: 'sentence', normalized_identity: 'sentence', suggested_meaning_zh: '句子', usage_note: '', example: '',
+        explanation_of_value: '', quality_flags: [], proposal_model: 'mock', proposal_version: '1',
+        existing_study_item_id: null, existing_study_item_active: null, accepted_study_item_id: null,
+        evidence: { source_type: 'library_sentence', quote: 'Sentence 1.', source_label: 'Daily lesson', evidence_start: 0, evidence_end: 8 },
+      }
+      const batch = (value: typeof candidate) => ({ batch_id: 'batch-1', user_id: 'owner-a', source_language: 'en',
+        source_type: 'library_passage', source_label: 'Daily lesson', created_at: '2026-11-04T00:00:00Z', expires_at: null,
+        status: 'ready', candidates: [value] })
+      route(fetchMock, (url, init) => {
+        if (url === '/api/ai/chunk-suggestions') return owned(batch(candidate))
+        if (url.endsWith('/decisions') && init.method === 'POST') return owned({ detail: 'Candidate decision is stale' }, 409)
+        if (url.startsWith('/api/ai/chunk-suggestions/batch-1?')) return owned(batch({ ...candidate, state: 'rejected', version: 2 }))
+        return null
+      })
+      const user = userEvent.setup()
+      await openLesson(user)
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+      await user.click(await screen.findByRole('button', { name: 'Find chunks in this lesson' }))
+
+      await user.click(await screen.findByRole('button', { name: 'Accept' }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('changed elsewhere')
+      expect(screen.getByText('rejected')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
     })
   })
 })

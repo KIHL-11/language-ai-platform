@@ -177,6 +177,8 @@ class AiChunkOrganizerService:
     def _apply_decision(self, owner, candidate, request):
         if request.action == "reject":
             return candidate.model_copy(update={"state": "rejected", "version": candidate.version + 1}), None, False, []
+        if request.action == "edit":
+            return self._edited_candidate(owner, candidate, request.edit), None, False, []
         edit = request.edit
         text = edit.text if edit else candidate.text
         meaning = edit.suggested_meaning_zh if edit else candidate.suggested_meaning_zh
@@ -241,6 +243,40 @@ class AiChunkOrganizerService:
             }),
         })
         return updated, item, bool(created_count), warnings
+
+    def _edited_candidate(self, owner, candidate, edit) -> AiChunkCandidate:
+        """Save edits only: still proposed, nothing written to the Study Bank.
+
+        The edited text must still be grounded in the immutable evidence quote,
+        exactly as an accepted edit must be.
+        """
+
+        phrase_range = self._ground_phrase(
+            candidate.evidence.quote, edit.text, provider_output=False
+        )
+        _, identity = normalized_identity(StudyItemInput(
+            user_id=owner,
+            kind="chunk",
+            source_language=candidate.source_language,
+            target_language="zh-CN",
+            text=edit.text,
+            meaning=edit.suggested_meaning_zh,
+            example=edit.example,
+            usage=edit.usage_note,
+            provenance=[self._provenance(candidate.evidence, phrase_range)],
+        ))
+        return candidate.model_copy(update={
+            "state": "proposed",
+            "version": candidate.version + 1,
+            "text": edit.text,
+            "normalized_identity": identity,
+            "suggested_meaning_zh": edit.suggested_meaning_zh,
+            "usage_note": edit.usage_note,
+            "example": edit.example,
+            "evidence": candidate.evidence.model_copy(update={
+                "evidence_start": phrase_range[0], "evidence_end": phrase_range[1]
+            }),
+        })
 
     def _source(self, owner: str, request: ChunkSuggestionRequest):
         if isinstance(request.source, ManualTextSource):
@@ -581,6 +617,11 @@ class CloudAiChunkOrganizerService(AiChunkOrganizerService):
                 candidate=candidate.model_copy(
                     update={"state": "rejected", "version": candidate.version + 1}
                 ),
+                study_input=None,
+            )
+        if request.action == "edit":
+            return PreparedDecision(
+                candidate=self._edited_candidate(owner, candidate, request.edit),
                 study_input=None,
             )
         edit = request.edit

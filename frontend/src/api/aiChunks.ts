@@ -30,12 +30,42 @@ export async function generateChunkSuggestions(
   }), 'Generating Chunk candidates failed')
 }
 
+// B-3: candidates from sentences of one of the owner's Cloud Library lessons.
+// The server resolves the lesson under the session owner and records full
+// provenance (item, lesson, sentence, URL, timing) on every candidate.
+export async function generateLibraryChunkSuggestions(
+  userId: string,
+  language: SourceLanguage,
+  libraryItemId: string,
+  sentenceIds: number[],
+): Promise<AiChunkBatch> {
+  return responseJson<AiChunkBatch>(await apiFetch(`${API_BASE_URL}/api/ai/chunk-suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId,
+      source_language: language,
+      source: { source_type: 'library_passage', library_item_id: libraryItemId, sentence_ids: sentenceIds },
+      max_candidates: 8,
+      idempotency_key: key(),
+    }),
+  }), 'Generating Chunk candidates failed')
+}
+
+export async function getChunkSuggestions(userId: string, batchId: string): Promise<AiChunkBatch> {
+  const params = new URLSearchParams({ user_id: userId })
+  return responseJson<AiChunkBatch>(await apiFetch(
+    `${API_BASE_URL}/api/ai/chunk-suggestions/${encodeURIComponent(batchId)}?${params}`,
+  ), 'Loading Chunk candidates failed')
+}
+
 export async function decideChunkSuggestion(
   userId: string,
   batchId: string,
   candidateId: string,
   expectedVersion: number,
-  action: 'accept' | 'edit_and_accept' | 'reject',
+  // 'edit' saves the changes and keeps the candidate proposed.
+  action: 'accept' | 'edit_and_accept' | 'edit' | 'reject',
   edit?: CandidateEdit,
 ): Promise<CandidateDecisionResult> {
   return responseJson<CandidateDecisionResult>(await apiFetch(
