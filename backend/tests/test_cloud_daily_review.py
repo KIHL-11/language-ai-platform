@@ -1,6 +1,5 @@
-"""B-5: Cloud Daily Review — concurrent tabs and learner-local days.
-
-Synthetic owners and a disposable PostgreSQL only."""
+"""B-5: Cloud Daily Review — two-tab safety and the account's daily hard quota
+of new cards (owner decision 2026-11-04). Synthetic owners, disposable PG."""
 from __future__ import annotations
 
 import threading
@@ -13,9 +12,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
-from services.review.service import ReviewService, local_day_bounds, parse_time_zone
+from services.review import scheduler
+from services.review.local_day import local_day_bounds, parse_time_zone
+from services.review.service import ReviewService
 from services.schemas.study_bank import StudyItemPatch
-from services.study_bank.postgres import PostgresOwnerScopedStudyBankRepository
+from services.study_bank.postgres import (
+    DailyNewCardQuotaExceededError,
+    PostgresOwnerScopedStudyBankRepository,
+)
 from services.study_bank.store import StudyBankConflictError, StudyBankStore
 from test_owner_scoped_study_bank import (  # noqa: F401  (fixture)
     OWNER_A,
@@ -29,6 +33,7 @@ from test_owner_scoped_study_bank import (  # noqa: F401  (fixture)
 
 client = TestClient(app_module.app)
 UTC = timezone.utc
+LIMIT = 10
 
 
 class Clock:
@@ -39,114 +44,217 @@ class Clock:
         return self.value
 
 
-def _cards(study, owner, count, prefix="card"):
+@pytest.fixture
+def quota(cloud_repositories):
+    dsn, _, library = cloud_repositories
+    clock = Clock(datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
+    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
+    return dsn, clock, study, library
+
+
+def _cards(study, owner, count, *, language="en", kind="chunk", prefix="card"):
     values = []
     for index in range(count):
-        value = _manual(owner)
-        values.append(value.model_copy(update={"text": f"{prefix} phrase {index}"}))
+        value = _manual(owner).model_copy(update={
+            "text": f"{prefix} {language} {kind} {index}", "source_language": language, "kind": kind,
+        })
+        if kind == "word":
+            value = value.model_copy(update={"lemma": f"{prefix}{language}{index}"})
+        values.append(value)
     return study.save_items_for_owner(owner, values)[0]
 
 
-# --- concurrent tabs and retries (existing atomic rating, proven) -----------
+def _rate_api(card, owner=OWNER_A, expected=0, rating="good"):
+    return client.post(
+        f"/api/review/items/{card.id}/rate",
+        json={"user_id": owner, "rating": rating, "expected_review_count": expected},
+    )
 
 
-def test_two_tabs_rating_one_card_have_exactly_one_winner(cloud_repositories):
-    _, study, library = cloud_repositories
-    [card] = _cards(study, OWNER_A, 1)
-    barrier = threading.Barrier(2)
-
-    def rate(rating):
-        barrier.wait()
-        return client.post(
-            f"/api/review/items/{card.id}/rate",
-            json={"user_id": OWNER_A, "rating": rating, "expected_review_count": 0},
-        )
-
-    with _as_owner(OWNER_A, study, library):
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            responses = list(executor.map(rate, ["good", "again"]))
-
-    assert sorted(response.status_code for response in responses) == [200, 409]
-    after = study.get_item(OWNER_A, card.id)
-    assert after.review.review_count == 1
-    winner = next(response for response in responses if response.status_code == 200)
-    assert after.review.last_rating == winner.json()["item"]["review"]["last_rating"]
+def _new(items):
+    return [item for item in items if item.review.review_count == 0]
 
 
-def test_a_retried_rating_never_counts_twice(cloud_repositories):
-    _, study, library = cloud_repositories
-    [card] = _cards(study, OWNER_A, 1)
-    body = {"user_id": OWNER_A, "rating": "good", "expected_review_count": 0}
-    with _as_owner(OWNER_A, study, library):
-        first = client.post(f"/api/review/items/{card.id}/rate", json=body)
-        retry = client.post(f"/api/review/items/{card.id}/rate", json=body)
-
-    assert (first.status_code, retry.status_code) == (200, 409)
-    assert study.get_item(OWNER_A, card.id).review.review_count == 1
-
-
-def test_other_accounts_cannot_rate_or_queue_a_card(cloud_repositories):
-    _, study, library = cloud_repositories
-    [card] = _cards(study, OWNER_A, 1)
-    with _as_owner(OWNER_B, study, library):
-        rated = client.post(
-            f"/api/review/items/{card.id}/rate",
-            json={"user_id": OWNER_B, "rating": "good", "expected_review_count": 0},
-        )
-        forged = client.post(
-            f"/api/review/items/{card.id}/rate",
-            json={"user_id": OWNER_A, "rating": "good", "expected_review_count": 0},
-        )
-        queue = client.get("/api/review/queue", params={"user_id": OWNER_B, "time_zone": "Europe/Berlin"})
-
-    assert rated.status_code == 404 and forged.status_code == 403
-    assert queue.json()["items"] == []
-    assert study.get_item(OWNER_A, card.id).review.review_count == 0
-
-
-# --- first-review timestamps -----------------------------------------------
-
-
-def test_only_the_first_rating_records_the_first_review(cloud_repositories):
-    dsn, _, _ = cloud_repositories
-    clock = Clock(datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    [card] = _cards(study, OWNER_A, 1)
-
-    study.rate_item(OWNER_A, card.id, "good", 0)
-    clock.value += timedelta(days=3)
-    reviewed, _ = study.rate_item(OWNER_A, card.id, "good", 1)
-
+def _ledger(dsn):
     with psycopg.connect(dsn) as connection:
-        first = connection.execute(
-            "SELECT first_reviewed_at FROM cloud_study_items WHERE item_id = %s", (card.id,)
-        ).fetchone()[0]
-    assert first == datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
-    assert reviewed.review.review_count == 2
+        return connection.execute(
+            "SELECT owner_user_id, quota_day::text FROM cloud_review_new_card_ledger ORDER BY consumed_at"
+        ).fetchall()
 
 
-# --- learner-local days ----------------------------------------------------
+# --- 1-3: one server-side quota, shared, not raisable ---------------------
+
+
+def test_the_quota_applies_without_any_time_zone_in_the_request(quota):
+    _, clock, study, library = quota
+    cards = _cards(study, OWNER_A, LIMIT + 2)
+    for card in cards[:LIMIT]:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    with _as_owner(OWNER_A, study, library):
+        queue = client.get("/api/review/queue", params={"user_id": OWNER_A}).json()["items"]
+
+    assert [item for item in queue if item["review"]["review_count"] == 0] == []
+
+
+def test_english_german_words_and_chunks_share_one_daily_quota(quota):
+    _, _, study, _ = quota
+    mixed = (
+        _cards(study, OWNER_A, 3, language="en", kind="word")
+        + _cards(study, OWNER_A, 3, language="de", kind="word")
+        + _cards(study, OWNER_A, 2, language="en", kind="chunk")
+        + _cards(study, OWNER_A, 2, language="de", kind="chunk")
+    )
+    extra = _cards(study, OWNER_A, 1, language="de", kind="word", prefix="extra")[0]
+    for card in mixed:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+
+    with pytest.raises(DailyNewCardQuotaExceededError):
+        study.rate_item(OWNER_A, extra.id, "good", 0)
+    for language in ("en", "de"):
+        for kind in ("word", "chunk"):
+            assert _new(ReviewService(study, clock=study.clock).queue(OWNER_A, language=language, kind=kind)) == []
+
+
+def test_new_limit_can_narrow_but_never_raise_the_quota(quota):
+    _, _, study, library = quota
+    _cards(study, OWNER_A, 30)
+    service = ReviewService(study, clock=study.clock)
+
+    assert len(_new(service.queue(OWNER_A, limit=100, new_limit=100))) == LIMIT
+    assert len(_new(service.queue(OWNER_A, limit=100, new_limit=3))) == 3
+    with _as_owner(OWNER_A, study, library):
+        raised = client.put("/api/review/settings", json={"user_id": OWNER_A, "time_zone": "UTC", "daily_new_limit": 100})
+    assert raised.status_code == 422
+
+
+# --- 4-5: hard enforcement inside the rating transaction ------------------
+
+
+def test_concurrent_clients_rating_different_new_cards_never_exceed_the_quota(quota):
+    _, _, study, library = quota
+    cards = _cards(study, OWNER_A, 16)
+    for card in cards[:6]:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    barrier = threading.Barrier(10)
+
+    def rate(card):
+        barrier.wait()
+        return _rate_api(card).status_code
+
+    with _as_owner(OWNER_A, study, library):
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            codes = list(executor.map(rate, cards[6:16]))
+
+    assert codes.count(200) == 4 and codes.count(429) == 6
+    assert study.new_card_allowance(OWNER_A).used_today == LIMIT
+
+
+def test_rating_directly_cannot_bypass_the_quota_and_has_a_stable_code(quota):
+    _, _, study, library = quota
+    cards = _cards(study, OWNER_A, LIMIT + 1)
+    with _as_owner(OWNER_A, study, library):
+        for card in cards[:LIMIT]:
+            assert _rate_api(card).status_code == 200
+        over = _rate_api(cards[LIMIT])
+
+    assert over.status_code == 429
+    assert over.json()["detail"]["code"] == "daily_new_card_quota_exhausted"
+    assert study.get_item(OWNER_A, cards[LIMIT].id).review.review_count == 0
+
+
+# --- 6: deleting, archiving and restoring never refunds -------------------
+
+
+def test_deleting_archiving_or_restoring_cards_never_refunds_the_day(quota):
+    dsn, _, study, _ = quota
+    cards = _cards(study, OWNER_A, LIMIT)
+    for card in cards:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    first = study.get_item(OWNER_A, cards[0].id)
+    study.delete_item(OWNER_A, first.id, first.revision)
+    second = study.get_item(OWNER_A, cards[1].id)
+    archived = study.update_item(OWNER_A, second.id, StudyItemPatch(active=False, expected_revision=second.revision))
+    study.update_item(OWNER_A, second.id, StudyItemPatch(active=True, expected_revision=archived.revision))
+    replacement = _cards(study, OWNER_A, 1, prefix="readded")[0]
+
+    with pytest.raises(DailyNewCardQuotaExceededError):
+        study.rate_item(OWNER_A, replacement.id, "good", 0)
+    assert len(_ledger(dsn)) == LIMIT
+    assert study.new_card_allowance(OWNER_A).remaining == 0
+
+
+# --- 7: time zone changes, midnight and DST -------------------------------
+
+
+def test_settings_default_to_utc_and_a_first_choice_applies_at_once(quota):
+    _, _, study, library = quota
+    with _as_owner(OWNER_A, study, library):
+        before = client.get("/api/review/settings", params={"user_id": OWNER_A}).json()
+        chosen = client.put("/api/review/settings", json={"user_id": OWNER_A, "time_zone": "Europe/Berlin"}).json()
+        invalid = client.put("/api/review/settings", json={"user_id": OWNER_A, "time_zone": "UTC+8"})
+
+    assert (before["time_zone"], before["configured"], before["daily_new_limit"]) == ("UTC", False, LIMIT)
+    assert (chosen["time_zone"], chosen["configured"], chosen["pending_time_zone"]) == ("Europe/Berlin", True, None)
+    assert invalid.status_code == 422
+
+
+def test_a_time_zone_change_after_spending_waits_for_the_next_local_midnight(quota):
+    _, clock, study, _ = quota
+    tokyo = ZoneInfo("Asia/Tokyo")
+    study.set_time_zone(OWNER_A, "Asia/Tokyo")
+    clock.value = datetime(2026, 11, 4, 20, 0, tzinfo=tokyo)
+    cards = _cards(study, OWNER_A, LIMIT + 1)
+    for card in cards[:LIMIT]:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+
+    # Switching to New York (where it is still the morning of 4 Nov) must not
+    # open a fresh 4 Nov window.
+    pending = study.set_time_zone(OWNER_A, "America/New_York")
+    with pytest.raises(DailyNewCardQuotaExceededError):
+        study.rate_item(OWNER_A, cards[LIMIT].id, "good", 0)
+    clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=tokyo)  # Tokyo midnight: switch applies
+    after = study.review_settings(OWNER_A)
+    allowance = study.new_card_allowance(OWNER_A)
+
+    assert (pending.time_zone, pending.pending_time_zone) == ("Asia/Tokyo", "America/New_York")
+    assert pending.pending_effective_at == datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
+    assert (after.time_zone, after.pending_time_zone) == ("America/New_York", None)
+    # New York's date is now 4 Nov: the same calendar day already spent.
+    assert (allowance.quota_day.isoformat(), allowance.remaining) == ("2026-11-04", 0)
+    clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=ZoneInfo("America/New_York"))
+    assert study.new_card_allowance(OWNER_A).remaining == LIMIT
+
+
+def test_the_quota_window_spans_a_whole_25_hour_dst_day(quota):
+    _, clock, study, _ = quota
+    berlin = ZoneInfo("Europe/Berlin")
+    clock.value = datetime(2026, 10, 25, 0, 30, tzinfo=berlin)  # DST ends at 03:00 that day
+    study.set_time_zone(OWNER_A, "Europe/Berlin")
+    cards = _cards(study, OWNER_A, LIMIT + 1)
+    for card in cards[:LIMIT]:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    clock.value = datetime(2026, 10, 25, 23, 50, tzinfo=berlin)  # 24h20 later, same local day
+
+    with pytest.raises(DailyNewCardQuotaExceededError):
+        study.rate_item(OWNER_A, cards[LIMIT].id, "good", 0)
+    clock.value = datetime(2026, 10, 26, 0, 5, tzinfo=berlin)
+    study.rate_item(OWNER_A, cards[LIMIT].id, "good", 0)
 
 
 @pytest.mark.parametrize(
     "zone,instant,start,end,hours",
     [
-        # US spring forward: 23-hour local day.
         ("America/New_York", "2026-03-08T12:00Z", "2026-03-08T05:00Z", "2026-03-09T04:00Z", 23),
-        # US fall back: 25-hour local day.
         ("America/New_York", "2026-11-01T12:00Z", "2026-11-01T04:00Z", "2026-11-02T05:00Z", 25),
         ("Europe/Berlin", "2026-03-29T12:00Z", "2026-03-28T23:00Z", "2026-03-29T22:00Z", 23),
         ("Europe/Berlin", "2026-10-25T12:00Z", "2026-10-24T22:00Z", "2026-10-25T23:00Z", 25),
-        # Chile skips local midnight: the day starts at the transition.
         ("America/Santiago", "2026-09-06T12:00Z", "2026-09-06T04:00Z", "2026-09-07T03:00Z", 23),
         ("Asia/Kolkata", "2026-11-04T20:00Z", "2026-11-04T18:30Z", "2026-11-05T18:30Z", 24),
-        ("UTC", "2026-11-04T00:00Z", "2026-11-04T00:00Z", "2026-11-05T00:00Z", 24),
     ],
 )
 def test_local_day_bounds_follow_the_learners_calendar(zone, instant, start, end, hours):
     parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))  # noqa: E731
     lower, upper = local_day_bounds(parse(instant), ZoneInfo(zone))
-
     assert (lower, upper) == (parse(start), parse(end))
     assert upper - lower == timedelta(hours=hours)
 
@@ -157,170 +265,131 @@ def test_only_iana_names_are_accepted(name):
         parse_time_zone(name)
 
 
-def test_a_first_review_belongs_to_the_local_day_it_happened_on_across_dst(cloud_repositories):
-    """New York, 2026-03-08 (clocks jump 02:00 → 03:00): 23:59 local on the
-    7th and 00:30 local on the 8th fall on different learner days."""
-    dsn, _, _ = cloud_repositories
-    zone = ZoneInfo("America/New_York")
-    clock = Clock(datetime(2026, 3, 7, 23, 59, tzinfo=zone))
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    late, early = _cards(study, OWNER_A, 2)
-    study.rate_item(OWNER_A, late.id, "good", 0)
-    clock.value = datetime(2026, 3, 8, 0, 30, tzinfo=zone)
-    study.rate_item(OWNER_A, early.id, "good", 0)
-
-    seventh = local_day_bounds(datetime(2026, 3, 7, 12, tzinfo=zone), zone)
-    eighth = local_day_bounds(datetime(2026, 3, 8, 12, tzinfo=zone), zone)
-    assert study.count_first_reviews(OWNER_A, *seventh) == 1
-    assert study.count_first_reviews(OWNER_A, *eighth) == 1
+# --- 8: retries, lost responses and failed transactions -------------------
 
 
-# --- the daily new-card quota ---------------------------------------------
-
-
-def test_new_cards_are_a_daily_quota_across_sessions_and_reset_next_local_day(cloud_repositories):
-    dsn, _, _ = cloud_repositories
-    zone = ZoneInfo("Europe/Berlin")
-    clock = Clock(datetime(2026, 10, 25, 9, 0, tzinfo=zone))  # a 25-hour DST day
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    service = ReviewService(study, clock=clock)
-    cards = _cards(study, OWNER_A, 5)
-
-    first_session = service.queue(OWNER_A, new_limit=2, time_zone="Europe/Berlin")
-    for card in first_session:
-        study.rate_item(OWNER_A, card.id, "good", 0)
-    clock.value = datetime(2026, 10, 25, 23, 30, tzinfo=zone)  # same local day
-    later_session = service.queue(OWNER_A, new_limit=2, time_zone="Europe/Berlin")
-    clock.value = datetime(2026, 10, 26, 0, 30, tzinfo=zone)  # next local day
-    next_day = service.queue(OWNER_A, new_limit=2, time_zone="Europe/Berlin")
-
-    introduced = {card.id for card in first_session}
-    tomorrow = {card.id for card in next_day if card.review.review_count == 0}
-    assert len(introduced) == 2 and introduced <= {card.id for card in cards}
-    assert [card for card in later_session if card.review.review_count == 0] == []
-    assert len(tomorrow) == 2 and tomorrow.isdisjoint(introduced)
-
-
-def test_the_quota_counts_only_the_learners_local_day_not_the_utc_day(cloud_repositories):
-    """Tokyo is UTC+9: a card first reviewed at 08:00 local on 4 Nov was
-    reviewed on 3 Nov in UTC, but it still uses up the 4 Nov local quota."""
-    dsn, _, _ = cloud_repositories
-    zone = ZoneInfo("Asia/Tokyo")
-    clock = Clock(datetime(2026, 11, 4, 8, 0, tzinfo=zone))
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    service = ReviewService(study, clock=clock)
-    first, *_ = _cards(study, OWNER_A, 3)
-    study.rate_item(OWNER_A, first.id, "good", 0)
-    clock.value = datetime(2026, 11, 4, 22, 0, tzinfo=zone)
-
-    tokyo = service.queue(OWNER_A, new_limit=1, time_zone="Asia/Tokyo")
-    utc = service.queue(OWNER_A, new_limit=1, time_zone="UTC")
-
-    assert [card for card in tokyo if card.review.review_count == 0] == []
-    assert len([card for card in utc if card.review.review_count == 0]) == 1
-
-
-def test_cards_reviewed_before_0012_never_count_against_today(cloud_repositories):
-    dsn, _, _ = cloud_repositories
-    clock = Clock(datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    old, *_ = _cards(study, OWNER_A, 3)
-    study.rate_item(OWNER_A, old.id, "good", 0)
-    with psycopg.connect(dsn) as connection:
-        connection.execute("UPDATE cloud_study_items SET first_reviewed_at = NULL")
-
-    queue = ReviewService(study, clock=clock).queue(OWNER_A, new_limit=2, time_zone="UTC")
-
-    assert len([card for card in queue if card.review.review_count == 0]) == 2
-
-
-def test_queueing_never_changes_srs_state(cloud_repositories):
-    dsn, _, _ = cloud_repositories
-    clock = Clock(datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
-    study = PostgresOwnerScopedStudyBankRepository(dsn, clock=clock)
-    cards = _cards(study, OWNER_A, 3)
-    study.rate_item(OWNER_A, cards[0].id, "hard", 0)
-    before = {card.id: (card.review, card.revision) for card in study.list_items(OWNER_A, active=None)}
-
-    ReviewService(study, clock=clock).queue(OWNER_A, new_limit=1, time_zone="Pacific/Auckland")
-
-    after = {card.id: (card.review, card.revision) for card in study.list_items(OWNER_A, active=None)}
-    assert after == before
-
-
-# --- API contract ----------------------------------------------------------
-
-
-def test_the_queue_api_validates_and_applies_the_time_zone(cloud_repositories):
-    _, study, library = cloud_repositories
-    _cards(study, OWNER_A, 2)
+def test_a_retry_or_lost_response_never_charges_twice(quota):
+    dsn, _, study, library = quota
+    [card] = _cards(study, OWNER_A, 1)
     with _as_owner(OWNER_A, study, library):
-        valid = client.get("/api/review/queue", params={"user_id": OWNER_A, "time_zone": "America/New_York", "new_limit": 1})
-        invalid = client.get("/api/review/queue", params={"user_id": OWNER_A, "time_zone": "UTC+8"})
-        without = client.get("/api/review/queue", params={"user_id": OWNER_A, "new_limit": 1})
+        first = _rate_api(card)
+        retry = _rate_api(card)
 
-    assert valid.status_code == 200 and len(valid.json()["items"]) == 1
-    assert invalid.status_code == 422
-    assert without.status_code == 200 and len(without.json()["items"]) == 1
+    assert (first.status_code, retry.status_code) == (200, 409)
+    assert len(_ledger(dsn)) == 1
+    assert study.get_item(OWNER_A, card.id).review.review_count == 1
 
 
-def test_personal_desktop_keeps_a_per_session_new_limit(tmp_path):
+def test_a_failed_rating_transaction_rolls_back_its_quota_charge(quota, monkeypatch):
+    dsn, _, study, _ = quota
+    [card] = _cards(study, OWNER_A, 1)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("scheduler failure after the quota charge")
+
+    import services.study_bank.postgres as postgres_module
+    monkeypatch.setattr(postgres_module, "schedule_review", broken)
+    with pytest.raises(RuntimeError):
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    monkeypatch.setattr(postgres_module, "schedule_review", scheduler.schedule_review)
+
+    assert _ledger(dsn) == []
+    assert study.get_item(OWNER_A, card.id).review.review_count == 0
+    study.rate_item(OWNER_A, card.id, "good", 0)
+    assert len(_ledger(dsn)) == 1
+
+
+def test_two_tabs_rating_one_card_have_exactly_one_winner(quota):
+    dsn, _, study, library = quota
+    [card] = _cards(study, OWNER_A, 1)
+    barrier = threading.Barrier(2)
+
+    def rate(rating):
+        barrier.wait()
+        return _rate_api(card, rating=rating).status_code
+
+    with _as_owner(OWNER_A, study, library):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            codes = list(executor.map(rate, ["good", "again"]))
+
+    assert sorted(codes) == [200, 409]
+    assert len(_ledger(dsn)) == 1
+
+
+# --- 9: due cards are never limited ---------------------------------------
+
+
+def test_due_reviewed_cards_still_rate_when_the_quota_is_spent(quota):
+    _, clock, study, library = quota
+    cards = _cards(study, OWNER_A, LIMIT)
+    for card in cards:
+        study.rate_item(OWNER_A, card.id, "again", 0)
+    clock.value += timedelta(minutes=30)  # "again" cards are due again soon
+    due = ReviewService(study, clock=clock).queue(OWNER_A)
+    with _as_owner(OWNER_A, study, library):
+        rated = _rate_api(due[0], expected=1)
+
+    assert len(due) == LIMIT and all(card.review.review_count == 1 for card in due)
+    assert rated.status_code == 200
+    assert study.new_card_allowance(OWNER_A).used_today == LIMIT
+
+
+# --- 10: isolation, Personal, old data and migration safety ---------------
+
+
+def test_one_owners_spending_never_touches_anothers_quota(quota):
+    _, _, study, library = quota
+    for card in _cards(study, OWNER_A, LIMIT):
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    with _as_owner(OWNER_B, study, library):
+        settings = client.get("/api/review/settings", params={"user_id": OWNER_B}).json()
+        forged = client.get("/api/review/settings", params={"user_id": OWNER_A})
+
+    assert settings["new_cards_today"] == 0 and settings["new_cards_remaining"] == LIMIT
+    assert forged.status_code == 403
+
+
+def test_cards_reviewed_before_the_quota_existed_are_not_charged(quota):
+    dsn, _, study, _ = quota
+    [old] = _cards(study, OWNER_A, 1)
+    study.rate_item(OWNER_A, old.id, "good", 0)
+    # Simulate a card reviewed before 0012 existed: no ledger row for it.
+    with psycopg.connect(dsn) as connection:
+        connection.execute("DELETE FROM cloud_review_new_card_ledger")
+    before = study.get_item(OWNER_A, old.id).review
+
+    study.rate_item(OWNER_A, old.id, "good", 1)
+
+    assert _ledger(dsn) == []
+    assert study.get_item(OWNER_A, old.id).review.review_count == before.review_count + 1
+
+
+def test_personal_desktop_keeps_its_per_session_limit_and_has_no_settings(tmp_path):
     clock = Clock(datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
     store = StudyBankStore(tmp_path / "study.json", clock=clock)
-    store.save_items([_manual("local-learner").model_copy(update={"text": f"local phrase {i}"}) for i in range(3)])
+    store.save_items([_manual("local-learner").model_copy(update={"text": f"local {i}"}) for i in range(15)])
     service = ReviewService(store, clock=clock)
-    [first] = service.queue("local-learner", new_limit=1, time_zone="Europe/Berlin")
-    store.rate_item("local-learner", first.id, "good", 0)
+    for card in service.queue("local-learner", new_limit=12):
+        store.rate_item("local-learner", card.id, "good", 0)
 
-    again = service.queue("local-learner", new_limit=1, time_zone="Europe/Berlin")
+    assert len(_new(service.queue("local-learner", new_limit=3))) == 3
+    response = client.get("/api/review/settings", params={"user_id": "local-learner"})
+    assert response.status_code == 404
 
-    assert len([card for card in again if card.review.review_count == 0]) == 1
 
-
-def test_archived_cards_cannot_be_rated_or_queued(cloud_repositories):
-    _, study, _ = cloud_repositories
+def test_archived_cards_still_cannot_be_rated(quota):
+    _, _, study, _ = quota
     [card] = _cards(study, OWNER_A, 1)
     study.update_item(OWNER_A, card.id, StudyItemPatch(active=False, expected_revision=card.revision))
-
     with pytest.raises(StudyBankConflictError):
         study.rate_item(OWNER_A, card.id, "good", 0)
-    assert ReviewService(study).queue(OWNER_A, time_zone="UTC") == []
 
 
-def test_0012_rolls_back_only_without_first_reviews(cloud_repositories):
-    dsn, study, _ = cloud_repositories
+def test_0012_rollback_refuses_while_quota_data_exists(quota):
+    dsn, _, study, _ = quota
     [card] = _cards(study, OWNER_A, 1)
     study.rate_item(OWNER_A, card.id, "good", 0)
 
     with pytest.raises(psycopg.errors.RaiseException):
-        _migration(dsn, "0012_review_first_reviewed_at.down.sql")
-    with psycopg.connect(dsn) as connection:
-        with pytest.raises(psycopg.errors.CheckViolation):
-            connection.execute(
-                "UPDATE cloud_study_items SET review_count = 0, first_reviewed_at = now()"
-            )
-    with psycopg.connect(dsn) as connection:
-        connection.execute("UPDATE cloud_study_items SET first_reviewed_at = NULL")
-    _migration(dsn, "0012_review_first_reviewed_at.down.sql")
-    _migration(dsn, "0012_review_first_reviewed_at.up.sql")
-
-
-def test_the_api_applies_the_daily_quota_with_a_time_zone(cloud_repositories):
-    """The quota must reach the HTTP path, not only the service. Uses a real
-    clock so the first review and the queue fall on the same local day."""
-    dsn, _, library = cloud_repositories
-    study = PostgresOwnerScopedStudyBankRepository(dsn)
-    first, *_ = _cards(study, OWNER_A, 3)
-    with _as_owner(OWNER_A, study, library):
-        rated = client.post(
-            f"/api/review/items/{first.id}/rate",
-            json={"user_id": OWNER_A, "rating": "good", "expected_review_count": 0},
-        )
-        with_zone = client.get("/api/review/queue", params={"user_id": OWNER_A, "new_limit": 1, "time_zone": "UTC"})
-        without = client.get("/api/review/queue", params={"user_id": OWNER_A, "new_limit": 1})
-
-    new_with_zone = [card for card in with_zone.json()["items"] if card["review"]["review_count"] == 0]
-    new_without = [card for card in without.json()["items"] if card["review"]["review_count"] == 0]
-    assert rated.status_code == 200
-    assert new_with_zone == []  # today's one new card is already used up
-    assert len(new_without) == 1  # no zone: the per-session limit, as before
+        _migration(dsn, "0012_review_new_card_quota.down.sql")
+    assert len(_ledger(dsn)) == 1

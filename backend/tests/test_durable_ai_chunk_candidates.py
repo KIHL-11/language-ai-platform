@@ -73,8 +73,20 @@ def _dsn() -> str:
     return value
 
 
+# The disposable test database is torn down from the bottom (0001/0002 down)
+# between tests; 0012's quota tables reference cloud_users, so drop them first.
+# Production rollback goes through 0012 down, which refuses while they hold data.
+_DROP_REVIEW_QUOTA = (
+    "DROP TABLE IF EXISTS cloud_review_new_card_ledger; "
+    "DROP TABLE IF EXISTS cloud_review_settings;"
+)
+_BOTTOM_DOWNS = {"0001_owner_scoped_library.down.sql", "0002_owner_scoped_study_bank.down.sql"}
+
+
 def _migration(dsn: str, filename: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as connection:
+        if filename in _BOTTOM_DOWNS:
+            connection.execute(_DROP_REVIEW_QUOTA, prepare=False)
         connection.execute((MIGRATIONS / filename).read_text(), prepare=False)
 
 
@@ -167,7 +179,7 @@ def cloud_candidates(tmp_path):
         "0001_owner_scoped_library.up.sql",
         "0010_library_media_cleanup_worker.up.sql",
         "0002_owner_scoped_study_bank.up.sql",
-        "0012_review_first_reviewed_at.up.sql",
+        "0012_review_new_card_quota.up.sql",
         "0003_owner_scoped_ai_chunk_candidates.up.sql",
         "0011_ai_chunk_edit_action.up.sql",
     ):

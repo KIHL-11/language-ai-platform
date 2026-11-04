@@ -14,8 +14,18 @@ export interface ReviewFilters {
   userId: string
   language?: SourceLanguage
   kind?: StudyKind
-  // Cloud: the learner's IANA time zone; new cards become a per-local-day quota.
-  timeZone?: string
+}
+
+// Cloud only: the account's stored time zone and server-side daily quota.
+export interface ReviewSettings {
+  time_zone: string
+  configured: boolean
+  daily_new_limit: number
+  new_cards_today: number
+  new_cards_remaining: number
+  quota_day: string
+  pending_time_zone: string | null
+  pending_effective_at: string | null
 }
 
 export interface ReviewRatingResult {
