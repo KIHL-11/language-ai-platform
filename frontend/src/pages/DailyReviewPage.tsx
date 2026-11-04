@@ -2,14 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   getReviewQueue,
+  getReviewSettings,
   getReviewSummary,
+  isDailyQuotaExhausted,
   rateReviewItem,
   ReviewApiError,
+  updateReviewTimeZone,
 } from '../api/review'
 import { getSessionLearnerId } from '../auth/identity'
+import { cloudAuth, CloudConflictError } from '../auth/client'
 import { formatNextReview } from '../review/formatNextReview'
 import type { SourceLanguage } from '../types/lesson'
-import type { ReviewRating, ReviewSummary } from '../types/review'
+import type { ReviewRating, ReviewSettings, ReviewSummary } from '../types/review'
 import type { StudyItem, StudyKind } from '../types/studyBank'
 
 
@@ -20,6 +24,16 @@ function promptFor(item: StudyItem): string {
   const translation = item.provenance.find((source) => source.source_type === 'media' && source.sentence_translation.trim())
   if (translation?.source_type === 'media') return translation.sentence_translation
   return `Recall this saved ${item.kind}.`
+}
+
+// The browser's IANA time zone, used once to suggest the cloud account's
+// initial setting; it never changes the billing day of a request.
+function browserTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null
+  } catch {
+    return null
+  }
 }
 
 export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: SourceLanguage, targetIds: string[]) => void }) {
@@ -36,6 +50,28 @@ export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: Sour
   const [error, setError] = useState<string | null>(null)
   const [difficultChunks, setDifficultChunks] = useState<Array<{ id: string; language: SourceLanguage }>>([])
   const submittingRef = useRef(false)
+  // Cloud only: the account's server-side daily new-card quota.
+  const [settings, setSettings] = useState<ReviewSettings | null>(null)
+  const cloud = cloudAuth.getSnapshot().status === 'authenticated'
+
+  useEffect(() => {
+    if (!cloud) return
+    let current = true
+    void getReviewSettings(learnerId).then(async (value) => {
+      const suggested = browserTimeZone()
+      // A never-configured account takes the browser's zone once.
+      const settled = !value.configured && suggested && suggested !== value.time_zone
+        ? await updateReviewTimeZone(learnerId, suggested).catch(() => value)
+        : value
+      if (current) setSettings(settled)
+    }).catch(() => { /* the quota still applies server-side */ })
+    return () => { current = false }
+  }, [cloud, learnerId])
+
+  async function refreshSettings() {
+    if (!cloud) return
+    try { setSettings(await getReviewSettings(learnerId)) } catch { /* keep the last value */ }
+  }
 
   const filters = {
     userId: learnerId,
@@ -104,9 +140,25 @@ export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: Sour
       }
       setIndex((current) => current + 1)
       setRevealed(false)
+      if (card.review.review_count === 0) void refreshSettings()
       if (index + 1 >= cards.length) await refreshSummary()
     } catch (caught) {
-      if (caught instanceof ReviewApiError && caught.status === 409) {
+      if (isDailyQuotaExhausted(caught)) {
+        // Not a stale card: today's new cards are used up. Skip the remaining
+        // new cards this session; due reviews continue.
+        setError("Today's new-card limit is used up. Due reviews are still available; new cards return tomorrow.")
+        setCards((current) => current && [
+          ...current.slice(0, index),
+          ...current.slice(index).filter((value) => value.review.review_count > 0),
+        ])
+        setRevealed(false)
+        void refreshSettings()
+        return
+      }
+      // Another tab rated this card first. In cloud the client raises
+      // CloudConflictError; an identity change is a different 409 and the
+      // workspace remounts, so it is not treated as a card conflict.
+      if (caught instanceof CloudConflictError || (caught instanceof ReviewApiError && caught.status === 409)) {
         setError('This card changed elsewhere. The review queue has been refreshed.')
         try {
           const queue = await getReviewQueue(filters)
@@ -163,7 +215,7 @@ export default function DailyReviewPage({ onSpeak }: { onSpeak?: (language: Sour
             <>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="border-y border-[#ccd6d1] bg-white p-5"><h2 className="font-semibold">Due now</h2><p className="mt-3">Words <strong>{summary.due_words}</strong></p><p>Chunks <strong>{summary.due_chunks}</strong></p></div>
-                <div className="border-y border-[#ccd6d1] bg-white p-5"><h2 className="font-semibold">New</h2><p className="mt-3">Words <strong>{summary.new_words}</strong></p><p>Chunks <strong>{summary.new_chunks}</strong></p></div>
+                <div className="border-y border-[#ccd6d1] bg-white p-5"><h2 className="font-semibold">New</h2><p className="mt-3">Words <strong>{summary.new_words}</strong></p><p>Chunks <strong>{summary.new_chunks}</strong></p>{settings && <p className="mt-2 text-sm text-[#66726e]">New cards left today <strong>{settings.new_cards_remaining}</strong> of {settings.daily_new_limit} ({settings.time_zone})</p>}</div>
               </div>
               <button type="button" onClick={() => void startReview()} className="h-11 bg-[#176b5b] px-5 font-semibold text-white">Start Daily Review</button>
             </>

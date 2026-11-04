@@ -63,6 +63,8 @@ describe('Daily Review', () => {
     const queueUrl = String(fetchMock.mock.calls.find(([url]) => String(url).includes('/queue'))?.[0])
     expect(queueUrl).toContain('language=de')
     expect(queueUrl).toContain('kind=chunk')
+    // Personal keeps its per-session new-card limit: no learner time zone.
+    expect(queueUrl).not.toContain('time_zone')
   })
 
   it('keeps the target and rating controls hidden until Reveal, then shows metadata and provenance', async () => {

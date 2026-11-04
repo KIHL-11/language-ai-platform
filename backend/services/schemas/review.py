@@ -37,3 +37,21 @@ class ReviewRatingResponse(StudyModel):
 
 
 ReviewKind = Literal["word", "chunk"]
+
+
+class ReviewSettings(StudyModel):
+    """Cloud Daily Review settings. The daily limit is server-side only."""
+
+    time_zone: str
+    configured: bool
+    daily_new_limit: int
+    new_cards_today: int
+    new_cards_remaining: int
+    quota_day: str
+    pending_time_zone: str | None = None
+    pending_effective_at: datetime | None = None
+
+
+class ReviewSettingsUpdate(StudyModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    time_zone: str = Field(min_length=1, max_length=64)

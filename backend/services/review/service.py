@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+
 from services.schemas.review import ReviewSummary
 from services.schemas.study_bank import ReviewRating, StudyItem
 from services.study_bank.owner_repository import OwnerScopedReviewRepository
@@ -66,7 +67,7 @@ class ReviewService:
             (item for item in items if item.review.review_count == 0),
             key=lambda item: (item.created_at, item.id),
         )
-        return selected + new[:min(remaining, new_limit)]
+        return selected + new[:min(remaining, self._new_allowed(user_id, new_limit))]
 
     def rate(
         self,
@@ -81,6 +82,15 @@ class ReviewService:
             rating,
             expected_review_count,
         )
+
+    def _new_allowed(self, user_id: str, new_limit: int) -> int:
+        """New cards to show. In cloud, new_limit may only narrow the
+        account's server-side daily quota (shared by every language, kind,
+        tab and device); Personal keeps new_limit per session."""
+        allowance = getattr(self.store, "new_card_allowance", None)
+        if not callable(allowance):
+            return new_limit
+        return min(new_limit, allowance(user_id).remaining)
 
     def _now(self) -> datetime:
         value = self.clock()

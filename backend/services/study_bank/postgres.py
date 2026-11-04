@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from services.review.local_day import local_day_bounds, parse_time_zone
 from services.review.scheduler import schedule_review
 from services.schemas.study_bank import (
     MediaStudyProvenance,
@@ -38,6 +40,28 @@ class StudyBankOwnerNotProvisionedError(StudyBankStoreError):
 
 class CloudStudyBankUnavailableError(StudyBankStoreError):
     """Cloud persistence failed without leaking driver or connection details."""
+
+
+class DailyNewCardQuotaExceededError(StudyBankStoreError):
+    """A first rating would exceed the account's daily new-card quota."""
+
+
+@dataclass(frozen=True)
+class ReviewQuotaSettings:
+    time_zone: str
+    configured: bool
+    daily_new_limit: int
+    pending_time_zone: str | None
+    pending_effective_at: datetime | None
+
+
+@dataclass(frozen=True)
+class NewCardAllowance:
+    daily_limit: int
+    used_today: int
+    remaining: int
+    quota_day: date
+    time_zone: str
 
 
 class PostgresOwnerScopedStudyBankRepository:
@@ -324,6 +348,11 @@ class PostgresOwnerScopedStudyBankRepository:
                 if item.review.review_count != expected_review_count:
                     raise StudyBankConflictError("Study Bank review state is stale")
                 now = self._now()
+                if item.review.review_count == 0:
+                    # A first rating spends the account's daily new-card quota
+                    # in this same transaction (B-5). Lock order: card, then
+                    # the account settings row; no path takes them reversed.
+                    self._consume_new_card(connection, owner_user_id, item.id, now)
                 previous_due = item.review.due_at
                 review = schedule_review(item.review, rating, now)
                 updated = connection.execute(
@@ -350,6 +379,148 @@ class PostgresOwnerScopedStudyBankRepository:
             raise
         except psycopg.Error as exc:
             raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
+    def new_card_allowance(self, owner_user_id: str) -> NewCardAllowance:
+        """Today's account-wide new-card quota (all languages and kinds)."""
+        self._validate_owner(owner_user_id)
+        try:
+            with self._connect() as connection:
+                self._set_owner_context(connection, owner_user_id)
+                self._assert_owner_provisioned(connection, owner_user_id)
+                settings = self._review_settings(connection, owner_user_id, self._now(), lock=False)
+                return self._allowance(connection, owner_user_id, settings, self._now())
+        except StudyBankOwnerNotProvisionedError:
+            raise
+        except psycopg.Error as exc:
+            raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
+    def review_settings(self, owner_user_id: str) -> ReviewQuotaSettings:
+        self._validate_owner(owner_user_id)
+        try:
+            with self._connect() as connection:
+                self._set_owner_context(connection, owner_user_id)
+                self._assert_owner_provisioned(connection, owner_user_id)
+                return self._review_settings(connection, owner_user_id, self._now(), lock=False)
+        except StudyBankOwnerNotProvisionedError:
+            raise
+        except psycopg.Error as exc:
+            raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
+    def set_time_zone(self, owner_user_id: str, time_zone: str) -> ReviewQuotaSettings:
+        """Store the learner's IANA zone. It applies at once if no new card was
+        started today; otherwise at the next local midnight of the current
+        zone, so a change can never reopen a day's spent quota."""
+        self._validate_owner(owner_user_id)
+        parse_time_zone(time_zone)
+        try:
+            with self._connect() as connection:
+                self._set_owner_context(connection, owner_user_id)
+                self._assert_owner_provisioned(connection, owner_user_id)
+                now = self._now()
+                settings = self._review_settings(connection, owner_user_id, now, lock=True)
+                used = self._used_today(connection, owner_user_id, settings, now)
+                if used == 0 or time_zone == settings.time_zone:
+                    connection.execute(
+                        """
+                        UPDATE cloud_review_settings SET time_zone=%s, configured=TRUE,
+                            pending_time_zone=NULL, pending_effective_at=NULL, updated_at=%s
+                        WHERE owner_user_id=%s
+                        """,
+                        (time_zone, now, owner_user_id),
+                    )
+                else:
+                    _, effective_at = local_day_bounds(now, parse_time_zone(settings.time_zone))
+                    connection.execute(
+                        """
+                        UPDATE cloud_review_settings SET configured=TRUE,
+                            pending_time_zone=%s, pending_effective_at=%s, updated_at=%s
+                        WHERE owner_user_id=%s
+                        """,
+                        (time_zone, effective_at, now, owner_user_id),
+                    )
+                return self._review_settings(connection, owner_user_id, now, lock=False)
+        except StudyBankOwnerNotProvisionedError:
+            raise
+        except psycopg.Error as exc:
+            raise CloudStudyBankUnavailableError("Cloud Study Bank is unavailable") from exc
+
+    def _review_settings(self, connection, owner: str, now: datetime, *, lock: bool) -> ReviewQuotaSettings:
+        """The account's settings row (created with UTC defaults), with any
+        pending time zone applied once its effective instant has passed."""
+        connection.execute(
+            """
+            INSERT INTO cloud_review_settings (owner_user_id, updated_at)
+            VALUES (%s, %s) ON CONFLICT (owner_user_id) DO NOTHING
+            """,
+            (owner, now),
+        )
+        row = connection.execute(
+            "SELECT * FROM cloud_review_settings WHERE owner_user_id=%s" + (" FOR UPDATE" if lock else ""),
+            (owner,),
+        ).fetchone()
+        zone = row["time_zone"]
+        if row["pending_time_zone"] is not None and row["pending_effective_at"] <= now:
+            zone = row["pending_time_zone"]
+            if lock:
+                connection.execute(
+                    """
+                    UPDATE cloud_review_settings SET time_zone=%s,
+                        pending_time_zone=NULL, pending_effective_at=NULL, updated_at=%s
+                    WHERE owner_user_id=%s
+                    """,
+                    (zone, now, owner),
+                )
+        pending = row["pending_time_zone"] if zone != row["pending_time_zone"] else None
+        return ReviewQuotaSettings(
+            time_zone=zone,
+            configured=row["configured"],
+            daily_new_limit=row["daily_new_limit"],
+            pending_time_zone=pending,
+            pending_effective_at=row["pending_effective_at"] if pending else None,
+        )
+
+    @staticmethod
+    def _used_today(connection, owner: str, settings: ReviewQuotaSettings, now: datetime) -> int:
+        """New cards charged against the current local day: those recorded
+        under today's date, or charged within today's local window. The
+        second clause keeps a switch to a zone more than a day behind from
+        reopening an earlier, uncharged date."""
+        zone = parse_time_zone(settings.time_zone)
+        day = now.astimezone(zone).date()
+        start, end = local_day_bounds(now, zone)
+        return int(connection.execute(
+            """
+            SELECT count(*) AS used FROM cloud_review_new_card_ledger
+            WHERE owner_user_id=%s
+              AND (quota_day=%s OR (consumed_at >= %s AND consumed_at < %s))
+            """,
+            (owner, day, start, end),
+        ).fetchone()["used"])
+
+    def _allowance(self, connection, owner, settings, now) -> NewCardAllowance:
+        used = self._used_today(connection, owner, settings, now)
+        return NewCardAllowance(
+            daily_limit=settings.daily_new_limit,
+            used_today=used,
+            remaining=max(0, settings.daily_new_limit - used),
+            quota_day=now.astimezone(parse_time_zone(settings.time_zone)).date(),
+            time_zone=settings.time_zone,
+        )
+
+    def _consume_new_card(self, connection, owner: str, item_id: str, now: datetime) -> None:
+        settings = self._review_settings(connection, owner, now, lock=True)
+        allowance = self._allowance(connection, owner, settings, now)
+        if allowance.remaining <= 0:
+            raise DailyNewCardQuotaExceededError("Today's new-card quota is used up")
+        connection.execute(
+            """
+            INSERT INTO cloud_review_new_card_ledger (
+                owner_user_id, study_item_id, quota_day, time_zone, consumed_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (owner_user_id, study_item_id) DO NOTHING
+            """,
+            (owner, item_id, allowance.quota_day, settings.time_zone, now),
+        )
 
     def active_chunk_keys(self, owner_user_id: str, language: str) -> set[str]:
         return {

@@ -52,8 +52,20 @@ def _dsn() -> str:
     return value
 
 
+# The disposable test database is torn down from the bottom (0001/0002 down)
+# between tests; 0012's quota tables reference cloud_users, so drop them first.
+# Production rollback goes through 0012 down, which refuses while they hold data.
+_DROP_REVIEW_QUOTA = (
+    "DROP TABLE IF EXISTS cloud_review_new_card_ledger; "
+    "DROP TABLE IF EXISTS cloud_review_settings;"
+)
+_BOTTOM_DOWNS = {"0001_owner_scoped_library.down.sql", "0002_owner_scoped_study_bank.down.sql"}
+
+
 def _migration(dsn: str, filename: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as connection:
+        if filename in _BOTTOM_DOWNS:
+            connection.execute(_DROP_REVIEW_QUOTA, prepare=False)
         connection.execute(
             (MIGRATIONS / filename).read_text(encoding="utf-8"), prepare=False
         )
@@ -129,6 +141,7 @@ def cloud_repositories(tmp_path):
     _migration(dsn, "0001_owner_scoped_library.up.sql")
     _migration(dsn, "0010_library_media_cleanup_worker.up.sql")
     _migration(dsn, "0002_owner_scoped_study_bank.up.sql")
+    _migration(dsn, "0012_review_new_card_quota.up.sql")
     with psycopg.connect(dsn) as connection:
         connection.cursor().executemany(
             "INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s)",
@@ -188,6 +201,7 @@ def test_migration_is_reversible_and_constraints_are_owner_scoped():
     _migration(dsn, "0001_owner_scoped_library.up.sql")
     _migration(dsn, "0010_library_media_cleanup_worker.up.sql")
     _migration(dsn, "0002_owner_scoped_study_bank.up.sql")
+    _migration(dsn, "0012_review_new_card_quota.up.sql")
     with psycopg.connect(dsn) as connection:
         constraints = {
             row[0] for row in connection.execute(
