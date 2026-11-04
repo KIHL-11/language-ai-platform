@@ -47,7 +47,9 @@ export async function generateLibraryChunkSuggestions(
       source_language: language,
       source: { source_type: 'library_passage', library_item_id: libraryItemId, sentence_ids: sentenceIds },
       max_candidates: 8,
-      idempotency_key: key(),
+      // Deterministic per lesson passage, so a retry after a lost response
+      // replays the same batch instead of creating a second one.
+      idempotency_key: `library:${language}:${libraryItemId}:${sentenceIds.join('.')}`.slice(0, 128),
     }),
   }), 'Generating Chunk candidates failed')
 }

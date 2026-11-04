@@ -54,6 +54,18 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
     setEdits(Object.fromEntries(result.candidates.map((candidate) => [candidate.candidate_id, editOf(candidate)])))
   }
 
+  // After a conflict: take the server's state, but keep unsaved local edits
+  // on every candidate whose saved state and version did not change.
+  function reconcileBatch(previous: AiChunkBatch, result: AiChunkBatch) {
+    const before = new Map(previous.candidates.map((candidate) => [candidate.candidate_id, candidate]))
+    setBatch(result)
+    setEdits((current) => Object.fromEntries(result.candidates.map((candidate) => {
+      const old = before.get(candidate.candidate_id)
+      const unchanged = old && old.version === candidate.version && old.state === candidate.state
+      return [candidate.candidate_id, unchanged && current[candidate.candidate_id] ? current[candidate.candidate_id] : editOf(candidate)]
+    })))
+  }
+
   async function generate() {
     setBusy('generate')
     try {
@@ -90,11 +102,15 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
       setNotice(result.warnings?.length ? result.warnings.join(' ') : action === 'edit' ? 'Edits saved. The candidate is still waiting for your decision.' : null)
     } catch (reason) {
       if (reason instanceof CloudConflictError) {
-        // Another tab or device changed this candidate: show its saved state.
+        // Another tab or device changed it, or the batch expired: show the
+        // saved state without discarding unsaved edits on other candidates.
         try {
-          showBatch(await getChunkSuggestions(learnerId, batch.batch_id))
-          setError('This candidate was changed elsewhere. The latest saved version is shown.')
-        } catch { setError('That candidate changed elsewhere and could not be reloaded.') }
+          const latest = await getChunkSuggestions(learnerId, batch.batch_id)
+          reconcileBatch(batch, latest)
+          setError(latest.status === 'expired'
+            ? 'These candidates have expired. Generate them again to continue.'
+            : 'This candidate was changed elsewhere. The latest saved version is shown.')
+        } catch { setError('That candidate could not be saved or reloaded. Refresh and try again.') }
       } else {
         setError('That candidate decision could not be saved. Refresh and try again.')
       }
@@ -145,7 +161,7 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
             <div className="mt-3 flex gap-2">
               <button type="button" disabled={busy !== null} onClick={() => void decide(candidate, changed ? 'edit_and_accept' : 'accept')}
                 className="h-9 bg-[#176b5b] px-3 text-white disabled:opacity-50">Accept</button>
-              <button type="button" disabled={busy !== null || !changed} onClick={() => void decide(candidate, 'edit')} className="h-9 border border-[#176b5b] px-3 text-[#176b5b] disabled:opacity-50">Save edits</button>
+              {librarySource && <button type="button" disabled={busy !== null || !changed} onClick={() => void decide(candidate, 'edit')} className="h-9 border border-[#176b5b] px-3 text-[#176b5b] disabled:opacity-50">Save edits</button>}
               <button type="button" disabled={busy !== null} onClick={() => void decide(candidate, 'reject')} className="h-9 border border-[#8f1d14] px-3 text-[#8f1d14] disabled:opacity-50">Reject</button>
             </div>
           </> : <p className="mt-2 font-semibold">{candidate.text}</p>}

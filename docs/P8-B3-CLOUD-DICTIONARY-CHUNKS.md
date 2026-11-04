@@ -54,16 +54,31 @@ exactly as the cloud Words & Chunks page already does. B-3 adds:
   - It uses the same idempotency key, stale-version 409 and immutable-evidence
     checks as every decision.
   - An edited candidate can still be accepted (with the edited content) or
-    rejected.
+    rejected. Once the edit is saved, a plain accept records the state
+    `accepted`; the edit itself stays in the decision log.
+  - The text is cleaned the same way as at generation. The stale
+    "already in Study Bank" hint is cleared, and accepting recomputes it.
+  - At most 20 saved edits per candidate; after that the learner must
+    accept or reject.
+  - **Cloud only.** Personal Desktop refuses `edit` with a 422 and shows no
+    "Save edits" button, so its accept / edit_and_accept / reject contract is
+    unchanged.
 - **UI.** `AiChunkOrganizer` takes an optional `librarySource`.
   - Each candidate shows its source sentence and time.
   - "Save edits" is enabled only when something changed.
   - On a 409 the batch is reloaded and the other tab's state is shown, never
-    overwritten.
+    overwritten. Unsaved edits on candidates that did not change are kept.
+    An expired batch gets its own message.
+  - Library generation uses an idempotency key derived from the language,
+    lesson and sentences, so a retry after a lost response replays the same
+    batch.
   - Manual-text mode is unchanged.
 - **Migration `0011_ai_chunk_edit_action`.** It allows `edit` in
   `cloud_ai_chunk_decisions`, with the study-item guard. The down migration
-  refuses while edit decisions exist, rather than deleting them.
+  refuses while edit decisions exist, rather than deleting them. Run it as
+  the table owner with BYPASSRLS, or as a superuser. The table forces
+  row-level security, so a restricted role does not see the friendly
+  message, but the constraint still refuses.
 
 ## Security boundary
 
@@ -84,7 +99,9 @@ exactly as the cloud Words & Chunks page already does. B-3 adds:
     raise on any access;
   - fail-closed for every other setting and for an injected local service;
   - 401 without a session, and Personal unchanged.
-- **`test_cloud_ai_chunk_library.py`** (13 tests):
+- **`test_cloud_ai_chunk_library.py`** (15 tests; additions from the
+  review: Personal refuses `edit`, the edit cap, clean text and the cleared
+  hint):
   - EN/DE generation from a Library lesson with full provenance;
   - edits saved without a Study Bank write and durable on re-read;
   - edit then accept;
@@ -97,11 +114,31 @@ exactly as the cloud Words & Chunks page already does. B-3 adds:
   - the edit-content requirement;
   - a Personal edit;
   - 0011 rollback refusing while edits exist and restoring the constraint.
-- **Frontend** (`CloudLibrary.test.tsx`, 3 new):
+- **Frontend** (`AiChunkOrganizer.library.test.tsx`, 4 tests from the review:
+  manual and Personal mode have no save-only edit, a conflict reload keeps
+  other candidates' unsaved edits, the expired message, and the deterministic
+  key; plus `CloudLibrary.test.tsx`, 3 new):
   - a subtitle lookup with CSRF and no Study Bank section;
   - Find chunks with provenance, Save edits sending `edit`, then Accept;
   - a 409 reloading the other tab's state.
-- **Mutation:** 14 guards were removed one at a time and each fails the tests.
+- **Mutation:** 22 guards were removed one at a time and each fails the
+  tests: 14 for the feature and 8 for the review fixes.
+
+## Independent review (`2b65c67`)
+
+A separate reviewer agent (fresh context) found no Critical or High issues,
+and confirmed there is no cloud path to Personal stores and no Study Bank
+write from `edit`. Its findings:
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| Medium | "Save edits" and backend `edit` also appeared in Personal | cloud only; Personal refuses with 422 |
+| Medium | a conflict reload dropped unsaved edits on other candidates | reconcile per candidate; separate expired message |
+| Low | 0011 down guard is blind under an RLS-restricted role | documented; the constraint still refuses |
+| Low | edits stored raw text and kept a stale hint | cleaned text, hint cleared |
+| Low | edit then plain accept is recorded as `accepted` | intended, documented |
+| Low | unbounded saved edits | capped at 20 |
+| Low | a retried generation created a new batch | deterministic key |
 
 ## Not covered
 

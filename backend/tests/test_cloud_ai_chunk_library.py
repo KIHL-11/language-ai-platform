@@ -268,7 +268,9 @@ def test_edit_requires_edit_content():
         })
 
 
-def test_personal_desktop_edit_keeps_the_candidate_proposed(tmp_path):
+def test_personal_desktop_refuses_save_only_edits(tmp_path):
+    """Review M1: Personal keeps its accept/edit_and_accept/reject contract."""
+    from services.ai_chunks.service import AiChunkValidationError
     from services.ai_chunks.store import InMemoryAiChunkStore
     from services.library.store import LearningLibraryStore
     from services.study_bank.store import StudyBankStore
@@ -283,12 +285,51 @@ def test_personal_desktop_edit_keeps_the_candidate_proposed(tmp_path):
     })
     batch = service.suggest("local-learner", request)
 
-    edited = service.decide("local-learner", batch.batch_id, _edit(
-        batch.candidates[0], owner="local-learner", key="b3-personal-edit-01"
+    with pytest.raises(AiChunkValidationError):
+        service.decide("local-learner", batch.batch_id, _edit(
+            batch.candidates[0], owner="local-learner", key="b3-personal-edit-01"
+        ))
+
+    unchanged = service.get_batch("local-learner", batch.batch_id).candidates[0]
+    assert (unchanged.state, unchanged.version) == ("proposed", 1)
+    assert study.list_items("local-learner") == []
+
+
+def test_saved_edits_are_capped_per_candidate(cloud_candidates):
+    from services.ai_chunks.service import MAX_SAVED_EDITS, AiChunkValidationError
+
+    _, clock, study, library, candidates = cloud_candidates
+    service = _service(clock, study, library, candidates)
+    item = library.create_for_owner(OWNER_A, _lesson())
+    batch = service.suggest(OWNER_A, _library(OWNER_A, item.id))
+    candidate = batch.candidates[0]
+    for index in range(MAX_SAVED_EDITS):
+        candidate = service.decide(OWNER_A, batch.batch_id, _edit(
+            candidate, key=f"b3-cap-edit-{index:03d}", edit={**EDIT, "usage_note": f"note {index}"},
+        )).candidate
+
+    with pytest.raises(AiChunkValidationError):
+        service.decide(OWNER_A, batch.batch_id, _edit(candidate, key="b3-cap-edit-over"))
+    accepted = service.decide(OWNER_A, batch.batch_id, _decision(candidate, key="b3-cap-accept"))
+    assert candidate.version == MAX_SAVED_EDITS + 1
+    assert accepted.candidate.state == "accepted"
+
+
+def test_a_saved_edit_stores_clean_text_and_clears_a_stale_study_bank_hint(cloud_candidates):
+    _, clock, study, library, candidates = cloud_candidates
+    service = _service(clock, study, library, candidates)
+    item = library.create_for_owner(OWNER_A, _lesson())
+    first = service.suggest(OWNER_A, _library(OWNER_A, item.id))
+    service.decide(OWNER_A, first.batch_id, _decision(first.candidates[0], key="b3-hint-accept"))
+    second = service.suggest(OWNER_A, _library(OWNER_A, item.id, key="b3-library-request-hint"))
+    hinted = next(value for value in second.candidates if value.existing_study_item_id is not None)
+
+    edited = service.decide(OWNER_A, second.batch_id, _edit(
+        hinted, key="b3-hint-edit", edit={**EDIT, "text": "it  depends on"},
     )).candidate
 
-    assert (edited.state, edited.version, edited.text) == ("proposed", 2, EDIT["text"])
-    assert study.list_items("local-learner") == []
+    assert edited.text == "it depends on"
+    assert (edited.existing_study_item_id, edited.existing_study_item_active) == (None, None)
 
 
 def test_0011_rolls_back_only_without_edit_decisions(cloud_candidates):

@@ -1,6 +1,10 @@
 BEGIN;
 
 -- Refuse rather than delete learner decisions: 0003 cannot represent an edit.
+-- Run as the table owner with BYPASSRLS (or a superuser): the table forces
+-- row-level security, so under a restricted role this EXISTS sees no rows.
+-- The ADD CONSTRAINT below still refuses in that case (constraint validation
+-- ignores RLS), only without this message.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM cloud_ai_chunk_decisions WHERE action = 'edit') THEN
