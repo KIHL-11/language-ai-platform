@@ -225,6 +225,33 @@ def test_a_time_zone_change_after_spending_waits_for_the_next_local_midnight(quo
     assert study.new_card_allowance(OWNER_A).remaining == LIMIT
 
 
+def test_a_switch_more_than_a_day_behind_cannot_reopen_an_earlier_date(quota):
+    _, clock, study, _ = quota
+    kiritimati = ZoneInfo("Pacific/Kiritimati")  # UTC+14
+    study.set_time_zone(OWNER_A, "Pacific/Kiritimati")
+    clock.value = datetime(2026, 11, 4, 22, 0, tzinfo=kiritimati)
+    cards = _cards(study, OWNER_A, LIMIT + 1)
+    for card in cards[:LIMIT]:
+        study.rate_item(OWNER_A, card.id, "good", 0)
+    study.set_time_zone(OWNER_A, "Pacific/Pago_Pago")  # UTC-11, 25 hours behind
+
+    # Kiritimati midnight: in Pago Pago it is still 3 Nov, a date with no
+    # ledger rows, yet the spent cards were all rated inside that local day.
+    clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=kiritimati)
+    allowance = study.new_card_allowance(OWNER_A)
+    with pytest.raises(DailyNewCardQuotaExceededError):
+        study.rate_item(OWNER_A, cards[LIMIT].id, "good", 0)
+
+    assert (allowance.time_zone, allowance.quota_day.isoformat()) == ("Pacific/Pago_Pago", "2026-11-03")
+    assert allowance.remaining == 0
+    # 4 Nov in Pago Pago shares its date with the spent Kiritimati day, so it
+    # stays spent too (conservative); 5 Nov is a fresh day.
+    clock.value = datetime(2026, 11, 4, 0, 1, tzinfo=ZoneInfo("Pacific/Pago_Pago"))
+    assert study.new_card_allowance(OWNER_A).remaining == 0
+    clock.value = datetime(2026, 11, 5, 0, 1, tzinfo=ZoneInfo("Pacific/Pago_Pago"))
+    assert study.new_card_allowance(OWNER_A).remaining == LIMIT
+
+
 def test_the_quota_window_spans_a_whole_25_hour_dst_day(quota):
     _, clock, study, _ = quota
     berlin = ZoneInfo("Europe/Berlin")

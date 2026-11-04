@@ -481,10 +481,20 @@ class PostgresOwnerScopedStudyBankRepository:
 
     @staticmethod
     def _used_today(connection, owner: str, settings: ReviewQuotaSettings, now: datetime) -> int:
-        day = now.astimezone(parse_time_zone(settings.time_zone)).date()
+        """New cards charged against the current local day: those recorded
+        under today's date, or charged within today's local window. The
+        second clause keeps a switch to a zone more than a day behind from
+        reopening an earlier, uncharged date."""
+        zone = parse_time_zone(settings.time_zone)
+        day = now.astimezone(zone).date()
+        start, end = local_day_bounds(now, zone)
         return int(connection.execute(
-            "SELECT count(*) AS used FROM cloud_review_new_card_ledger WHERE owner_user_id=%s AND quota_day=%s",
-            (owner, day),
+            """
+            SELECT count(*) AS used FROM cloud_review_new_card_ledger
+            WHERE owner_user_id=%s
+              AND (quota_day=%s OR (consumed_at >= %s AND consumed_at < %s))
+            """,
+            (owner, day, start, end),
         ).fetchone()["used"])
 
     def _allowance(self, connection, owner, settings, now) -> NewCardAllowance:

@@ -99,11 +99,19 @@ allowance and keeps its per-session `new_limit`.
     applies at once.
   - Otherwise it is stored as pending until the **next local midnight of the
     current zone** and applied when the settings row is next locked or read.
-- **Quota day.** The quota counts by `quota_day`, the local date in the
-  effective zone. Switching zones therefore cannot reopen a calendar day that
-  is already spent. For example: 10 used in Tokyo, then a switch to New York
-  that takes effect at Tokyo midnight; the New York date is still 2026-11-04,
-  so it stays spent until New York midnight.
+- **Quota day.** A charge counts against the current local day if either:
+  - it was recorded under the same date (`quota_day`), or
+  - its `consumed_at` falls inside the current local-day window.
+
+  A zone switch therefore cannot reopen spent first ratings.
+  - Example: 10 used in Tokyo, then a switch to New York that takes effect at
+    Tokyo midnight. The New York date is still 2026-11-04, so it stays spent
+    until New York midnight.
+  - **Jumps of more than 24 hours.** Kiritimati +14 → Pago Pago −11 lands on
+    the earlier date 11-03. The window clause still counts the charges.
+  - **Conservative trade-off.** Pago Pago's 11-04 shares its date with the
+    spent Kiritimati day, so it stays spent too. A switch can cost part of a
+    day; it never grants extra cards.
 - **Local day bounds.** `local_day_bounds` resolves each local midnight
   separately, so a day is 23 or 25 hours across a DST change. Non-whole-hour
   zones such as Kolkata (+5:30) work too, and Santiago's skipped midnight
@@ -124,7 +132,7 @@ allowance and keeps its per-session `new_limit`.
 
 ## Tests
 
-- **`test_cloud_daily_review.py`** (31 tests, owner checklist 1–10):
+- **`test_cloud_daily_review.py`** (32 tests, owner checklist 1–10):
   1. The quota applies with no `time_zone`.
   2. EN/DE words and chunks share 10.
   3. `new_limit=100` cannot raise it, and the PUT refuses `daily_new_limit`.
@@ -136,6 +144,8 @@ allowance and keeps its per-session `new_limit`.
      - default UTC, and the first choice applies at once;
      - Tokyo → New York is pending until Tokyo midnight, after which the New
        York date stays spent, and the next New York day resets;
+     - Kiritimati → Pago Pago, a switch more than a day behind, cannot reopen
+       11-03;
      - a 25-hour Berlin DST day;
      - local-day bounds for New York, Berlin, Santiago and Kolkata;
      - IANA-only names.
@@ -158,12 +168,14 @@ allowance and keeps its per-session `new_limit`.
   - the 409 reload, an in-flight rating across an account switch, and
     sign-out.
 - **`DailyReviewPage.test.tsx`:** Personal sends no `time_zone`.
-- **Mutation check:** 15 mutants, all killed. Backend (10):
+- **Mutation check:** 17 mutants, all killed. Backend (12):
   - quota check, first-rating gate and ledger insert each removed;
   - the settings lock removed;
   - the pending boundary ignored;
   - a zone switch always immediate;
   - the quota day counted in UTC;
+  - the window clause removed;
+  - the date clause removed;
   - deletion refunding;
   - `new_limit` able to raise;
   - the quota error mapped to 409.
