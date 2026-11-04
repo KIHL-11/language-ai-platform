@@ -17,6 +17,7 @@ vi.mock('../api/aiChunks', () => ({
   generateChunkSuggestions: vi.fn(),
   generateLibraryChunkSuggestions: vi.fn(),
   getChunkSuggestions: vi.fn(),
+  newIdempotencyKey: vi.fn(() => crypto.randomUUID().replaceAll('-', '')),
 }))
 
 const candidate = (id: string, text: string, extra: Partial<AiChunkCandidate> = {}): AiChunkCandidate => ({
@@ -84,17 +85,25 @@ describe('AiChunkOrganizer', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('expired'))
   })
 
-  it('sends a deterministic key for one lesson passage, so a retry replays it', async () => {
-    const { generateLibraryChunkSuggestions: real } = await vi.importActual<typeof import('../api/aiChunks')>('../api/aiChunks')
-    const fetchSpy = vi.fn(async () => new Response(JSON.stringify(batch([])), { headers: { 'Content-Type': 'application/json' } }))
-    vi.stubGlobal('fetch', fetchSpy)
-    try {
-      await real('owner-a', 'de', 'item-1', [1, 2])
-      await real('owner-a', 'de', 'item-1', [1, 2])
-    } finally { vi.unstubAllGlobals() }
+  it('retries a failed generation with the same key, then uses a new key (re-review)', async () => {
+    vi.mocked(generateLibraryChunkSuggestions)
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce(batch([candidate('a', 'take part')], { source_type: 'library_passage' }))
+      .mockResolvedValueOnce(batch([candidate('a', 'take part')], { batch_id: 'batch-2', source_type: 'library_passage' }))
+    const user = userEvent.setup()
+    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Lesson', language: 'en', sentenceIds: [1] }} />)
+    const find = screen.getByRole('button', { name: 'Find chunks in this lesson' })
 
-    const keys = fetchSpy.mock.calls.map((call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)).idempotency_key)
+    await user.click(find)
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be generated')
+    await user.click(find)
+    await screen.findByRole('button', { name: 'Accept' })
+    await user.click(find)
+    await waitFor(() => expect(generateLibraryChunkSuggestions).toHaveBeenCalledTimes(3))
+
+    const keys = vi.mocked(generateLibraryChunkSuggestions).mock.calls.map((call) => call[4])
     expect(keys[0]).toBe(keys[1])
-    expect(keys[0]).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/)
+    expect(keys[2]).not.toBe(keys[1])
+    expect(keys.every((value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value!))).toBe(true)
   })
 })

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import { CloudConflictError } from '../auth/client'
 import {
@@ -6,6 +6,7 @@ import {
   generateChunkSuggestions,
   generateLibraryChunkSuggestions,
   getChunkSuggestions,
+  newIdempotencyKey,
 } from '../api/aiChunks'
 import type { AiChunkBatch, AiChunkCandidate, CandidateEdit } from '../types/aiChunks'
 import type { SourceLanguage } from '../types/lesson'
@@ -48,6 +49,10 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Held until a generation succeeds, so retrying a failed or lost request
+  // replays it instead of creating a second batch. A fixed per-lesson key
+  // would instead pin a re-imported or expired lesson to its first batch.
+  const generationKey = useRef<string | null>(null)
 
   function showBatch(result: AiChunkBatch) {
     setBatch(result)
@@ -69,12 +74,16 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
   async function generate() {
     setBusy('generate')
     try {
-      showBatch(librarySource
-        ? await generateLibraryChunkSuggestions(
+      if (librarySource) {
+        generationKey.current ??= newIdempotencyKey()
+        showBatch(await generateLibraryChunkSuggestions(
           learnerId, librarySource.language, librarySource.libraryItemId,
-          librarySource.sentenceIds.slice(0, MAX_LIBRARY_SENTENCES),
-        )
-        : await generateChunkSuggestions(learnerId, language, text))
+          librarySource.sentenceIds.slice(0, MAX_LIBRARY_SENTENCES), generationKey.current,
+        ))
+        generationKey.current = null
+      } else {
+        showBatch(await generateChunkSuggestions(learnerId, language, text))
+      }
       setError(null)
       setNotice(null)
     } catch { setError('Chunk candidates could not be generated.') }

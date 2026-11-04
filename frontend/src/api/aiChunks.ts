@@ -33,11 +33,18 @@ export async function generateChunkSuggestions(
 // B-3: candidates from sentences of one of the owner's Cloud Library lessons.
 // The server resolves the lesson under the session owner and records full
 // provenance (item, lesson, sentence, URL, timing) on every candidate.
+export function newIdempotencyKey(): string {
+  return key()
+}
+
 export async function generateLibraryChunkSuggestions(
   userId: string,
   language: SourceLanguage,
   libraryItemId: string,
   sentenceIds: number[],
+  // One key per generation attempt: the caller reuses it to retry a request
+  // whose response was lost, and drops it after a success.
+  idempotencyKey: string = key(),
 ): Promise<AiChunkBatch> {
   return responseJson<AiChunkBatch>(await apiFetch(`${API_BASE_URL}/api/ai/chunk-suggestions`, {
     method: 'POST',
@@ -47,9 +54,7 @@ export async function generateLibraryChunkSuggestions(
       source_language: language,
       source: { source_type: 'library_passage', library_item_id: libraryItemId, sentence_ids: sentenceIds },
       max_candidates: 8,
-      // Deterministic per lesson passage, so a retry after a lost response
-      // replays the same batch instead of creating a second one.
-      idempotency_key: `library:${language}:${libraryItemId}:${sentenceIds.join('.')}`.slice(0, 128),
+      idempotency_key: idempotencyKey,
     }),
   }), 'Generating Chunk candidates failed')
 }

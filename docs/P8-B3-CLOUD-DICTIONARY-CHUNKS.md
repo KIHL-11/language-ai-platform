@@ -69,9 +69,12 @@ exactly as the cloud Words & Chunks page already does. B-3 adds:
   - On a 409 the batch is reloaded and the other tab's state is shown, never
     overwritten. Unsaved edits on candidates that did not change are kept.
     An expired batch gets its own message.
-  - Library generation uses an idempotency key derived from the language,
-    lesson and sentences, so a retry after a lost response replays the same
-    batch.
+  - Library generation keeps one random idempotency key per attempt. A
+    retry after a failed or lost response reuses it, so it replays rather
+    than creating a second batch. The key is dropped after a success, so the
+    next "Find chunks" starts fresh. A fixed per-lesson key was tried and
+    reverted: it pinned a re-imported lesson, or one whose batch had
+    expired, to its first batch for good.
   - Manual-text mode is unchanged.
 - **Migration `0011_ai_chunk_edit_action`.** It allows `edit` in
   `cloud_ai_chunk_decisions`, with the study-item guard. The down migration
@@ -116,13 +119,14 @@ exactly as the cloud Words & Chunks page already does. B-3 adds:
   - 0011 rollback refusing while edits exist and restoring the constraint.
 - **Frontend** (`AiChunkOrganizer.library.test.tsx`, 4 tests from the review:
   manual and Personal mode have no save-only edit, a conflict reload keeps
-  other candidates' unsaved edits, the expired message, and the deterministic
-  key; plus `CloudLibrary.test.tsx`, 3 new):
+  other candidates' unsaved edits, the expired message, and a retry reusing
+  its key while the next generation gets a new one; plus `CloudLibrary.test.tsx`, 3 new):
   - a subtitle lookup with CSRF and no Study Bank section;
   - Find chunks with provenance, Save edits sending `edit`, then Accept;
   - a 409 reloading the other tab's state.
 - **Mutation:** 22 guards were removed one at a time and each fails the
-  tests: 14 for the feature and 8 for the review fixes.
+  tests: 14 for the feature, 8 for the review fixes and 2 for the
+  generation key.
 
 ## Independent review (`2b65c67`)
 
@@ -138,7 +142,7 @@ write from `edit`. Its findings:
 | Low | edits stored raw text and kept a stale hint | cleaned text, hint cleared |
 | Low | edit then plain accept is recorded as `accepted` | intended, documented |
 | Low | unbounded saved edits | capped at 20 |
-| Low | a retried generation created a new batch | deterministic key |
+| Low | a retried generation created a new batch | first a deterministic key, then (re-review Medium: it stranded re-imported or expired lessons) a per-attempt key reused only on retry |
 
 ## Not covered
 
