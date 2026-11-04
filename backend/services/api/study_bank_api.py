@@ -3,6 +3,7 @@ import unicodedata
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import ValidationError as PydanticValidationError
 
 from services.auth.identity import PersonalStorageDependency, owner_user_id
 from services.library.store import LibraryStoreError
@@ -93,6 +94,7 @@ def _cloud_contextual_word_service(http_request: Request, access) -> ContextualW
         OwnerLibraryView(access.library_repository, access.owner_user_id),
         OwnerStudyBankView(access.repository, access.owner_user_id),
         dictionary,
+        cloud=True,
     )
 
 
@@ -120,6 +122,16 @@ def _contextual_input(
         raise HTTPException(status_code=404, detail="Library item not found") from exc
     except ContextualWordError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PydanticValidationError as exc:
+        # A cloud Library lesson whose title or URL cannot be Study Bank
+        # provenance: a 422, not the session middleware's misleading 503.
+        # Personal keeps its existing behaviour on this path.
+        if service is None or not service.cloud:
+            raise
+        raise HTTPException(
+            status_code=422,
+            detail="Library item cannot be used as Study Bank provenance",
+        ) from exc
     except ContextualDictionaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except CloudLibraryOwnerNotProvisionedError as exc:

@@ -5,6 +5,7 @@ and synthetic EN/DE lessons only.
 """
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -231,11 +232,13 @@ def test_concurrent_saves_and_retries_make_exactly_one_card(cloud):
 
     def save(_):
         barrier.wait()
-        with _owner(OWNER_A, study, library):
-            return _save(item, "ran")
+        return _save(item, "ran")
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        responses = list(executor.map(save, range(8)))
+    # One identity override for the whole pool: the helpers mutate global
+    # app state and must not be entered per thread (review L3).
+    with _owner(OWNER_A, study, library):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            responses = list(executor.map(save, range(8)))
 
     assert {response.status_code for response in responses} == {200}
     assert sum(response.json()["created"] for response in responses) == 1
@@ -371,3 +374,118 @@ def test_the_owner_bound_study_bank_view_refuses_any_other_user(cloud):
     with pytest.raises(ValueError):
         view.list_items(OWNER_B)
     assert view.list_items(OWNER_A) == []
+
+
+def test_an_ambiguous_form_across_lemmas_is_refused_not_merged(cloud):
+    """Review M1: "leaves" is leaf (noun) or leave (verb). Where the sentence
+    cannot decide, cloud refuses to save rather than guess a card."""
+    _, study, library = cloud
+    item = _english(library, url="https://www.youtube.com/watch?v=b4_en_5", sentences=[
+        _sentence(1, "The leaves fall in autumn.", "叶子在秋天落下。", 0.5),
+        _sentence(2, "She leaves at nine.", "她九点离开。", 3.5),
+        _sentence(3, "He leaves the office at six.", "他六点离开办公室。", 6.5),
+    ])
+    with _owner(OWNER_A, study, library):
+        noun = _save(item, "leaves", sentence_id=1).json()["item"]
+        ambiguous_status = _status(item, "leaves", sentence_id=2)
+        ambiguous_save = _save(item, "leaves", sentence_id=2)
+        verb = _save(item, "leaves", sentence_id=3).json()["item"]
+
+    assert (noun["lemma"], verb["lemma"]) == ("leaf", "leave") and noun["id"] != verb["id"]
+    assert ambiguous_status.status_code == ambiguous_save.status_code == 422
+    assert "ambiguous_lemma" in ambiguous_save.json()["detail"]
+    assert [len(card.provenance) for card in study.list_items(OWNER_A, kind="word", active=None)] == [1, 1]
+
+
+def test_personal_m52_still_saves_ambiguous_lookups():
+    """Cloud is stricter; the shared service keeps M5.2 behaviour in Personal."""
+    from services.study_bank.contextual_words import ContextualWordService
+
+    class Library:
+        def get_item(self, _item_id):
+            return library_item
+
+    class Bank:
+        def list_items(self, _user_id, active=None):
+            return []
+
+    from services.schemas.library import LibraryItem
+
+    library_item = LibraryItem.model_validate({
+        "id": "personal-item", "source_key": "k", "created_at": "2026-11-04T00:00:00Z",
+        "updated_at": "2026-11-04T00:00:00Z",
+        "lesson": lesson(sentences=[_sentence(1, "She leaves at nine.", "她九点离开。", 0.5)]).model_dump(mode="json"),
+        "progress": {"training_order": lesson().training_order},
+    })
+    service = ContextualWordService(
+        Library(), Bank(), DictionaryService(SyntheticFixtureDictionaryProvider())
+    )
+
+    value = service.build_input("personal-item", "local-learner", 1, "leaves")
+
+    assert value.lemma in {"leaf", "leave"}
+
+
+def test_status_points_at_the_card_a_save_would_write(cloud):
+    """Review M2: identity includes the target language, like the upsert."""
+    _, study, library = cloud
+    chinese = _english(library)
+    german_target = library.create_for_owner(OWNER_A, lesson(
+        id="lesson-de-target", title="English for German speakers",
+        source_url="https://www.youtube.com/watch?v=b4_en_de", target_language="de",
+        sentences=[_sentence(1, "He runs every morning.", "Er läuft jeden Morgen.", 1.0)],
+    ))
+    with _owner(OWNER_A, study, library):
+        zh_card = _save(chinese, "ran").json()["item"]
+        status = _status(german_target, "runs").json()
+        saved = _save(german_target, "runs").json()
+        after = _status(german_target, "runs").json()
+
+    assert status == {"status": "unsaved", "item": None}
+    assert saved["created"] is True and saved["item"]["id"] != zh_card["id"]
+    assert saved["item"]["target_language"] == "de"
+    assert after["item"]["id"] == saved["item"]["id"]
+
+
+def test_a_lesson_that_cannot_be_provenance_is_a_controlled_422(cloud):
+    """Review L1: not the session middleware's misleading 503."""
+    _, study, library = cloud
+    item = library.create_for_owner(OWNER_A, lesson(
+        title="T" * 1001, source_url="https://www.youtube.com/watch?v=b4_long",
+        sentences=[_sentence(1, "She ran to the station.", "她跑到车站。", 0.5)],
+    ))
+    with _owner(OWNER_A, study, library):
+        status = _status(item, "ran")
+        save = _save(item, "ran")
+
+    assert status.status_code == save.status_code == 422
+    assert study.list_items(OWNER_A, active=None) == []
+
+
+def test_a_card_at_the_provenance_cap_refuses_new_sources_cleanly(cloud):
+    """Review L4: the 1,000-source cap is a controlled 422 and changes nothing;
+    re-saving an existing source still succeeds."""
+    dsn, study, library = cloud
+    item = _english(library)
+    other = _english(library, url="https://www.youtube.com/watch?v=b4_en_6", sentences=[
+        _sentence(1, "He runs every morning.", "他每天早上跑步。", 7.0),
+    ])
+    with _owner(OWNER_A, study, library):
+        card = _save(item, "ran").json()["item"]
+    filler = [{"source_type": "ai_text", "source_text": f"run {index}.", "evidence_start": 0, "evidence_end": 3}
+              for index in range(999)]
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "UPDATE cloud_study_items SET provenance_json = provenance_json || %s::jsonb WHERE item_id = %s",
+            (json.dumps(filler), card["id"]),
+        )
+    before = study.get_item(OWNER_A, card["id"])
+
+    with _owner(OWNER_A, study, library):
+        same_source = _save(item, "ran")
+        new_source = _save(other, "runs")
+
+    assert len(before.provenance) == 1000
+    assert same_source.status_code == 200
+    assert new_source.status_code == 422
+    assert study.get_item(OWNER_A, card["id"]).revision == before.revision

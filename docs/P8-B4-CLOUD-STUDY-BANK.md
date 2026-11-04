@@ -46,6 +46,30 @@ PostgreSQL only. There are no DQ-02 changes and no DQ-03 sense selection.
 - **Gates.** The six B-2 Cloud → Personal gates stay closed, and
   `study-candidates` stays closed too.
 
+## Cloud-only strictness (review fixes)
+
+- **Ambiguous lemmas.** If the dictionary cannot decide between different
+  lemmas in this sentence (for example "She leaves at nine." could be leaf or
+  leave), cloud returns 422 `ambiguous_lemma` instead of guessing a card. The
+  panel says why and offers no Save Word.
+  - Several senses of one lemma are still saved.
+  - Sense choice is DQ-03.
+  - Personal M5.2 keeps its behaviour. A test pins that.
+- **Status matches the save.** The status check reads the exact card the
+  upsert would write, keyed on kind, both languages and the normalized lemma
+  (`get_by_identity`, which uses the unique index). It no longer scans every
+  word or ignores the target language.
+- **A lesson that cannot be provenance** (title over 1,000 characters, or an
+  over-long URL) is a 422 in cloud, not the session middleware's misleading
+  503.
+- **Provenance cap.** A card holds at most 1,000 sources. Saving a new source
+  beyond that is a controlled 422 and changes nothing; re-saving a known
+  source still works. Raising the cap is a later decision.
+- **Known limit, unchanged:** the identity rule casefolds the lemma and
+  ignores part of speech, so German pairs such as Arm/arm share a card. This
+  is the shared Study Bank identity used by Personal too; changing it belongs
+  with DQ-03.
+
 ## Dictionary UI
 
 - **Cloud Listening** passes the session owner as `contextualOwnerId`, never a
@@ -55,7 +79,8 @@ PostgreSQL only. There are no DQ-02 changes and no DQ-03 sense selection.
   - saved-status check;
   - Save Word;
   - an explicit Restore for an archived word, which sends a PATCH with its
-    `expected_revision`.
+    `expected_revision`. If another tab changed the card first (409), the
+    panel reloads its status, so the retry uses the current revision.
 - **Account changes.** Switching account remounts the workspace, so no word
   state carries over.
 
@@ -73,8 +98,10 @@ No transaction or scheduler code changed; no real gap was found.
 
 ## Tests
 
-- **`test_cloud_contextual_words.py`** (13 tests), all with the Personal stores
-  set to raise:
+- **`test_cloud_contextual_words.py`** (18 tests), all with the Personal stores
+  set to raise. The review added: ambiguous lemma refused (noun and verb
+  stay separate cards), Personal still saving it, status matching the target
+  language, the malformed-lesson 422, and the provenance cap. The full list:
   - EN save with exact provenance; DE inflection under its lemma;
   - another form and another lesson reusing the card and merging provenance,
     with no duplicate for an identical source;
@@ -99,9 +126,28 @@ No transaction or scheduler code changed; no real gap was found.
   - Save Word as the session owner with CSRF, where the client sends only
     `user_id`, `sentence_id` and `word`, and no local learner id;
   - an archived word offering an explicit Restore with its revision;
-  - an account switch dropping the word state.
-- **Mutation check:** 11 guards were removed one at a time, and each fails
-  the tests.
+  - an account switch dropping the word state, including a status response
+    still in flight when the account changes;
+  - no Save Word for an ambiguous lemma;
+  - Restore after a 409 reloading the status and succeeding with the new
+    revision.
+- **Mutation check:** 17 guards were removed one at a time, and each fails
+  the tests: 11 for the feature and 6 for the review fixes.
+
+## Independent review (`216c508`)
+
+A separate reviewer agent found no Critical or High issues. It confirmed
+there is no cloud path to the Personal stores, no forgery, and that the
+`_upsert` semantics hold, including 6-thread, cross-lesson, mixed-form saves.
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| Medium | ambiguous lookup could merge leaf/leave and split one word | cloud refuses multi-lemma ambiguity; UI hides Save Word |
+| Medium | status ignored target language and scanned every word | identity lookup on the unique key |
+| Low | malformed lesson gave 503 `cloud_session_unavailable` | cloud 422 |
+| Low | Retry Restore kept a stale revision | reload status on 409 |
+| Low | concurrency test mutated app state per thread | one override around the pool |
+| Low | no in-flight account-switch or cap test | both added |
 
 ## Not covered (next increments)
 
