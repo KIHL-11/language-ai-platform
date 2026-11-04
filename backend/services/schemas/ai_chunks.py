@@ -10,7 +10,9 @@ from services.schemas.study_bank import StudyItem
 CandidateState = Literal[
     "proposed", "accepted", "edited_and_accepted", "rejected", "expired"
 ]
-DecisionAction = Literal["accept", "edit_and_accept", "reject"]
+# "edit" saves the learner's edits and keeps the candidate proposed (B-3):
+# no decision is made and nothing reaches the Study Bank.
+DecisionAction = Literal["accept", "edit_and_accept", "edit", "reject"]
 BatchState = Literal["ready", "expired"]
 
 
@@ -158,10 +160,11 @@ class CandidateDecisionRequest(AiChunkModel):
 
     @model_validator(mode="after")
     def edit_matches_action(self):
-        if self.action == "edit_and_accept" and self.edit is None:
-            raise ValueError("edit is required for edit_and_accept")
-        if self.action != "edit_and_accept" and self.edit is not None:
-            raise ValueError("edit is only valid for edit_and_accept")
+        edits = {"edit_and_accept", "edit"}
+        if self.action in edits and self.edit is None:
+            raise ValueError("edit is required for edit_and_accept and edit")
+        if self.action not in edits and self.edit is not None:
+            raise ValueError("edit is only valid for edit_and_accept and edit")
         return self
 
 

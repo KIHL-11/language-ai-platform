@@ -391,6 +391,9 @@ class PostgresOwnerScopedAiChunkRepository:
                 if action == "reject":
                     if prepared.study_input is not None or updated.state != "rejected":
                         raise ValueError("Rejected candidate cannot create a Study Bank item")
+                elif action == "edit":
+                    if prepared.study_input is not None or updated.state != "proposed":
+                        raise ValueError("An edit keeps the candidate proposed and saves nothing")
                 elif prepared.study_input is None or updated.state not in {
                     "accepted",
                     "edited_and_accepted",

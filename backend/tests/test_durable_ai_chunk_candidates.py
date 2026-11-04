@@ -168,6 +168,7 @@ def cloud_candidates(tmp_path):
         "0010_library_media_cleanup_worker.up.sql",
         "0002_owner_scoped_study_bank.up.sql",
         "0003_owner_scoped_ai_chunk_candidates.up.sql",
+        "0011_ai_chunk_edit_action.up.sql",
     ):
         _migration(dsn, filename)
     with psycopg.connect(dsn) as connection:

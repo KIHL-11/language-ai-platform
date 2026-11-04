@@ -9,6 +9,14 @@ export interface AiChunkEvidence {
   source_label: string
   evidence_start: number
   evidence_end: number
+  // Library provenance (library_sentence evidence only).
+  library_item_id?: string | null
+  lesson_id?: string | null
+  sentence_id?: number | null
+  source_url?: string | null
+  sentence_translation?: string
+  start?: number | null
+  end?: number | null
 }
 
 export interface AiChunkCandidate {

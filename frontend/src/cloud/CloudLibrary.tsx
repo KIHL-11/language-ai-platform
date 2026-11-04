@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { cloudUnavailableMemoryClient } from '../api/chunkMemory'
+import AiChunkOrganizer from '../components/AiChunkOrganizer'
 import { getLibraryItem, listLibraryItems } from '../api/library'
 import LessonViewer from '../pages/LessonViewer'
 import ListeningWorkspace from '../pages/ListeningWorkspace'
@@ -22,6 +23,7 @@ type View =
   | { kind: 'detail'; item: LibraryItem }
   | { kind: 'guided'; item: LibraryItem }
   | { kind: 'listening'; item: LibraryItem }
+  | { kind: 'chunks'; item: LibraryItem }
 
 const FAILURE_MESSAGES: Record<CloudSyncFailure, string> = {
   conflict: 'This lesson keeps changing in another tab or device. Your latest step was not saved; go back and reopen it.',
@@ -139,11 +141,11 @@ function CloudListening({ item, generation, onBack }: { item: LibraryItem; gener
   )
   return <>
     {failure && <p role="alert" className="mx-auto mt-4 max-w-5xl px-5 text-sm text-[#8f1d14]">{FAILURE_MESSAGES[failure]}</p>}
-    <ListeningWorkspace item={item} onBack={onBack} saveProgress={saveProgress} studyFeatures={false} />
+    <ListeningWorkspace item={item} onBack={onBack} saveProgress={saveProgress} studyFeatures={false} dictionaryLookup />
   </>
 }
 
-export default function CloudLibrary({ generation }: { generation: number }) {
+export default function CloudLibrary({ generation, userId }: { generation: number; userId: string }) {
   const [items, setItems] = useState<LibraryItemSummary[]>([])
   const [view, setView] = useState<View>({ kind: 'list' })
   const [error, setError] = useState<string | null>(null)
@@ -159,7 +161,7 @@ export default function CloudLibrary({ generation }: { generation: number }) {
 
   // Always reload before showing a lesson, so the detail and the revision a
   // view starts from are the server's, never a cached copy.
-  const open = useCallback(async (itemId: string, kind: 'detail' | 'guided' | 'listening') => {
+  const open = useCallback(async (itemId: string, kind: 'detail' | 'guided' | 'listening' | 'chunks') => {
     const ticket = ++opening.current
     setLoading(itemId)
     setError(null)
@@ -182,6 +184,22 @@ export default function CloudLibrary({ generation }: { generation: number }) {
   if (view.kind === 'guided') {
     return <CloudGuided key={view.item.id} item={view.item} generation={generation} onBack={() => void open(view.item.id, 'detail')} />
   }
+  if (view.kind === 'chunks') {
+    const { item } = view
+    return <main className="mx-auto max-w-5xl px-5 py-6">
+      <button type="button" onClick={() => void open(item.id, 'detail')} className="h-10 border border-[#aebcb6] px-4">Back to lesson</button>
+      <AiChunkOrganizer
+        key={item.id}
+        learnerId={userId}
+        librarySource={{
+          libraryItemId: item.id,
+          title: item.lesson.title,
+          language: item.lesson.source_language,
+          sentenceIds: item.lesson.sentences.map((sentence) => sentence.id),
+        }}
+      />
+    </main>
+  }
   if (view.kind === 'listening') {
     return <CloudListening key={view.item.id} item={view.item} generation={generation} onBack={() => void open(view.item.id, 'detail')} />
   }
@@ -196,6 +214,7 @@ export default function CloudLibrary({ generation }: { generation: number }) {
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" disabled={loading !== null} onClick={() => void open(view.item.id, 'guided')} className="h-10 bg-[#176b5b] px-4 text-white disabled:bg-[#9aaba5]">{view.item.progress.stage_index > 0 || view.item.progress.completed_stages.length > 0 ? 'Continue guided training' : 'Start guided training'}</button>
         <button type="button" disabled={loading !== null} onClick={() => void open(view.item.id, 'listening')} className="h-10 border border-[#176b5b] px-4">Open listening</button>
+        <button type="button" disabled={loading !== null} onClick={() => void open(view.item.id, 'chunks')} className="h-10 border border-[#176b5b] px-4">Find chunks</button>
       </div>
       <ol className="mt-5 space-y-1 text-sm">{view.item.lesson.sentences.map((sentence) => <li key={sentence.id}>{sentence.text}</li>)}</ol>
     </article> : <ul className="mt-4 space-y-2">

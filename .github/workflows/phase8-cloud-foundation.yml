@@ -28,6 +28,7 @@ on:
       - codex/p8-feature-complete-integration
       - claude/p8-b1-library-reliability
       - claude/p8-b2-guided-listening
+      - claude/p8-b3-cloud-dictionary-chunks
   workflow_dispatch:
 
 permissions:

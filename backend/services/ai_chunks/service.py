@@ -42,6 +42,11 @@ from services.schemas.study_bank import (
 from services.study_bank.store import StudyBankStore, normalized_identity, utc_now
 
 
+# Each saved edit adds a candidate version and a decision record; past this
+# the learner must accept or reject.
+MAX_SAVED_EDITS = 20
+
+
 class AiChunkValidationError(ValueError):
     pass
 
@@ -177,6 +182,10 @@ class AiChunkOrganizerService:
     def _apply_decision(self, owner, candidate, request):
         if request.action == "reject":
             return candidate.model_copy(update={"state": "rejected", "version": candidate.version + 1}), None, False, []
+        if request.action == "edit":
+            # Save-only edits are a cloud (B-3) capability; Personal Desktop
+            # keeps its accept/edit_and_accept/reject contract unchanged.
+            raise AiChunkValidationError("Saving edits without a decision is only available in cloud")
         edit = request.edit
         text = edit.text if edit else candidate.text
         meaning = edit.suggested_meaning_zh if edit else candidate.suggested_meaning_zh
@@ -241,6 +250,46 @@ class AiChunkOrganizerService:
             }),
         })
         return updated, item, bool(created_count), warnings
+
+    def _edited_candidate(self, owner, candidate, edit) -> AiChunkCandidate:
+        """Save edits only: still proposed, nothing written to the Study Bank.
+
+        The edited text must still be grounded in the immutable evidence quote,
+        exactly as an accepted edit must be.
+        """
+
+        if candidate.version > MAX_SAVED_EDITS:
+            raise AiChunkValidationError("This candidate has reached its edit limit; accept or reject it")
+        phrase_range = self._ground_phrase(
+            candidate.evidence.quote, edit.text, provider_output=False
+        )
+        clean_text, identity = normalized_identity(StudyItemInput(
+            user_id=owner,
+            kind="chunk",
+            source_language=candidate.source_language,
+            target_language="zh-CN",
+            text=edit.text,
+            meaning=edit.suggested_meaning_zh,
+            example=edit.example,
+            usage=edit.usage_note,
+            provenance=[self._provenance(candidate.evidence, phrase_range)],
+        ))
+        return candidate.model_copy(update={
+            "state": "proposed",
+            "version": candidate.version + 1,
+            # Same cleaning as generation; the Study Bank match is recomputed
+            # when the candidate is accepted, so a stale hint is cleared here.
+            "text": clean_text,
+            "normalized_identity": identity,
+            "existing_study_item_id": None,
+            "existing_study_item_active": None,
+            "suggested_meaning_zh": edit.suggested_meaning_zh,
+            "usage_note": edit.usage_note,
+            "example": edit.example,
+            "evidence": candidate.evidence.model_copy(update={
+                "evidence_start": phrase_range[0], "evidence_end": phrase_range[1]
+            }),
+        })
 
     def _source(self, owner: str, request: ChunkSuggestionRequest):
         if isinstance(request.source, ManualTextSource):
@@ -581,6 +630,11 @@ class CloudAiChunkOrganizerService(AiChunkOrganizerService):
                 candidate=candidate.model_copy(
                     update={"state": "rejected", "version": candidate.version + 1}
                 ),
+                study_input=None,
+            )
+        if request.action == "edit":
+            return PreparedDecision(
+                candidate=self._edited_candidate(owner, candidate, request.edit),
                 study_input=None,
             )
         edit = request.edit

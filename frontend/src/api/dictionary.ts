@@ -1,3 +1,4 @@
+import { apiFetch } from '../auth/client'
 import { API_BASE_URL } from './apiBase'
 import type { DictionaryLookup, DictionarySelection } from '../types/dictionary'
 
@@ -48,7 +49,9 @@ export async function lookupDictionary(
   signal?: AbortSignal,
   includeInflections = false,
 ): Promise<DictionaryLookup> {
-  const response = await fetch(`${API_BASE_URL}/api/dictionary/lookup`, {
+  // Through the unified client: cloud sends the session cookie and CSRF and
+  // binds the response to the owner; Personal still issues a plain fetch.
+  const response = await apiFetch(`${API_BASE_URL}/api/dictionary/lookup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
