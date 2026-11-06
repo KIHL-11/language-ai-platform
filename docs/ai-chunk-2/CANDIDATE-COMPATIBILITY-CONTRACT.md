@@ -26,6 +26,8 @@ schema on `claude/p8-b3-cloud-dictionary-chunks` (#83) plus CH-01 Step 1:
 | Expiry or invalidation | batch `expires_at` and `status`; expired is terminal; Cloud accept re-checks the Library (409) | unchanged, plus an explicit re-validation result on read (`verification`) and a 409 code `candidate_source_changed` on accept | — |
 | Accepted Study Item | `accepted_study_item_id`, `existing_study_item_id/active` | unchanged | — |
 | Batch extras | `proposal_mode` (Step 1, computed, not stored) | stored `proposal_mode`, `coverage{…}`, `status_reason`, and `source_type: "library_curation"` | computed as today |
+| Batch revision (Round 3) | none | `curation_job_id`, `batch_revision` (unique per job), status `superseded` (in addition to ready and expired); decisions on a superseded batch get 409 `batch_superseded`; old revisions stay readable | null; existing batches are never superseded |
+| Inherited decision (Round 3) | none | `inherited_decision: {batch_id, candidate_id, state}` on a candidate in a later revision (informational); recommendation status `previously_rejected` | null |
 
 ## 2. Invariants that must not change
 
@@ -67,21 +69,89 @@ schema on `claude/p8-b3-cloud-dictionary-chunks` (#83) plus CH-01 Step 1:
   CHECK `cloud_ai_batch_source_type` extended. An old client shows it with
   the default library rendering.
 
-## 4. New server and old server (rollback hazard, two-phase rollout)
+## 4. Rollback safety: persistence projection and two-phase rollout (Round 3, M4)
 
-All models use `extra="forbid"`, and Cloud stores full decision responses
-in `cloud_ai_chunk_decisions.response_json` for replay. Once a new server has
-written a response containing new fields, an **older** server would fail to
-replay it. So:
+### 4.1 Why "optional" is not enough
 
-- **Phase A, read-tolerant.** Ship model changes that only add **optional**
-  fields with the defaults above, and raise the candidate limit to 12. No
-  writer emits the new fields yet. Rolling back from A is safe.
-- **Phase B, writers.** Curation starts writing the new fields. Rolling
-  back below A is then unsupported. Rolling back to A is safe.
+All candidate models use `extra="forbid"`. Pydantic's
+`model_dump(mode="json")` **includes fields whose value is None**, so a new
+model with only optional additions still writes keys an old server rejects.
+Cloud stores whole decision responses in
+`cloud_ai_chunk_decisions.response_json` and replays them, so one such record
+breaks replay after a rollback. This is demonstrated by
+`test_the_hazard_is_real_a_plain_dump_of_new_fields_breaks_the_old_server`.
 
-Personal stores follow the same order through a `schema_version` in the
-file.
+### 4.2 Two kinds of output
+
+| Output | Who reads it | Phase A rule |
+|---|---|---|
+| **API response**: `GET` batch, curation status | browsers only; never stored | may include new fields (computed); old clients ignore them |
+| **Persisted record**: decision `response_json`, Personal JSON store, any JSON column | servers of every version still in the rollback window | **old-schema keys only**, via the persistence projection |
+| **Decision API response** (first call and replay) | browsers; Cloud replays the stored record | in Phase A it **is** the projected record, so the first call and a replay are identical |
+
+### 4.3 The projection (executable model: `backend/chunk_curation_lab/compat.py`)
+
+- **`persisted_decision(response)`** keeps exactly the keys of the old models:
+  - `CandidateDecisionResponse`;
+  - the nested `AiChunkCandidate`;
+  - the nested `CandidateEvidence`.
+
+  It then validates the result with the **old** model, so it fails closed
+  instead of writing a record an old server cannot load.
+- **`persisted_batch(batch)`** does the same for batches. It also:
+  - drops the computed `proposal_mode`, which is never persisted (CH-01
+    Step 1);
+  - **refuses** to persist more than 8 candidates, because the old
+    `AiChunkBatch` limit is 8. A 12-candidate curated batch therefore cannot
+    exist in storage until Phase B.
+- **Whitelist rule.** The whitelist is derived from the old models'
+  `model_fields`, not from a hand-written list, so it cannot drift.
+
+### 4.4 Phases, deploy order and rollback
+
+| Step | Code | Persisted format | Rollback to the previous step |
+|---|---|---|---|
+| A0 (today) | current models | old | — |
+| **A** | read-tolerant V2 models (optional fields with truthful defaults; batch limit 12 on **read**); every write goes through the projection | **old** (projected) | **Safe**: A never persisted a new key |
+| A→B gate | A deployed on **every** server, and the rollback floor declared as A (no older build may be redeployed) | — | — |
+| **B** | the projection is lifted for new records; curation may persist new fields and up to 12 candidates | new keys allowed | **Safe to A** (A reads them); **unsafe below A**, which the gate forbids |
+
+- The Cloud migration that adds columns (§5) lands **with A**, nullable or
+  with defaults.
+- Writes to those columns start only in B.
+
+### 4.5 Historical replay never rewrites decisions
+
+- A replay returns the **stored** record as stored. It is never re-rendered
+  through newer models and never upgraded in place.
+- A new server reading an old record fills the defaults for its own use
+  only. It does not write the defaults back.
+- Proven, for accept, edit_and_accept and reject, by
+  `test_replay_round_trips_without_rewriting_the_decision`. The record
+  passes old → new read → Phase A persist and comes back byte-identical,
+  with the same state, version and accepted Study Item.
+- The edit action is covered by `test_edit_only_responses_round_trip_too`.
+
+### 4.6 Executable compatibility tests (Round 3)
+
+These are in `backend/tests/test_chunk_curation_compat.py`, all executed. They
+use real Personal organizer responses on temporary synthetic stores.
+
+| Requirement | Test |
+|---|---|
+| New writes in the compatible format and the old server reads it | `test_new_server_phase_a_records_load_on_the_old_server` (×3 actions) |
+| The old server writes and the new server reads | `test_old_server_records_load_on_the_new_server_with_truthful_defaults` (×3) |
+| A new field that is None does not leak into the old format | `test_the_hazard_is_real_…` (plain dump fails) and the Phase A test (no extra keys at any level) |
+| Accept, Edit and Reject replays do not change the original decision | `test_replay_round_trips_without_rewriting_the_decision` (×3) and `test_edit_only_responses_round_trip_too` |
+| Saved candidate, Study Bank, archive and SRS are unchanged | `test_projection_preserves_archive_note_meaning_and_srs_exactly` (a duplicate accept onto an archived card with a note, a manual meaning and a rated ReviewState: the record is byte-equal and the store is unchanged) |
+| Batch projection | `test_phase_a_batches_drop_new_and_computed_fields_and_refuse_oversize` |
+
+**NOT EXECUTED** (needs production code, which is not authorised):
+
+- the projection wired into `ai_chunks/postgres.py` and
+  `InMemoryAiChunkStore`;
+- a two-version deploy test that runs the old and new servers against one
+  database.
 
 ## 5. Migration strategy (proposed, not executed)
 
@@ -97,8 +167,10 @@ file.
     `cloud_ai_chunk_candidate_sources (owner, candidate_id, ordinal, …)`
     with forced RLS and an owner policy.
   - **Batches.** `cloud_ai_chunk_batches` gains `proposal_mode`, `coverage
-    JSONB`, `curation_job_id UUID` and `status_reason`, and the source-type
-    CHECK gains `library_curation`.
+    JSONB`, `curation_job_id UUID`, `batch_revision INT` and
+    `status_reason`, plus `UNIQUE (owner_user_id, curation_job_id,
+    batch_revision)`. The source-type CHECK gains `library_curation` and the
+    status CHECK gains `superseded`.
   - **Jobs.** The job tables, which are defined in
     CURATION-JOB-STATE-MACHINE.md.
 - **Backfill.** None. The defaults describe existing rows truthfully.

@@ -1,5 +1,8 @@
 # Synthetic validation report (CH-01/02 design revision)
 
+> **Round 3 (2026-11-06)** is appended at the end. The earlier sections
+> describe Round 2 (`ddda942`) and are kept for history.
+
 - **Environment:** macOS, Python 3.11 venv, disposable PostgreSQL 17
   (`postgresql://synthetic@127.0.0.1:55433/scratch_b1`, used by the existing
   suites only; the lab needs no database), `AI_MODE=mock`.
@@ -125,3 +128,111 @@ quality floor and the core-dimension rule.
 - UI tests for the Recommended Chunks panel.
 - Personal store tests: atomic write, corrupt-file recovery, clean-up.
 - Migration tests for the proposed Cloud migration.
+
+
+---
+
+## Round 3: Codex M1–M6 remediation
+
+The branch is `claude/ch-01-02-remediation-r3`, based on `ddda942`. The same
+environment was used.
+
+### Commands, in the Owner's priority order
+
+```bash
+cd backend
+# 1. New counterexamples first
+AI_MODE=mock PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_chunk_curation_lab_r3.py
+AI_MODE=mock PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_chunk_curation_compat.py
+# 2. Every slice test (3 runs)
+AI_MODE=mock PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
+  tests/test_chunk_curation_lab.py tests/test_chunk_curation_lab_r3.py tests/test_chunk_curation_compat.py
+# 3. Necessary regression
+TEST_POSTGRES_DSN=… AI_MODE=mock PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+```
+
+### Results
+
+| Run | Result |
+|---|---|
+| `test_chunk_curation_lab_r3.py` (M1–M3 counterexamples) | **39 passed** |
+| The same 39 tests against the **unfixed** `ddda942` slice | **30 failed, 9 passed**. Every M1, M2 and M3 scenario fails there; the 9 that pass are baseline checks |
+| `test_chunk_curation_compat.py` (M4, executable) | **14 passed** |
+| All slice tests | **88 passed**, 3 of 3 runs (35 + 39 + 14) |
+| Backend full | **955 passed, 9 skipped, 1 xfailed** (902 + 53 new) |
+| Frontend | no frontend change on this branch; covered by Hosted CI (see the handoff) |
+| Mutation (slice) | **34 of 34 killed**: the 19 earlier mutants plus 15 new ones |
+
+### Codex counterexamples reproduced, then fixed
+
+| ID | Reproduced on `ddda942` | After the fix |
+|---|---|---|
+| M1 | The same two observations scored 1.83 or 1.90 depending on order | 1.90 in both orders. At the floor edge (Codex's 1.73/1.80) the result is 1.80 and recommended in both orders |
+| M2 | Window 0 could cite `[0,38)` but `[65,80)` was accepted | `outside_citable_range` |
+| M3 | `variations=None` raised `TypeError` and aborted the reduce | `invalid_variations`; the other observations continue |
+
+### Requirements → tests
+
+| Owner requirement | Test(s) in `test_chunk_curation_lab_r3.py` unless noted |
+|---|---|
+| M1: exact and loose matches swapped | `test_exact_and_loose_matches_of_one_span_give_one_result_in_either_order`, `test_a_loose_match_alone_stays_below_the_floor` |
+| M1: three or more observations of one key with different reliability, all permutations | `test_every_order_of_four_observations_of_one_key_is_identical` (24 orders) |
+| M1: duplicates near the floor; full permutation of score, selection and provenance | `test_full_permutation_compares_scores_selection_and_provenance_near_the_floor` (120 orders; the comparison covers status, score, dimensions, selection, sources with reliability and timestamps, rejections, notes) |
+| M1: repeated source cannot dominate | `test_repeating_one_source_cannot_outvote_another_source` |
+| M2: characters outside the window | `test_a_span_outside_the_windows_characters_is_rejected` |
+| M2: one sentence split into two segments | `test_the_split_used_by_these_tests`, `test_a_phrase_split_across_two_windows_is_rejected_in_both` |
+| M2: one phrase at several places in the sentence | `test_each_window_grounds_its_own_occurrence_of_a_repeated_phrase`, `test_both_occurrences_merge_as_two_sources_of_one_candidate` |
+| M2: only in a context segment | `test_a_phrase_only_in_a_context_part_of_the_same_sentence_is_rejected` |
+| M2: a legal and an illegal fragment together | `test_one_legal_and_one_illegal_fragment_together` |
+| M2: overlap does not double-count coverage | `test_a_split_sentence_is_covered_once_and_only_when_every_part_is_done` (plus the Round 2 overlap test) |
+| M2: consecutive parts are joined, gaps are not | `test_consecutive_parts_in_one_window_are_joined_but_gaps_are_not` |
+| M2: snapshot facts untouched | `test_the_snapshot_is_never_modified_by_verification` |
+| M3: variations of None, str, int, dict, non-str elements, too long, too many, blank | `test_malformed_variations_reject_only_that_observation` (9 cases) |
+| M3: other malformed fields | `test_other_malformed_fields_are_rejected_not_coerced` (13 cases) |
+| M3: one malformed among many valid | `test_one_malformed_among_many_valid_observations` |
+| M3: unexpected exception boundary | `test_an_unexpected_verification_failure_rejects_only_that_observation` |
+| M4: all five compatibility requirements | `test_chunk_curation_compat.py` (see contract §4.6) |
+
+Two Round 2 tests were **tightened**, not weakened, to the "no repair"
+rule. Bad variation elements used to be filtered silently; now the whole
+observation is rejected as `invalid_variations`.
+
+### Round 3 mutants (15 new, all killed)
+
+**M1**
+
+- a duplicate key where the last one wins;
+- a duplicate key where the first one wins;
+- one vote per observation instead of per source.
+
+**M2**
+
+- grounding on the full sentence;
+- joining non-consecutive parts;
+- context parts treated as citable.
+
+**M3**
+
+- the container type unchecked;
+- the elements unchecked;
+- a bool accepted as an int;
+- the claims unchecked;
+- no per-observation boundary.
+
+**M4**
+
+- the evidence not projected;
+- the candidate not projected;
+- an oversized batch persisted;
+- `proposal_mode` persisted.
+
+Two Round 2 mutants were re-anchored to the new code.
+
+### Still NOT EXECUTED
+
+- Job and batch tests J1–J14 and billing fault injection F1–F10, in
+  `CURATION-JOB-STATE-MACHINE.md`.
+- The projection wired into production stores, and a two-version deploy
+  test.
+- The R-H3 Personal re-validation tests (the launch gate).
+- Provider and prompt tests, UI, the Personal store, and migrations.

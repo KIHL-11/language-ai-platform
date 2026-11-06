@@ -1,70 +1,79 @@
-# Codex second independent review: CH-01/02 design revision
+# Codex third independent review: CH-01/02 Round 3 remediation
 
-- **Verdict being addressed:** DESIGN_CHANGES_REQUIRED on the first AI Chunk
-  2.0 design (`docs/AI-CHUNK-2.0-DESIGN.md`, now marked superseded).
-- **Branch:** `claude/ch-01-02-design-revision`. The commit that adds this
+- **Verdict being addressed:** CHANGES_REQUIRED on `ddda942`: M1–M3 (with
+  counterexamples) and M4–M6 (design gaps).
+- **Branch:** `claude/ch-01-02-remediation-r3`. The commit that adds this
   file is the HEAD under review (`git log -1`).
-- **Base:** CH-01 Step 1 `694e811`, which is on #83 `c89b94b`.
+- **Base:** `ddda9429c9521d55a39da68f74347618f4ed954b`.
 - **Status:** no PR opened, nothing merged, deployed or migrated.
-- **Scope:** `git diff 694e811..HEAD`. Read-only, one pass. Full CH-01/CH-02
-  is **not** implemented, and nothing here claims production readiness.
+- **Scope:** `git diff ddda942..HEAD`. Read-only, one pass. Full CH-01/CH-02
+  is **not** implemented or authorised for production.
 
-## What to review
+## Changed files
 
-| Area | Files |
+| Kind | Files |
 |---|---|
-| Revised design | `docs/ai-chunk-2/CH-01-02-DESIGN-REVISION.md` (provenance contract §2, Personal/Cloud §4, security §5) |
-| Ranking and quality | `docs/ai-chunk-2/FULL-TRANSCRIPT-RANKING-SPEC.md` |
-| Compatibility | `docs/ai-chunk-2/CANDIDATE-COMPATIBILITY-CONTRACT.md` |
-| Job (design only) | `docs/ai-chunk-2/CURATION-JOB-STATE-MACHINE.md` |
-| Evidence | `docs/ai-chunk-2/SYNTHETIC-VALIDATION-REPORT.md`, `docs/ai-chunk-2/RISK-REGISTER-UPDATED.md` |
-| Pure slice | `backend/chunk_curation_lab/*.py` (no I/O; imported by nothing in production) |
-| Tests | `backend/tests/test_chunk_curation_lab.py`, `backend/tests/chunk_curation_synthetic.py` |
+| Slice fixes (M1–M3) | `backend/chunk_curation_lab/provenance.py`, `reduce.py`, `scoring.py` |
+| M4 executable model | `backend/chunk_curation_lab/compat.py` (new; isolated) |
+| Tests | `backend/tests/test_chunk_curation_lab_r3.py` (new, 39), `backend/tests/test_chunk_curation_compat.py` (new, 14), `backend/tests/test_chunk_curation_lab.py` (2 tests tightened to the no-repair rule) |
+| Design | `docs/ai-chunk-2/CANDIDATE-COMPATIBILITY-CONTRACT.md` (§1, §4, §5), `CURATION-JOB-STATE-MACHINE.md` (rewritten), `FULL-TRANSCRIPT-RANKING-SPEC.md` (§4, §5, §6.2), `RISK-REGISTER-UPDATED.md`, `SYNTHETIC-VALIDATION-REPORT.md` (Round 3), `CH-01-02-DESIGN-REVISION.md` (Round 3 table), this file |
 | CI trigger | `.github/workflows/phase8-cloud-foundation.yml` (one line) |
 
-**Not changed:** any production module, schema, migration or route; the
-frontend; Learn, Live Dialogue, Speaking and Topic Mock; SRS; Study Bank;
-Library.
+**Unchanged:** every production module, schema, serialiser, migration and
+route; the frontend; Learn, Listening, Shadowing, Speaking and Topic Mock;
+Study Bank; SRS; the CH-01 Step 1 code.
 
-## Questions for the re-review
+## Questions
 
-1. **Quality.** Are the eight dimensions, the weights, the lower-median
-   aggregation, the `unscored` rule, the gates and the 1.8 floor a
-   sufficient and honest model? Is any path left where position, the
-   alphabet, a hash or first occurrence affects **selection**? (In-group
-   display order and the source-order fingerprint are deliberate; check
-   that they cannot change inclusion.)
-2. **Order independence.** Is the argument in the ranking spec §8 complete?
-   Are the tests (all 720 orders, and 200 shuffles in EN and DE) adequate?
-3. **Provenance.** Can any provider-controlled field reach `VerifiedEvidence`?
-   Is reusing the Cloud `_validate_library_evidence` at accept, plus the
-   Personal gap (R-H3), described correctly?
-4. **Compatibility.** Is the two-phase rollout (needed because of
-   `extra="forbid"` together with stored `response_json` replays) correct
-   and sufficient? Are the defaults truthful for existing rows?
-5. **Job.** Does the fence and compare-and-swap design stop stale workers,
-   duplicate submits, double billing and budget-partial-as-complete? Is the
-   NOT EXECUTED spec J1–J14 complete?
-6. **New findings.** Do you agree with the German case-sensitive identity
-   finding (R-M4) and the Personal accept re-validation gap (R-H3)?
+1. **M1.** Is merging one evidence key by the maximum verified reliability
+   sound? Reliability is a server observation and changes neither the span
+   nor any semantic score. Is the two-level lower median order-independent
+   and resistant to vote stuffing? Is any order dependence left in
+   `reduce.py`?
+2. **M2.** Do `citable_ranges` and `_ground_in` guarantee `[start, end)` lies
+   inside characters the window could cite, in every case, including
+   repeated phrases and consecutive parts? Is rejecting chunks that span two
+   windows (R-L5) acceptable?
+3. **M3.** Is there any untrusted field still read before `shape_error`, or
+   any remaining coercion or repair? Is the `verification_error` boundary
+   scoped correctly (per observation only)?
+4. **M4.** Is the projection plus the A→B gate sufficient for rollback,
+   given that Pydantic serialises None fields? Is it right that decision
+   responses in Phase A equal the projected record, and that replays are
+   never re-rendered?
+5. **M5.** Do separate window status, attempts and checkpoints remove the
+   `ON CONFLICT DO NOTHING` recovery conflict? Do immutable revisions with
+   `UNIQUE(owner, job_id, batch_revision)` and a current pointer keep every
+   old decision and Study Item reference intact? Is the inheritance table
+   safe?
+6. **M6.** Is the attempt ledger (`reserved → in_flight → succeeded |
+   failed_definitive | failed_billed | uncertain`), with conservative
+   accounting and the re-approval thresholds, honest and sufficient? Is
+   F1–F10 complete?
 
 ## Evidence
 
 All runs used macOS, Python 3.11 and `AI_MODE=mock`, with synthetic data
 only.
 
-- `test_chunk_curation_lab.py`: 35 passed in each of 3 runs.
-- Reused existing protection tests: 8 passed.
-- Backend full: 902 passed, 9 skipped, 1 xfailed.
-- Frontend full: 441 passed; lint clean.
-- Lab mutation check: 19 of 19 killed.
-- Hosted CI on this HEAD: see the Owner report or the local drafts copy of
-  this handoff.
+| Run | Result |
+|---|---|
+| New counterexamples | 39 passed (30 of them fail on unfixed `ddda942`) |
+| Compatibility | 14 passed |
+| All slice tests | 88 passed, 3 of 3 runs |
+| Backend full | 955 passed, 9 skipped, 1 xfailed |
+| Slice mutation | 34 of 34 killed (15 new) |
+| Hosted CI | see the Owner report or the local drafts copy |
+
+## OPEN by instruction
+
+- The CH-01 Step 1 Mediums R-M10 and R-M11.
+- R-H3, the Personal re-validation launch gate.
+- R-M4, German case: a hint only, never an automatic merge.
 
 ## NOT EXECUTED
 
-- Job and worker tests J1–J14.
-- Provider and prompt tests.
-- UI.
-- The Personal store.
-- Migrations.
+- J1–J14 and F1–F10.
+- Production wiring of the projection, and a two-version deploy test.
+- The R-H3 gate tests.
+- Provider, prompt and UI tests.

@@ -71,6 +71,22 @@ gap counted complete" and "partial reported ready".
 Each observation is checked in this order. The first failure rejects it, with
 a counted reason.
 
+0. **Shape check (Round 3, M3).** `shape_error` checks container and
+   element types before any field is used:
+
+   | Field | Requirement | Reason when it fails |
+   |---|---|---|
+   | `window_index` | int (bool rejected) | `invalid_window_index` |
+   | `text` | str | `invalid_text` |
+   | `evidence_sentence_id` | int or None (bool and float rejected) | `invalid_sentence_id` |
+   | `claimed_origin` | str | `invalid_origin` |
+   | `scores` | a mapping with str keys from the six semantic dimensions; values int 0–3 or None | `invalid_scores` |
+   | `variations` | a list or tuple of at most 2 str, each non-blank and at most 200 characters | `invalid_variations` |
+   | claimed item and quote | str or None | `invalid_claims` |
+   | claimed timestamps | number or None | `invalid_claims` |
+
+   Nothing is coerced, filtered, truncated or repaired. Any violation
+   rejects the whole observation.
 1. `claimed_origin != source_extracted` → `variation_not_source`.
 2. Empty text, more than 120 characters, or fewer than 2 words →
    `invalid_text`.
@@ -78,9 +94,23 @@ a counted reason.
 4. Missing or unknown sentence → `unknown_sentence`.
 5. The sentence is not citable in that window (context only, or another
    window's) → `not_citable_in_window`.
-6. It is not grounded in the snapshot sentence, using the production
-   `_ground_phrase`, or the grounded span fails Study Bank chunk rules →
-   `ungrounded`. There is never repair or relabelling.
+6. **Grounding stays inside the window's citable characters (Round 3,
+   M2).**
+   - The citable ranges are the character ranges of that sentence's parts
+     in `window.citable`. Consecutive parts in the same window are joined
+     across the whitespace between them.
+   - Context parts are never included.
+   - Grounding (the production `_ground_phrase`) runs **inside each range,
+     in character order**, and the first match inside a range is the span.
+     So a phrase that occurs twice in a sentence is grounded at the
+     occurrence this window actually saw.
+   - If the phrase is in the sentence but in no citable range →
+     `outside_citable_range`. This covers a phrase that is only in another
+     part, only in a context part, or split across two windows.
+   - If it is not in the sentence at all, or the span fails Study Bank chunk
+     rules → `ungrounded`.
+   - There is never repair, relabelling or "completing" a span from the full
+     sentence, and the snapshot is never modified.
 7. Accepted. The evidence is copied from the **snapshot**: item, lesson,
    revision, sentence text and fingerprint, timestamps, and the grounded
    character range. The display text is the exact source substring.
@@ -90,6 +120,11 @@ a counted reason.
 
 **Variations** (`origin = ai_variation`) are kept only as text on the
 candidate. They are never evidence and never a recommendation.
+
+**Exception boundary (Round 3, M3).** The reduce verifies each observation
+inside its own `try`. An unexpected exception rejects only that observation,
+as `verification_error`. It never aborts the reduce and never makes the
+observation valid.
 
 ## 5. Identity and de-duplication
 
@@ -105,8 +140,17 @@ equals Study Bank de-duplication.
 
 Observations with the same identity form one candidate.
 
-- **Sources** are de-duplicated by `(item, sentence, span)` and keep all
-  occurrences.
+- **Sources** are keyed by `(item, sentence, span)`; distinct keys are all
+  kept.
+  - **Merging one key (Round 3, M1).** All observations of a key point at the
+    same server-verified span, so every field except `reliability` is
+    identical; this is asserted.
+  - The merged `reliability` is the **maximum** of the server-verified
+    values. Reliability only records that the server saw the provider text
+    equal the source text, ignoring case. It is not a provider claim, it
+    does not change the span or the source, and it does not touch any
+    semantic score, so taking the maximum cannot raise unproven quality.
+  - It replaces the earlier dictionary in which the last record won.
 - **Source order** is: higher reliability, then timestamps present, then
   sentence fingerprint, then span. **Never by transcript position or
   arrival order.** The primary source is the first in this order.
@@ -144,9 +188,14 @@ CURATION-JOB-STATE-MACHINE).
 
 ### 6.2 Aggregation and uncertainty
 
-- **Per dimension.** The lower median of all observations' values, ignoring
-  `None`. It is order-independent and conservative: when scorers disagree,
-  the lower middle value wins.
+- **Per dimension, two levels (Round 3, M1).**
+  1. For each distinct source (evidence key), take the lower median of that
+     source's observations.
+  2. Then take the lower median across sources.
+
+  `None` is ignored at both levels. Each source therefore gets **one vote**:
+  repeating the same source cannot outvote another source. Both levels are
+  order-independent, and when scorers disagree the lower middle value wins.
 - **Score.** `Σ weightᵢ·valueᵢ / Σ weightᵢ` over the dimensions present,
   computed exactly as a `Fraction`, on a 0–3 scale.
 - **`weight_coverage`.** The sum of the weights present, divided by 100.

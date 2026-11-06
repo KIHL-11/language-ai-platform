@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 from chunk_curation_lab.scoring import SEMANTIC
-from chunk_curation_lab.snapshot import LibrarySnapshot, sentence_fingerprint
-from chunk_curation_lab.windowing import WindowPlan
+from chunk_curation_lab.snapshot import LibrarySnapshot, SnapshotSentence, sentence_fingerprint
+from chunk_curation_lab.windowing import Window, WindowPlan
 from services.ai_chunks.service import AiChunkOrganizerService
 from services.retrieval.chunk_quality import ChunkTextRejected, prepare_chunk_text
 
@@ -75,19 +75,78 @@ class RejectedObservation:
     text: str
 
 
+def _is_int(value) -> bool:
+    return type(value) is int  # excludes bool
+
+
+def shape_error(observation: ProviderObservation) -> str | None:
+    """Reason a provider observation is malformed, or None. Checks container
+    and element types before anything reads them; nothing is repaired,
+    truncated or coerced (Round 3, M3)."""
+    if not _is_int(observation.window_index):
+        return "invalid_window_index"
+    if not isinstance(observation.text, str):
+        return "invalid_text"
+    if observation.evidence_sentence_id is not None and not _is_int(observation.evidence_sentence_id):
+        return "invalid_sentence_id"
+    if not isinstance(observation.claimed_origin, str):
+        return "invalid_origin"
+    scores = observation.scores
+    if not isinstance(scores, Mapping) or any(not isinstance(key, str) for key in scores) or (
+        set(scores) - set(SEMANTIC)
+    ) or any(value is not None and (not _is_int(value) or not 0 <= value <= 3) for value in scores.values()):
+        return "invalid_scores"
+    variations = observation.variations
+    if not isinstance(variations, (tuple, list)) or len(variations) > MAX_VARIATIONS or any(
+        not isinstance(value, str) or not value.strip() or len(value.strip()) > MAX_VARIATION_CHARS
+        for value in variations
+    ):
+        return "invalid_variations"
+    if any(value is not None and not isinstance(value, str)
+           for value in (observation.claimed_library_item_id, observation.claimed_quote)) or any(
+        value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)))
+        for value in (observation.claimed_start, observation.claimed_end)
+    ):
+        return "invalid_claims"
+    return None
+
+
+def citable_ranges(window: Window, sentence: SnapshotSentence) -> list[tuple[int, int]]:
+    """Character ranges of `sentence` that `window` may cite. Consecutive
+    parts of one sentence in the same window are joined across the
+    whitespace between them, because the provider saw both."""
+    parts = sorted((value for value in window.citable if value.sentence_id == sentence.sentence_id),
+                   key=lambda value: value.part)
+    ranges: list[tuple[int, int, int]] = []  # (start, end, last part)
+    for part in parts:
+        if ranges and ranges[-1][2] + 1 == part.part and not sentence.text[ranges[-1][1]:part.char_start].strip():
+            ranges[-1] = (ranges[-1][0], part.char_end, part.part)
+        else:
+            ranges.append((part.char_start, part.char_end, part.part))
+    return [(start, end) for start, end, _ in ranges]
+
+
+def _ground_in(sentence_text: str, text: str, ranges: list[tuple[int, int]]) -> tuple[int, int] | None:
+    for range_start, range_end in ranges:  # char order inside one sentence
+        try:
+            start, end = AiChunkOrganizerService._ground_phrase(
+                sentence_text[range_start:range_end], text, provider_output=True)
+        except (ValueError, RuntimeError):
+            continue
+        return range_start + start, range_start + end
+    return None
+
+
 def verify_observation(
     observation: ProviderObservation, snapshot: LibrarySnapshot, plan: WindowPlan
 ) -> VerifiedObservation | RejectedObservation:
+    malformed = shape_error(observation)
+    if malformed:
+        return RejectedObservation(malformed, observation.text if isinstance(observation.text, str) else "")
     if observation.claimed_origin != "source_extracted":
         # A variation proposed as a standalone chunk is never a source chunk.
         return RejectedObservation("variation_not_source", observation.text)
-    scores = observation.scores
-    if not isinstance(scores, Mapping) or set(scores) - set(SEMANTIC) or any(
-        value is not None and (type(value) is not int or not 0 <= value <= 3)
-        for value in scores.values()
-    ):
-        return RejectedObservation("invalid_scores", observation.text)
-    text = observation.text.strip() if isinstance(observation.text, str) else ""
+    text = observation.text.strip()
     if not text or len(text) > MAX_CHUNK_CHARS or len(text.split()) < 2:
         return RejectedObservation("invalid_text", observation.text)
     window = next((value for value in plan.windows if value.index == observation.window_index), None)
@@ -98,10 +157,16 @@ def verify_observation(
         return RejectedObservation("unknown_sentence", observation.text)
     if sentence.sentence_id not in window.citable_sentence_ids:
         return RejectedObservation("not_citable_in_window", observation.text)
+    # Ground only inside the characters this window could cite (Round 3,
+    # M2): a matching sentence id is not enough for a split sentence.
+    span = _ground_in(sentence.text, text, citable_ranges(window, sentence))
+    if span is None:
+        anywhere = _ground_in(sentence.text, text, [(0, len(sentence.text))])
+        return RejectedObservation("outside_citable_range" if anywhere else "ungrounded", observation.text)
+    start, end = span
     try:
-        start, end = AiChunkOrganizerService._ground_phrase(sentence.text, text, provider_output=True)
         prepared = prepare_chunk_text(sentence.text[start:end], snapshot.language)
-    except (ValueError, RuntimeError, ChunkTextRejected):
+    except (ValueError, ChunkTextRejected):
         return RejectedObservation("ungrounded", observation.text)
     mismatches = tuple(name for name, claimed, actual in (
         ("library_item_id", observation.claimed_library_item_id, snapshot.library_item_id),
@@ -109,10 +174,6 @@ def verify_observation(
         ("start", observation.claimed_start, sentence.start),
         ("end", observation.claimed_end, sentence.end),
     ) if claimed is not None and claimed != actual)
-    variations = tuple(
-        value.strip() for value in tuple(observation.variations)[:MAX_VARIATIONS]
-        if isinstance(value, str) and value.strip() and len(value.strip()) <= MAX_VARIATION_CHARS
-    )
     return VerifiedObservation(
         identity=prepared.normalized_text,
         display_text=sentence.text[start:end],
@@ -130,7 +191,7 @@ def verify_observation(
             reliability=3 if text.casefold() == sentence.text[start:end].casefold() else 2,
         ),
         scores=dict(observation.scores),
-        variations=variations,
+        variations=tuple(value.strip() for value in observation.variations),
         claim_mismatches=mismatches,
     )
 

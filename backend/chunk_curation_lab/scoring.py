@@ -49,6 +49,16 @@ def lower_median(values: Iterable[int]) -> int:
     return ordered[(len(ordered) - 1) // 2]
 
 
+def merge_scores(observed: Iterable[Mapping[str, int | None]]) -> dict[str, int | None]:
+    """Lower median per semantic dimension, ignoring missing values."""
+    observed = list(observed)
+    merged: dict[str, int | None] = {}
+    for name in SEMANTIC:
+        present = [scores[name] for scores in observed if scores.get(name) is not None]
+        merged[name] = lower_median(present) if present else None
+    return merged
+
+
 def novelty(identity: str, saved: Mapping[str, bool]) -> int:
     """3 not saved, 1 saved but archived, 0 saved and active."""
     if identity not in saved:

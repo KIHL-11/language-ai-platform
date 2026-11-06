@@ -8,6 +8,19 @@
 - **Supersedes:** `docs/AI-CHUNK-2.0-DESIGN.md`. That document is kept for
   history and marked superseded.
 
+## Round 3 (Codex CHANGES_REQUIRED on `ddda942`)
+
+| ID | Fix | Where |
+|---|---|---|
+| M1 | Duplicate evidence keys are merged by the maximum verified reliability; one vote per distinct source (two-level lower median) | `reduce.py`, `scoring.merge_scores`; ranking spec §5 and §6.2 |
+| M2 | Grounding stays inside the window's citable character ranges; new reason `outside_citable_range` | `provenance.py`; ranking spec §4 |
+| M3 | Strict shape checks with no repair; a per-observation exception boundary (`verification_error`) | `provenance.shape_error`, `reduce.py`; ranking spec §4 |
+| M4 | Phase A persistence projection and whitelist; an A→B gate; replays never re-rendered; executable tests | `compat.py`, `test_chunk_curation_compat.py`; contract §4 |
+| M5 | Window status, attempts and checkpoints separated; immutable batch revisions with a current pointer; superseded batches; informational decision inheritance | state machine §1, §3 and §5 |
+| M6 | Attempt ledger with an `uncertain` state; conservative accounting; re-approval; provider idempotency keys only when documented; "no duplicate billing" withdrawn | state machine §6; F1–F10 |
+
+The CH-01 Step 1 Mediums stay **OPEN** (R-M10, R-M11). R-H3 is a launch gate.
+
 ## Documents
 
 | # | Document | Owner item |

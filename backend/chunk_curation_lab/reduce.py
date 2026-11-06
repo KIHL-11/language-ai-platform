@@ -14,7 +14,7 @@ Order independence is a design property, not an accident:
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Iterable, Mapping
 
@@ -26,7 +26,7 @@ from chunk_curation_lab.provenance import (
     VerifiedObservation,
     verify_observation,
 )
-from chunk_curation_lab.scoring import QUALITY_FLOOR, Assessment, assess, novelty
+from chunk_curation_lab.scoring import QUALITY_FLOOR, Assessment, assess, merge_scores, novelty
 from chunk_curation_lab.snapshot import LibrarySnapshot
 from chunk_curation_lab.windowing import WindowPlan
 
@@ -82,7 +82,13 @@ def reduce_candidates(
     mismatches: Counter[str] = Counter()
     groups: dict[str, list[VerifiedObservation]] = {}
     for observation in observations:
-        result = verify_observation(observation, snapshot, plan)
+        try:
+            result = verify_observation(observation, snapshot, plan)
+        except Exception:  # noqa: BLE001 - per-observation boundary (Round 3, M3)
+            # An unexpected failure on one untrusted observation rejects only
+            # that observation; it never aborts the reduce or becomes valid.
+            rejected["verification_error"] += 1
+            continue
         if isinstance(result, RejectedObservation):
             rejected[result.reason] += 1
             continue
@@ -91,11 +97,15 @@ def reduce_candidates(
 
     candidates: list[CuratedCandidate] = []
     for identity, members in groups.items():
-        sources = {member.evidence.key: member.evidence for member in members}
-        ordered_sources = tuple(sorted(sources.values(), key=_source_order))
+        by_key: dict[tuple, list[VerifiedObservation]] = {}
+        for member in members:
+            by_key.setdefault(member.evidence.key, []).append(member)
+        ordered_sources = tuple(sorted((_merge_evidence(group) for group in by_key.values()), key=_source_order))
         primary = ordered_sources[0]
         assessment = assess(
-            (member.scores for member in members),
+            # One vote per distinct source: repeating the same source cannot
+            # outvote other sources, and order cannot matter (Round 3, M1).
+            (merge_scores(group.scores for group in key_members) for key_members in by_key.values()),
             novelty_value=novelty(identity, saved),
             reliability=max(source.reliability for source in ordered_sources),
         )
@@ -163,6 +173,20 @@ def reduce_candidates(
         notes=tuple(sorted(set(notes))),
         coverage=coverage,
     )
+
+
+def _merge_evidence(members: list[VerifiedObservation]) -> VerifiedEvidence:
+    """All observations of one evidence key point at the same server-verified
+    span, so every field but reliability is identical. Reliability is the
+    best server-verified match for that span: it records that the server saw
+    the provider text equal the source text (ignoring case); it is never a
+    provider claim, and it never changes the span, the source or a semantic
+    score."""
+    first, *rest = (member.evidence for member in members)
+    best = max(evidence.reliability for evidence in (first, *rest))
+    if any(replace(evidence, reliability=best) != replace(first, reliability=best) for evidence in rest):
+        raise AssertionError("evidence with one key must share every field but reliability")
+    return replace(first, reliability=best)
 
 
 def _with(candidate: CuratedCandidate, status: str, tied_with: tuple[str, ...] = ()) -> CuratedCandidate:
