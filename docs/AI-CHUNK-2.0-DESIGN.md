@@ -1,5 +1,10 @@
 # AI Chunk 2.0: full-transcript curation and conversational transfer (design only)
 
+> **Superseded (2026-11-06).** Codex returned DESIGN_CHANGES_REQUIRED on this
+> design. See `docs/ai-chunk-2/CH-01-02-DESIGN-REVISION.md` and the documents
+> beside it. This file is kept for history; its ranking and tie rules in
+> particular are replaced.
+
 **Status:** design for Owner review, 2026-11-06. Nothing in this document is
 implemented. CurationJob and real providers need separate approval. The
 evidence comes from the CH-00 audit; Step 1 is in
