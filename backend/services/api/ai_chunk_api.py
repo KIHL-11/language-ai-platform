@@ -119,7 +119,7 @@ def create_suggestions(
     http_request: Request,
 ):
     owner, service = _owner_and_service(http_request, identity, request.user_id)
-    return _controlled(lambda: service.suggest(owner, request))
+    return _controlled(lambda: service.describe(service.suggest(owner, request)))
 
 
 @router.get("/ai/chunk-suggestions/{batch_id}", response_model=AiChunkBatch)
@@ -130,7 +130,7 @@ def get_suggestions(
     http_request: Request,
 ):
     owner, service = _owner_and_service(http_request, identity, user_id)
-    return _controlled(lambda: service.get_batch(owner, batch_id))
+    return _controlled(lambda: service.describe(service.get_batch(owner, batch_id)))
 
 
 @router.post(

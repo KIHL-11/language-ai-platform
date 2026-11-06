@@ -158,6 +158,16 @@ class AiChunkOrganizerService:
     def get_batch(self, owner: str, batch_id: str) -> AiChunkBatch:
         return self.store.get_batch(owner, batch_id)
 
+    @property
+    def proposal_mode(self) -> str:
+        # Only the offline mock exists today; any other adapter is a model.
+        return "mock" if getattr(self.adapter, "mode", None) == "mock" else "model"
+
+    def describe(self, batch: AiChunkBatch) -> AiChunkBatch:
+        """The batch as returned to the learner, labelled with how its
+        candidates were proposed. Not persisted (CH-01 Step 1)."""
+        return batch.model_copy(update={"proposal_mode": self.proposal_mode})
+
     def decide(
         self, owner: str, batch_id: str, request: CandidateDecisionRequest
     ) -> CandidateDecisionResponse:

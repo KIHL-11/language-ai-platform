@@ -365,7 +365,7 @@ describe('Cloud Library learning', () => {
       await openLesson(user)
       await user.click(screen.getByRole('button', { name: 'Find chunks' }))
 
-      await user.click(await screen.findByRole('button', { name: 'Find chunks in this lesson' }))
+      await user.click(await screen.findByRole('button', { name: 'Find chunks' }))
 
       expect(requests[0].body).toMatchObject({
         user_id: 'owner-a', source_language: libraryItem.lesson.source_language,
@@ -408,7 +408,7 @@ describe('Cloud Library learning', () => {
       const user = userEvent.setup()
       await openLesson(user)
       await user.click(screen.getByRole('button', { name: 'Find chunks' }))
-      await user.click(await screen.findByRole('button', { name: 'Find chunks in this lesson' }))
+      await user.click(await screen.findByRole('button', { name: 'Find chunks' }))
 
       await user.click(await screen.findByRole('button', { name: 'Accept' }))
 

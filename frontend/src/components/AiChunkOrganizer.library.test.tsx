@@ -59,7 +59,7 @@ describe('AiChunkOrganizer', () => {
     vi.mocked(getChunkSuggestions).mockResolvedValueOnce(batch([{ ...first, state: 'rejected', version: 2 }, second], { source_type: 'library_passage' }))
     const user = userEvent.setup()
     render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Lesson', language: 'en', sentenceIds: [1, 2] }} />)
-    await user.click(screen.getByRole('button', { name: 'Find chunks in this lesson' }))
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
     const meaningB = (await screen.findAllByLabelText('Chinese explanation'))[1]
     await user.clear(meaningB)
     await user.type(meaningB, '讲得通（未保存）')
@@ -78,11 +78,68 @@ describe('AiChunkOrganizer', () => {
     vi.mocked(getChunkSuggestions).mockResolvedValueOnce(batch([{ ...first, state: 'expired' }], { status: 'expired', source_type: 'library_passage' }))
     const user = userEvent.setup()
     render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Lesson', language: 'en', sentenceIds: [1] }} />)
-    await user.click(screen.getByRole('button', { name: 'Find chunks in this lesson' }))
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
 
     await user.click(await screen.findByRole('button', { name: 'Accept' }))
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('expired'))
+  })
+
+  it('says how much of a long lesson is analysed and never claims the full lesson (CH-00 R2)', async () => {
+    vi.mocked(generateLibraryChunkSuggestions).mockResolvedValueOnce(batch([], { source_type: 'library_passage', proposal_mode: 'mock' }))
+    const ids = Array.from({ length: 80 }, (_, index) => index + 1)
+    const user = userEvent.setup()
+    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Podcast', language: 'en', sentenceIds: ids }} />)
+
+    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('Only 12/80 sentences are analysed (the first 12). This is not a full-lesson recommendation.')
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+    await waitFor(() => expect(generateLibraryChunkSuggestions).toHaveBeenCalled())
+    expect(vi.mocked(generateLibraryChunkSuggestions).mock.calls.at(-1)?.[3]).toEqual(ids.slice(0, 12))
+    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('Only 12/80')
+    expect(screen.queryByText(/in this lesson/)).not.toBeInTheDocument()
+  })
+
+  it('a short lesson is analysed in full', () => {
+    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Short', language: 'de', sentenceIds: [1, 2, 3, 4, 5] }} />)
+
+    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('All 5 sentences are analysed.')
+  })
+
+  it('labels mock results as not AI curation (CH-00 R1)', async () => {
+    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(batch([candidate('a', 'take part')], { proposal_mode: 'mock' }))
+    const user = userEvent.setup()
+    render(<AiChunkOrganizer learnerId="local-learner" />)
+    await user.type(screen.getByLabelText('Learning text'), 'take part here.')
+
+    await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
+
+    expect(await screen.findByRole('note')).toHaveTextContent('Offline mock, not AI curation: no AI provider is enabled.')
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument()
+  })
+
+  it('an empty mock batch does not claim the text has no useful chunks', async () => {
+    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(batch([], { proposal_mode: 'mock' }))
+    const user = userEvent.setup()
+    render(<AiChunkOrganizer learnerId="local-learner" />)
+    await user.type(screen.getByLabelText('Learning text'), 'Today we talk about the studio.')
+
+    await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
+
+    expect(await screen.findByText(/found none of its built-in phrases/)).toHaveTextContent('This does not mean the text has no useful chunks.')
+    expect(screen.queryByText('No source-grounded Chunk candidates were found.')).not.toBeInTheDocument()
+  })
+
+  it('a model batch shows no mock notice', async () => {
+    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(batch([], { proposal_mode: 'model' }))
+    const user = userEvent.setup()
+    render(<AiChunkOrganizer learnerId="local-learner" />)
+    await user.type(screen.getByLabelText('Learning text'), 'Today we talk about the studio.')
+
+    await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
+
+    expect(await screen.findByText('No source-grounded Chunk candidates were found.')).toBeInTheDocument()
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
   })
 
   it('retries a failed generation with the same key, then uses a new key (re-review)', async () => {
@@ -92,7 +149,7 @@ describe('AiChunkOrganizer', () => {
       .mockResolvedValueOnce(batch([candidate('a', 'take part')], { batch_id: 'batch-2', source_type: 'library_passage' }))
     const user = userEvent.setup()
     render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Lesson', language: 'en', sentenceIds: [1] }} />)
-    const find = screen.getByRole('button', { name: 'Find chunks in this lesson' })
+    const find = screen.getByRole('button', { name: 'Find chunks' })
 
     await user.click(find)
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be generated')

@@ -68,10 +68,15 @@ def normalize_phrase(value: str) -> str:
 
 
 class DeterministicMockChunkAdapter:
-    """Bounded test adapter. It never performs I/O or calls a model provider."""
+    """Bounded test adapter. It never performs I/O or calls a model provider.
+
+    It only recognises the small built-in phrase list above. When none of them
+    occurs it proposes nothing: it never invents a candidate from whatever
+    text happens to come first (CH-00 R1)."""
 
     model_id = "mock-chunk-organizer"
-    proposal_version = "1"
+    proposal_version = "2"
+    mode = "mock"
 
     def propose(
         self,
@@ -99,17 +104,4 @@ class DeterministicMockChunkAdapter:
                 ))
                 if len(results) >= max_candidates:
                     return results
-        if not results and segments:
-            words = re.findall(r"[\w'’äöüÄÖÜß]+", segments[0].text, flags=re.UNICODE)
-            if len(words) >= 2:
-                phrase = " ".join(words[: min(4, len(words))])
-                results.append(ProposedChunk(
-                    text=phrase,
-                    suggested_meaning_zh="",
-                    usage_note="",
-                    example=segments[0].text,
-                    explanation_of_value="候选短语需要学习者确认。",
-                    quality_flags=["mock_adapter", "meaning_uncertain"],
-                    evidence_segment_id=segments[0].segment_id,
-                ))
-        return results[:max_candidates]
+        return results

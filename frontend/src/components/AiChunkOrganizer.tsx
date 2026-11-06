@@ -11,8 +11,16 @@ import {
 import type { AiChunkBatch, AiChunkCandidate, CandidateEdit } from '../types/aiChunks'
 import type { SourceLanguage } from '../types/lesson'
 
-// At most 12 sentences per request (server contract).
+// At most 12 sentences per request (server contract). Longer lessons are
+// not analysed in full, and the page says so (CH-00 R2).
 const MAX_LIBRARY_SENTENCES = 12
+
+function coverageText(total: number): string {
+  const analysed = Math.min(total, MAX_LIBRARY_SENTENCES)
+  return total > analysed
+    ? `Only ${analysed}/${total} sentences are analysed (the first ${analysed}). This is not a full-lesson recommendation.`
+    : `All ${total} sentences are analysed.`
+}
 
 export interface LibraryChunkSource {
   libraryItemId: string
@@ -129,10 +137,11 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
 
   return <section className="mt-8 border-y border-[#ccd6d1] bg-white p-5" aria-labelledby="ai-chunk-title">
     <h2 id="ai-chunk-title" className="text-xl font-semibold">AI Chunk Organizer</h2>
-    <p className="mt-1 text-sm text-[#66726e]">Mock mode proposes source-grounded expressions. Nothing is saved until you accept it.</p>
+    <p className="mt-1 text-sm text-[#66726e]">Candidates must appear in the source text. Nothing is saved until you accept it.</p>
     {librarySource ? <>
-      <p className="mt-4 text-sm">From your lesson <strong>{librarySource.title}</strong> ({librarySource.language === 'en' ? 'English' : 'German'}, {Math.min(librarySource.sentenceIds.length, MAX_LIBRARY_SENTENCES)} sentences).</p>
-      <button type="button" disabled={busy !== null || librarySource.sentenceIds.length === 0} onClick={() => void generate()} className="mt-3 h-10 bg-[#176b5b] px-4 text-white disabled:opacity-50">{busy === 'generate' ? 'Generating…' : 'Find chunks in this lesson'}</button>
+      <p className="mt-4 text-sm">From your lesson <strong>{librarySource.title}</strong> ({librarySource.language === 'en' ? 'English' : 'German'}).</p>
+      <p className="mt-1 text-sm text-[#8a5b00]" aria-label="Analysis coverage">{coverageText(librarySource.sentenceIds.length)}</p>
+      <button type="button" disabled={busy !== null || librarySource.sentenceIds.length === 0} onClick={() => void generate()} className="mt-3 h-10 bg-[#176b5b] px-4 text-white disabled:opacity-50">{busy === 'generate' ? 'Generating…' : 'Find chunks'}</button>
     </> : <>
       <div className="mt-4 flex gap-2">
         {(['en', 'de'] as const).map((value) => <button key={value} type="button" aria-label={`Candidate language: ${value === 'en' ? 'English' : 'German'}`} aria-pressed={language === value} onClick={() => setLanguage(value)} className="h-9 border border-[#aebcb6] px-3 aria-pressed:bg-[#dce9e4]">{value === 'en' ? 'English' : 'German'}</button>)}
@@ -143,7 +152,12 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
     </>}
     {error && <p role="alert" className="mt-3 text-[#8f1d14]">{error}</p>}
     {notice && <p role="status" className="mt-3 text-[#8a5b00]">{notice}</p>}
-    {batch && batch.candidates.length === 0 && <p className="mt-4">No source-grounded Chunk candidates were found.</p>}
+    {batch?.proposal_mode === 'mock' && <p role="note" className="mt-4 border border-[#e2c58a] bg-[#fff8e8] p-3 text-sm">
+      Offline mock, not AI curation: no AI provider is enabled. The mock only recognises a small built-in phrase list, so most useful expressions are not detected and nothing is ranked.
+    </p>}
+    {batch && batch.candidates.length === 0 && <p className="mt-4">{batch.proposal_mode === 'mock'
+      ? 'The offline mock found none of its built-in phrases. This does not mean the text has no useful chunks.'
+      : 'No source-grounded Chunk candidates were found.'}</p>}
     <ul className="mt-5 space-y-4">
       {batch?.candidates.map((candidate) => {
         const edit = edits[candidate.candidate_id]

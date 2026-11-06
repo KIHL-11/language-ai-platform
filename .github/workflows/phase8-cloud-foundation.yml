@@ -29,6 +29,7 @@ on:
       - claude/p8-b1-library-reliability
       - claude/p8-b2-guided-listening
       - claude/p8-b3-cloud-dictionary-chunks
+      - claude/ch-01-step1-chunk-honesty
   workflow_dispatch:
 
 permissions:
