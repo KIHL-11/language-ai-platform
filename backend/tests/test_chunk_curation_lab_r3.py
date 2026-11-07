@@ -82,7 +82,9 @@ def test_every_order_of_four_observations_of_one_key_is_identical():
 
     assert len(results) == 1
     [only] = results
-    assert only[1][0][-1][0][1] == 3  # merged reliability: the verified exact match
+    assert only[1] == ()  # a conflicting naturalness=1 is preserved by the source minimum
+    assert only[2][0][-1][0][1] == 3  # exact evidence is still retained
+    assert only[2][0][4] < QUALITY_FLOOR
 
 
 def test_full_permutation_compares_scores_selection_and_provenance_near_the_floor():

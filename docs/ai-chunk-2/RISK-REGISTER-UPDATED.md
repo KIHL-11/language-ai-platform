@@ -7,7 +7,7 @@ authorised for production, and nothing here is production ready.
 
 | ID | Risk | Mitigation (design) | Status |
 |---|---|---|---|
-| R-H1 | A paid provider's cost runs away; **duplicate billing is possible** after crashes or timeouts (Round 3, M6) | Attempt ledger with reserve before send; `uncertain` counted at its ceiling; re-approval thresholds; provider idempotency keys only when documented; two explicit enable flags; caps | Open: designed (state machine §6); fault tests F1–F10 NOT EXECUTED; no provider code |
+| R-H1 | A paid provider's cost runs away; **duplicate billing is possible** after crashes or timeouts (Round 3, M6) | Unique `(owner, attempt_id)` accounting (F3); orphan is an annotation, not a second charge; reserve before send; `uncertain` counted at its ceiling; re-approval thresholds; provider idempotency keys only when documented; two explicit enable flags; caps | Open: designed (state machine §6); fault tests F1–F10 NOT EXECUTED; no provider code |
 | R-H2 | Prompt injection through transcripts | Nonce-fenced data; JSON per sentence; schema-only output; strict shape checks; grounding inside citable ranges; per-observation rejection and exception boundary | Partly mitigated: output side tested in the slice; prompt side not built |
 | R-H3 | **Personal accept does not re-validate the Library source** (the Cloud path does) | **Launch gate**, required before any Personal curation ships; see §Gates | **Open, blocking** for launch |
 | R-H4 | Real semantic scoring may be poor or inconsistent; synthetic tests cannot prove real quality | `unscored` without core signals; conservative aggregation; gates and floor; human accept or reject; a labelled evaluation set before rollout | Open by nature |
@@ -16,8 +16,8 @@ authorised for production, and nothing here is production ready.
 
 | ID | Risk | Mitigation | Status |
 |---|---|---|---|
-| R-M1 | Rollback breaks replay (`extra="forbid"`; None fields are serialised) | Phase A persistence projection and whitelist; A→B gate; replays never re-rendered (contract §4) | Designed; projection **tested in isolation** (14 tests); production wiring NOT EXECUTED |
-| R-M2 | Score drift between windows and model primacy bias | Two-level lower median; quality-only ranking; whole tie groups; permutation tests | Reduce order independence proven in the slice; model-side bias untested |
+| R-M1 | Rollback breaks replay (`extra="forbid"`; None fields are serialised) | Frozen Legacy V1 reader and transitive persistence projection (F2); A→B gate; replays never re-rendered (contract §4) | Designed; projection and frozen historical records **tested in isolation**; production wiring NOT EXECUTED |
+| R-M2 | Score drift between windows and model primacy bias | Per-source minima (F1), lower median across sources; quality-only ranking; whole tie groups; permutation and multiplicity tests | Reduce order independence proven in the slice; model-side bias untested |
 | R-M3 | Token estimate wrong for a provider | Conservative ratios; 50% headroom; tokenizer when available; skip, never truncate | Designed |
 | R-M4 | **German case-sensitive identity** splits a sentence-initial chunk from the same chunk mid-sentence | **Keep Study Bank identity** (Owner decision). Design: a **suspected-duplicate hint** only: when two identities differ only by the case of the first letter and one span starts at character 0, the UI shows "possibly the same as …". Nothing is merged automatically: no merge of cards, notes or SRS | Open (hint designed, not built) |
 | R-M5 | Stacked Drafts #81–#85 are unmerged; the curation migration follows `0012` | Number after `0012`; land after the stack merges | Open |

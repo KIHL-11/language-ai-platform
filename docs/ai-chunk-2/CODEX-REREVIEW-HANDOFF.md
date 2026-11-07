@@ -1,5 +1,11 @@
 # Codex third independent review: CH-01/02 Round 3 remediation
 
+> Historical handoff at `19a8830`. The F1–F3 follow-up is documented in
+> [CODEX-F1-F3-OWNER-REVIEW.md](CODEX-F1-F3-OWNER-REVIEW.md). Its within-source
+> minima, frozen V1 reader and attempt-id accounting supersede the relevant
+> assumptions/questions below. This implementation handoff is not an
+> independent approval.
+
 - **Verdict being addressed:** CHANGES_REQUIRED on `ddda942`: M1–M3 (with
   counterexamples) and M4–M6 (design gaps).
 - **Branch:** `claude/ch-01-02-remediation-r3`. The commit that adds this

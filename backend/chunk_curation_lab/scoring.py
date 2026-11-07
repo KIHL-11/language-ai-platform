@@ -4,9 +4,9 @@ Eight dimensions, each an integer 0-3. Six are semantic and must come from a
 scorer (a model, or a test stub supplying explicit scores); two are computed
 by the server. Position is not a dimension and is never an input.
 
-Aggregation across duplicate observations uses the lower median per
-dimension (conservative, order-independent). All arithmetic is exact
-(Fraction), so the result cannot depend on summation order.
+Conflicting scores of one evidence key use the per-dimension minimum.
+Distinct evidence keys then use the lower median (order-independent).
+All arithmetic is exact (Fraction), so summation order cannot matter.
 """
 from __future__ import annotations
 
@@ -50,12 +50,16 @@ def lower_median(values: Iterable[int]) -> int:
 
 
 def merge_scores(observed: Iterable[Mapping[str, int | None]]) -> dict[str, int | None]:
-    """Lower median per semantic dimension, ignoring missing values."""
+    """One conservative vote per evidence key, invariant under duplicate counts.
+
+    Missing values stay unknown; repeating a higher report cannot erase a
+    lower observed score. Median aggregation is only for distinct sources.
+    """
     observed = list(observed)
     merged: dict[str, int | None] = {}
     for name in SEMANTIC:
         present = [scores[name] for scores in observed if scores.get(name) is not None]
-        merged[name] = lower_median(present) if present else None
+        merged[name] = min(present) if present else None
     return merged
 
 

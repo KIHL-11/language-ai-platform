@@ -96,16 +96,34 @@ breaks replay after a rollback. This is demonstrated by
   - the nested `AiChunkCandidate`;
   - the nested `CandidateEvidence`.
 
-  It then validates the result with the **old** model, so it fails closed
-  instead of writing a record an old server cannot load.
+  It also projects nested StudyItem, ReviewState and every provenance
+  record. It validates the result with the **frozen Legacy V1** model, so it
+  fails closed instead of writing a record an old server cannot load.
 - **`persisted_batch(batch)`** does the same for batches. It also:
   - drops the computed `proposal_mode`, which is never persisted (CH-01
     Step 1);
   - **refuses** to persist more than 8 candidates, because the old
     `AiChunkBatch` limit is 8. A 12-candidate curated batch therefore cannot
     exist in storage until Phase B.
-- **Whitelist rule.** The whitelist is derived from the old models'
-  `model_fields`, not from a hand-written list, so it cannot drift.
+- **Frozen Legacy V1 (Codex F2).** The old reader is
+  `backend/chunk_curation_lab/legacy_v1.py`, a static transitive copy of the
+  contract and validators at `19a88301f108d2204576380ea2b8fcc111a9f51f`.
+  It imports no production model. The whitelist is derived only from these
+  **frozen** models, never from the current production classes. V2 may evolve
+  without silently widening the rollback contract. Introduce a new explicit
+  version instead of refreshing V1.
+  - Projection covers the envelope, candidate, evidence, StudyItem,
+    ReviewState and media/speaking/ai_text provenance records.
+  - Unknown provenance discriminators fail closed; they are not relabelled.
+  - The committed synthetic fixture
+    `backend/tests/fixtures/ai_chunk_legacy_v1.json` fixes historical V1
+    accept/edit_and_accept/reject/edit records and a batch. Tests read these
+    through V1 and V2, then project back to exactly the same JSON values.
+  - Future-field tests simulate live models gaining optional keys and nested
+    StudyItem/review/provenance additions. None may leak into V1 output.
+    The 8-candidate limit and old source-type enum remain enforced.
+  - This is an isolated compatibility experiment, not a two-server rollout
+    or a change to production serializers.
 
 ### 4.4 Phases, deploy order and rollback
 

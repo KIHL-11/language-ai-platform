@@ -188,14 +188,24 @@ CURATION-JOB-STATE-MACHINE).
 
 ### 6.2 Aggregation and uncertainty
 
-- **Per dimension, two levels (Round 3, M1).**
-  1. For each distinct source (evidence key), take the lower median of that
-     source's observations.
-  2. Then take the lower median across sources.
+- **Per dimension, two levels (Codex F1 remediation).**
+  1. For each distinct source (evidence key), take the **minimum** of its
+     non-missing observed scores.
+  2. Then take the lower median across distinct sources.
 
-  `None` is ignored at both levels. Each source therefore gets **one vote**:
-  repeating the same source cannot outvote another source. Both levels are
-  order-independent, and when scorers disagree the lower middle value wins.
+  `None` is ignored at both levels; an entirely missing dimension stays
+  missing. The source minimum is order-independent and idempotent:
+  repeating any existing observation 1, 2 or 100 times cannot change that
+  source's vote. The former within-source median was order-independent but
+  not multiplicity-independent: duplicating a high report could raise it.
+  Different sources still each receive exactly one vote in the lower median.
+
+  This is deliberately conservative. A new conflicting low score may lower
+  a recommendation; it cannot be erased by repeating higher scores. It
+  does not prove a model's semantic judgement correct. Real scorer quality
+  remains a separate release gate. Raw `observations` is a diagnostic count
+  and may grow on replay; recommendation status, score and provenance must
+  not change when an existing report is repeated.
 - **Score.** `Σ weightᵢ·valueᵢ / Σ weightᵢ` over the dimensions present,
   computed exactly as a `Fraction`, on a 0–3 scale.
 - **`weight_coverage`.** The sum of the weights present, divided by 100.
@@ -260,7 +270,7 @@ their order.
 only through:
 
 - **sets:** source keys, variations;
-- **order-free aggregates:** the lower median of a multiset, `max`, `len`,
+- **order-free aggregates:** per-source `min`, lower median across sources, `max`, `len`,
   and exact `Fraction` arithmetic;
 - **`sorted()` on total keys:** sources (quality, then fingerprint), tie
   groups (quality key), members inside a group (identity), and the other

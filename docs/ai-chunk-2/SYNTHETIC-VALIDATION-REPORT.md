@@ -236,3 +236,35 @@ Two Round 2 mutants were re-anchored to the new code.
   test.
 - The R-H3 Personal re-validation tests (the launch gate).
 - Provider and prompt tests, UI, the Personal store, and migrations.
+
+
+## Codex F1–F3 follow-up — independently executed, 2026-11-07
+
+- Baseline: `19a88301f108d2204576380ea2b8fcc111a9f51f`.
+- Worktree: isolated `codex/ch-01-02-f1-f3`; macOS, Python 3.11.17.
+- Baseline targeted suite: **88 passed**.
+- Final six-file targeted suite: **126 passed** (1.95 s), including the
+  original 88 regression cases and 38 additional F1/F2/F3 cases.
+- F1 red check: replacing only `merge_scores` in memory with the actual
+  function extracted from `git show 19a8830:backend/chunk_curation_lab/scoring.py`
+  gives **5 failed, 1 passed** in `test_chunk_curation_f1.py`. No source was
+  modified for this experiment.
+- Frozen historical fixtures cover accept, edit_and_accept, reject, edit,
+  a V1 batch, every legacy provenance variant, archived state, note, manual
+  meaning and ReviewState. Assertions compare JSON values and shape; this
+  does not promise preservation of whitespace/key order in raw JSON bytes.
+- F3 tests run only a pure projection with synthetic evidence references.
+  They do not execute a worker or authenticate provider billing receipts.
+- `git diff --check`: clean. No full backend/frontend suite or frontend
+  lint/build rerun; production/frontend files are unchanged.
+
+Command (from `backend`, using the existing Python 3.11 venv):
+
+```bash
+AI_MODE=mock python -B -m pytest -q -p no:cacheprovider   tests/test_chunk_curation_lab.py tests/test_chunk_curation_lab_r3.py   tests/test_chunk_curation_compat.py tests/test_chunk_curation_f1.py   tests/test_chunk_curation_legacy_v1.py tests/test_chunk_curation_billing.py
+```
+
+Still NOT EXECUTED: transactional worker/J1–J14/F1–F10/A1–A7 fault
+integration, real Provider, two-version database deployment, migrations,
+Personal persistence/re-validation and UI. Step 1 R-M10/R-M11 and R-H3
+remain open.

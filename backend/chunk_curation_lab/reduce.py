@@ -3,7 +3,7 @@
 Order independence is a design property, not an accident:
 - observations are grouped by identity (a dict of sets/lists that are only
   read through sorted() or order-free aggregates);
-- per-dimension aggregation is a lower median; scores are exact Fractions;
+- each source uses minima, then sources use a lower median; scores are exact Fractions;
 - sources are de-duplicated by key and ordered by evidence quality, then by
   sentence fingerprint, never by transcript position or arrival order;
 - ranking keys are quality only; exact ties form a group that is selected or
@@ -103,8 +103,8 @@ def reduce_candidates(
         ordered_sources = tuple(sorted((_merge_evidence(group) for group in by_key.values()), key=_source_order))
         primary = ordered_sources[0]
         assessment = assess(
-            # One vote per distinct source: repeating the same source cannot
-            # outvote other sources, and order cannot matter (Round 3, M1).
+            # One vote per distinct source. Conflicting reports use minima,
+            # so duplicate high scores cannot change that source's vote (F1).
             (merge_scores(group.scores for group in key_members) for key_members in by_key.values()),
             novelty_value=novelty(identity, saved),
             reliability=max(source.reliability for source in ordered_sources),

@@ -1,7 +1,7 @@
 """Round 3, M4: executable rollback-compatibility checks for the Phase A
 persistence projection (chunk_curation_lab/compat.py).
 
-"Old server" = the current production pydantic models (extra="forbid").
+"Old server" = the frozen Legacy V1 models from 19a8830 (extra="forbid").
 "New server" = the proposed *V2 models. Decision responses are real ones from
 the Personal organizer on temporary synthetic stores. Production
 serialisation is not changed by this round.
@@ -22,7 +22,7 @@ from chunk_curation_lab.compat import (
     persisted_batch,
     persisted_decision,
 )
-from services.schemas.ai_chunks import AiChunkBatch, AiChunkCandidate, CandidateDecisionResponse, CandidateEvidence
+from chunk_curation_lab.legacy_v1 import AiChunkBatch, AiChunkCandidate, CandidateDecisionResponse, CandidateEvidence
 from services.schemas.study_bank import MediaStudyProvenance, StudyItemInput, StudyItemPatch
 from test_ai_chunk_organizer import USER_A, decision, manual_request, organizer  # noqa: F401  (fixture)
 
@@ -91,7 +91,7 @@ def test_new_server_phase_a_records_load_on_the_old_server(decisions, action):
     assert not _keys(CandidateDecisionResponse, record)
     assert not _keys(AiChunkCandidate, record["candidate"])
     assert not _keys(CandidateEvidence, record["candidate"]["evidence"])
-    assert old == responses[action]  # same decision, same study item, same flags
+    assert old.model_dump(mode="json") == responses[action].model_dump(mode="json")
 
 
 @pytest.mark.parametrize("action", ["accept", "edit_and_accept", "reject"])

@@ -8,6 +8,23 @@
 - **Supersedes:** `docs/AI-CHUNK-2.0-DESIGN.md`. That document is kept for
   history and marked superseded.
 
+## Codex F1–F3 follow-up (2026-11-07)
+
+Baseline: `claude/ch-01-02-remediation-r3 @ 19a8830`.
+See [F1–F3 Owner Review](CODEX-F1-F3-OWNER-REVIEW.md).
+
+- F1: within one evidence key use minimum scores, then lower median across
+  sources; repeated reports cannot manufacture a higher source vote.
+- F2: freeze the transitive Legacy V1 persisted contract and historical
+  synthetic records independently of current production schemas.
+- F3: one charge projection per `(owner, attempt_id)`; late/orphan reports
+  amend that attempt, while distinct physical retries retain distinct ids.
+
+Only isolated algorithms, compatibility experiments, tests and design
+documents changed. No production integration or approval is implied.
+The Round 3 table below records the previous baseline; F1 replaces its
+within-source median.
+
 ## Round 3 (Codex CHANGES_REQUIRED on `ddda942`)
 
 | ID | Fix | Where |

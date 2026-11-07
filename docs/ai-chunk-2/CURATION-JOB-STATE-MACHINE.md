@@ -1,6 +1,10 @@
 # CurationJob state machine (design only; NOT IMPLEMENTED)
 
-**Revision:** Round 3 (M5, M6).
+**Revision:** Round 3 plus Codex F3 attempt-identity/accounting clarification.
+
+The worker remains NOT IMPLEMENTED. The pure budget projection in
+`backend/chunk_curation_lab/billing.py` and its synthetic tests validate
+accounting arithmetic only; they do not execute §9/§10 job/fault scenarios.
 
 No worker, table, migration or route exists, and every test in §9 and §10 is
 **NOT EXECUTED**. The design reuses mechanisms already in the repository:
@@ -23,7 +27,7 @@ Five kinds of object, each with its own lifecycle:
 |---|---|---|
 | **Job** | `(owner, job_id)`; unique `(owner, job_key)` | Mutable state with a fence; holds `current_batch_id` |
 | **Window** | `(job_id, window_index)` | Status row: `pending → succeeded \| failed \| skipped` and back to `pending` on retry; `succeeded` is final |
-| **Window attempt** | `(job_id, window_index, attempt_no)` | Append-only history, one row per provider call (§6) |
+| **Window attempt** | PK `(owner, attempt_id)`; unique `(job_id, window_index, attempt_no)` | One canonical identity per physical call, with append-only state/usage events (§6) |
 | **Window checkpoint** | `(job_id, window_index)` | Written **once**, only from a succeeded attempt; immutable |
 | **Published batch** | `(owner, batch_id)`; unique `(owner, job_id, batch_revision)` | Immutable once published; old revisions stay readable |
 
@@ -103,7 +107,8 @@ The job row has `fence BIGINT`, `lease_token`, `lease_owner` and
 3. **Stale results are recorded, not published.** A stale worker can never
    publish a batch or move a window. The provider response it holds is
    **not** applied. Its attempt is still recorded through a fence-free,
-   append-only `orphan_attempts` row, so its spend is counted (§6.3).
+   append-only `orphan_attempts` event keyed to its original `attempt_id`; it annotates
+  the canonical charge instead of adding a second one (§6.3).
 
 ## 5. Batch revisions and decisions (M5)
 
@@ -144,7 +149,20 @@ The job row has `fence BIGINT`, `lease_token`, `lease_owner` and
 
 ### 6.1 Attempt ledger
 
-Each provider call has an attempt row with these states:
+Each physical provider send gets a server-generated `attempt_id`, committed
+with its reservation before dispatch. It binds owner, job, window,
+`attempt_no`, request fingerprint, price/currency scale and reserved ceiling.
+Those bindings never change; reuse with different bindings is an error.
+Every network retry (including transport-layer automatic retries) is a new
+physical attempt with a new id. Disable unaccounted transport retries.
+
+State/result reports and budget reservations replay under the same
+`(owner, attempt_id)`. Replaying a local write, heartbeat, late response or
+orphan event does **not** create a new attempt. Orphan reports reference the
+existing reservation by owner and attempt id; unknown/cross-owner ids fail
+closed for reconciliation, never silently disappear from admission checks.
+
+Each attempt has these states:
 
 ```
 reserved ─send─► in_flight ─┬─► succeeded          (response received and validated)
@@ -175,15 +193,44 @@ reserved ─send─► in_flight ─┬─► succeeded          (response recei
 
 ### 6.3 Conservative accounting
 
-`spent = Σ cost(succeeded) + Σ cost(failed_billed) + Σ reserved_cost(uncertain) + Σ reserved_cost(orphan_attempts)`
+**Aggregate canonical attempts, not event rows or an uncertain/orphan
+UNION ALL.** For the selected owner/job budget scope, join all state and
+orphan/usage reports on `(owner, attempt_id)`, then sum exactly once per id:
 
-- An `uncertain` attempt counts at its full reserved ceiling. It is never
-  assumed free.
-- If the provider later reports the actual usage (for example in a billing
-  export), reconciliation may only **lower** the uncertain amount, and only
-  with evidence.
-- A new attempt may start only if `spent + reserved_cost(new) ≤
-  approved_budget`.
+```
+charge(a) =
+  verified actual cost                   if billed usage is evidenced
+  reserved ceiling                       if unresolved uncertain or orphaned
+  0                                      if released or definitively unbilled
+hold(a) = reserved ceiling                if reserved/in_flight and not orphaned
+spent = Σ charge(a)
+held  = Σ hold(a)
+admit iff spent + held + reserved_cost(new) ≤ approved_budget
+```
+
+- An orphan is an annotation of a call, **never an independent charge**.
+  `in_flight → uncertain` moves the reservation from held to spent; an
+  orphan report for that id cannot add another ceiling.
+- An unresolved attempt counts its full ceiling. A verified receipt replaces
+  that one amount; it is not added to it. Repeated reconciliation and duplicate
+  callbacks have zero budget delta. Unknown outcomes are never assumed free.
+- Known actual overruns are recorded even above the ceiling and block new
+  calls when they exhaust the budget; they are not clamped or discarded.
+- Conflicting snapshots, request bindings or usage amounts fail closed for
+  reconciliation. Do not choose the first/last row or the cheapest report.
+  A terminal unbilled state plus an orphan is a contradiction, not a refund.
+- Accounting events carry a unique event id, but event ids are not charging
+  identities. A canonical attempt view is derived from them. Budget and
+  admission updates must be atomic in the future production transaction;
+  enforce PK/FK/owner constraints before writes.
+- An orphan without usage evidence keeps the attempt uncertain; a verified
+  receipt resolves its uncertain amount. Evidence here means authenticated
+  provider usage/billing data. The lab only receives synthetic evidence
+  references; it does not authenticate receipts or implement storage.
+- The pure `budget_totals` projection and tests exercise duplicate snapshots,
+  uncertain plus repeated orphan reports, late receipts, held funds,
+  distinct retries, owner namespaces and conflicting reports. They are not
+  the worker/fault-injection tests in §9/§10.
 
 ### 6.4 When the learner must approve again
 
@@ -204,8 +251,15 @@ uncertain attempt without approval when a paid provider is configured.
   declares `supports_idempotency_key = True`.
 - Then each attempt sends `idempotency_key = sha256(job_id, window_index,
   checkpoint_generation)`, identical across retries of the same window, and
-  an `uncertain` attempt may be retried with the same key without new
-  approval.
+  a physical retry still gets a **new attempt_id** and reservation, even
+  though the provider key is unchanged. A key alone never refunds an
+  uncertain attempt or bypasses §6.3/§6.4. Key validity/retention must also be
+  checked before relying on provider-side de-duplication.
+- If authenticated provider evidence proves both sends share one billed
+  execution, reconcile the allocation once: one attempt carries the proven
+  charge, and the replay attempt carries evidenced zero cost. Without that
+  proof, keep conservative reservations for both physical sends. The budget
+  aggregate never de-duplicates by provider key alone.
 - Otherwise the system **assumes possible double billing** on every retry of
   an uncertain attempt, and §6.3 and §6.4 apply.
 - The `llm_client` in this repository sends no idempotency key today, so the
@@ -259,7 +313,7 @@ A stub provider counts calls and simulated billing.
 | # | Fault | Expected |
 |---|---|---|
 | F1 | The stub returns successfully; the worker is killed before the success transaction | After lease expiry the attempt is `uncertain` and counted at its ceiling; the next attempt needs approval if §6.4 applies; the stub's billed counter is 2 after a retry, and the ledger shows 1 succeeded and 1 uncertain |
-| F2 | As F1, with a stub that honours idempotency keys and `supports_idempotency_key` | The retry reuses the key; the stub bills once; no approval needed |
+| F2 | As F1, with a stub that honours valid idempotency keys | New attempt id, same provider key; reserve conservatively and obey approval rules until a billing/replay receipt proves one charged execution; then allocate one actual charge and one evidenced zero |
 | F3 | The worker is killed after `reserved`, before `in_flight` | The attempt is `released`; not counted; no approval needed |
 | F4 | A timeout on send | `uncertain`; counted; at most one automatic retry within budget, then `needs_budget_approval` |
 | F5 | Two windows uncertain, crossing 10% of the budget | `needs_budget_approval` before the next attempt |
@@ -268,3 +322,20 @@ A stub provider counts calls and simulated billing.
 | F8 | A stale worker receives a provider response after losing its lease | Response discarded; `orphan_attempts` records the cost; no window or batch change |
 | F9 | A crash during publish (after the reduce, before commit) | No batch revision appears; `current_batch_id` is unchanged; the re-run publishes exactly one revision |
 | F10 | Reconciliation lowers an uncertain cost with evidence | `spent` decreases by the evidenced amount only; it can never go below the succeeded and billed totals |
+
+
+### F3 accounting identity fault specifications — NOT EXECUTED on a worker
+
+| # | Scenario | Required future transactional result |
+|---|---|---|
+| A1 | One in_flight attempt becomes uncertain, then emits 100 orphan callbacks | One attempt id; one ceiling charged; held decreases once |
+| A2 | The orphan callback arrives before/after the reclaim event | Same canonical charge and admission decision |
+| A3 | Late authenticated receipt is replayed after reconciliation | Ceiling replaced once; no second debit or second refund |
+| A4 | Two physical retries share a provider key but have no billing proof | Two attempt ids; conservative cost for both |
+| A5 | Receipt proves an idempotent replay has zero incremental cost | One charge allocation plus evidenced zero, never two refunds |
+| A6 | Unknown/cross-owner attempt, conflicting payload or conflicting receipt | Reject and stop budget admission pending reconciliation |
+| A7 | Two workers reserve against the last available budget simultaneously | At most the funded attempt proceeds; spent plus held never over-admits |
+
+The isolated arithmetic tests cover projections relevant to A1/A3–A6.
+A2 event persistence/order and A7 transactional concurrency require the
+future worker/database and remain NOT EXECUTED.
