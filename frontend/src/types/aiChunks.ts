@@ -41,8 +41,9 @@ export interface AiChunkCandidate {
 
 export interface AiChunkBatch {
   batch_id: string
-  // How the candidates were proposed: the offline mock phrase list or a model.
-  proposal_mode?: 'mock' | 'model' | null
+  // How the candidates were proposed, from what they recorded at generation:
+  // the offline mock, a trusted model, or unknown (empty, mixed, unrecognised).
+  proposal_mode?: 'mock' | 'model' | 'unknown' | null
   user_id: string
   source_language: SourceLanguage
   source_type: 'manual_text' | 'library_passage'

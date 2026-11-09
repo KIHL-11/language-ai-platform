@@ -95,7 +95,7 @@ def test_moving_a_phrase_to_the_end_does_not_drop_it():
     assert (only.text, only.evidence_segment_id) == ("it depends on", "sentence:40")
 
 
-def test_a_manual_text_without_known_phrases_gives_an_empty_mock_batch(organizer):
+def test_a_manual_text_without_known_phrases_gives_an_empty_unknown_batch(organizer):
     service, _, _ = organizer
     ai_chunk_api._service = service
     try:
@@ -108,8 +108,9 @@ def test_a_manual_text_without_known_phrases_gives_an_empty_mock_batch(organizer
 
     assert created.status_code == 200
     assert created.json()["candidates"] == []
-    assert created.json()["proposal_mode"] == "mock"
-    assert read.json()["proposal_mode"] == "mock"
+    # R-M11: an empty batch records no generation source, so it is unknown.
+    assert created.json()["proposal_mode"] == "unknown"
+    assert read.json()["proposal_mode"] == "unknown"
 
 
 def test_a_library_passage_takes_a_late_phrase_and_never_the_first_sentence(tmp_path):
@@ -148,7 +149,7 @@ class _StubModelAdapter:
         return [ProposedChunk(text="look forward to", evidence_segment_id=segments[0].segment_id)]
 
 
-def test_a_non_mock_adapter_is_labelled_model(tmp_path):
+def test_an_untrusted_non_mock_adapter_is_labelled_unknown(tmp_path):
     from services.library.store import LearningLibraryStore
     from services.study_bank.store import StudyBankStore
 
@@ -160,11 +161,11 @@ def test_a_non_mock_adapter_is_labelled_model(tmp_path):
 
     batch = service.describe(service.suggest(USER_A, manual_request(text="We look forward to it.")))
 
-    assert batch.proposal_mode == "model"
+    assert batch.proposal_mode == "unknown"  # R-M11: no model id is trusted yet
     assert [value.text for value in batch.candidates] == ["look forward to"]
 
 
-def test_cloud_batches_are_labelled_mock(cloud_candidates):
+def test_empty_cloud_batches_are_labelled_unknown(cloud_candidates):
     _, _, study, library, candidates = cloud_candidates
     item = library.create_for_owner(OWNER_A, Lesson.model_validate({
         "id": "honesty-cloud", "title": "Synthetic cloud podcast", "source_url": "https://example.invalid/cloud",
@@ -184,5 +185,5 @@ def test_cloud_batches_are_labelled_mock(cloud_candidates):
         read = client.get(f"/api/ai/chunk-suggestions/{created.json()['batch_id']}", params={"user_id": OWNER_A})
 
     assert created.status_code == 200
-    assert (created.json()["candidates"], created.json()["proposal_mode"]) == ([], "mock")
-    assert read.json()["proposal_mode"] == "mock"
+    assert (created.json()["candidates"], created.json()["proposal_mode"]) == ([], "unknown")
+    assert read.json()["proposal_mode"] == "unknown"

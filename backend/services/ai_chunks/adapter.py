@@ -76,7 +76,6 @@ class DeterministicMockChunkAdapter:
 
     model_id = "mock-chunk-organizer"
     proposal_version = "2"
-    mode = "mock"
 
     def propose(
         self,

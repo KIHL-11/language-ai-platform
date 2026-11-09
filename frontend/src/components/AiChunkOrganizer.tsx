@@ -155,9 +155,10 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
     {batch?.proposal_mode === 'mock' && <p role="note" className="mt-4 border border-[#e2c58a] bg-[#fff8e8] p-3 text-sm">
       Offline mock, not AI curation: no AI provider is enabled. The mock only recognises a small built-in phrase list, so most useful expressions are not detected and nothing is ranked.
     </p>}
-    {batch && batch.candidates.length === 0 && <p className="mt-4">{batch.proposal_mode === 'mock'
-      ? 'The offline mock found none of its built-in phrases. This does not mean the text has no useful chunks.'
-      : 'No source-grounded Chunk candidates were found.'}</p>}
+    {batch?.proposal_mode === 'unknown' && <p role="note" className="mt-4 border border-[#ccd6d1] bg-[#f4f6f5] p-3 text-sm">
+      Proposal source unknown: this batch does not record a verifiable source for its candidates, so it is not labelled as AI curation.
+    </p>}
+    {batch && batch.candidates.length === 0 && <p className="mt-4">No candidates were returned for this request. This does not mean the text has no useful chunks.</p>}
     <ul className="mt-5 space-y-4">
       {batch?.candidates.map((candidate) => {
         const edit = edits[candidate.candidate_id]

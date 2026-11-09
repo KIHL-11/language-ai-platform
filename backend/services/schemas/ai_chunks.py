@@ -111,9 +111,10 @@ class AiChunkCandidate(AiChunkModel):
 
 class AiChunkBatch(AiChunkModel):
     batch_id: str = Field(min_length=1, max_length=64)
-    # How the candidates were proposed: the offline "mock" phrase list or a
-    # "model". Set on every response; None only on stored copies.
-    proposal_mode: Literal["mock", "model"] | None = None
+    # How the candidates were proposed, derived only from their persisted
+    # `proposal_model`: the offline "mock", a trusted "model", or "unknown"
+    # (empty, mixed or unrecognised). Set on every response, never persisted.
+    proposal_mode: Literal["mock", "model", "unknown"] | None = None
     user_id: str = Field(min_length=1, max_length=128)
     source_language: SourceLanguage
     source_type: Literal["manual_text", "library_passage"] = "manual_text"

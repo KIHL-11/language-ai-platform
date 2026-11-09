@@ -118,27 +118,44 @@ describe('AiChunkOrganizer', () => {
     expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument()
   })
 
-  it('an empty mock batch does not claim the text has no useful chunks', async () => {
-    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(batch([], { proposal_mode: 'mock' }))
+  async function generateManual(result: AiChunkBatch) {
+    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(result)
     const user = userEvent.setup()
     render(<AiChunkOrganizer learnerId="local-learner" />)
     await user.type(screen.getByLabelText('Learning text'), 'Today we talk about the studio.')
-
     await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
+  }
 
-    expect(await screen.findByText(/found none of its built-in phrases/)).toHaveTextContent('This does not mean the text has no useful chunks.')
-    expect(screen.queryByText('No source-grounded Chunk candidates were found.')).not.toBeInTheDocument()
+  it('an empty batch is unknown and does not claim the text has no useful chunks (R-M11)', async () => {
+    await generateManual(batch([], { proposal_mode: 'unknown' }))
+
+    expect(await screen.findByRole('note')).toHaveTextContent('Proposal source unknown')
+    expect(screen.getByText(/No candidates were returned for this request/)).toHaveTextContent(
+      'This does not mean the text has no useful chunks.')
+    expect(screen.queryByText(/Offline mock/)).not.toBeInTheDocument()
   })
 
-  it('a model batch shows no mock notice', async () => {
-    vi.mocked(generateChunkSuggestions).mockResolvedValueOnce(batch([], { proposal_mode: 'model' }))
-    const user = userEvent.setup()
-    render(<AiChunkOrganizer learnerId="local-learner" />)
-    await user.type(screen.getByLabelText('Learning text'), 'Today we talk about the studio.')
+  it('a non-empty unknown batch is shown as unknown, never as a model (R-M11)', async () => {
+    await generateManual(batch([candidate('a', 'take part')], { proposal_mode: 'unknown' }))
 
-    await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
+    const note = await screen.findByRole('note')
+    expect(note).toHaveTextContent('does not record a verifiable source')
+    expect(note).toHaveTextContent('not labelled as AI curation')
+    expect(screen.queryByText(/Offline mock/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument()
+  })
 
-    expect(await screen.findByText('No source-grounded Chunk candidates were found.')).toBeInTheDocument()
+  it('a trusted model batch shows no source note', async () => {
+    await generateManual(batch([candidate('a', 'take part')], { proposal_mode: 'model' }))
+
+    await screen.findByRole('button', { name: 'Accept' })
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+  })
+
+  it('an empty model batch still does not claim there are no useful chunks', async () => {
+    await generateManual(batch([], { proposal_mode: 'model' }))
+
+    expect(await screen.findByText(/No candidates were returned for this request/)).toBeInTheDocument()
     expect(screen.queryByRole('note')).not.toBeInTheDocument()
   })
 

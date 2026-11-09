@@ -55,6 +55,23 @@ class AiChunkProviderError(RuntimeError):
     pass
 
 
+# Generation sources a label may be derived from (R-M11). A batch is "mock"
+# only if every candidate came from a known mock, "model" only if every one
+# came from a trusted model; anything else, including an empty batch, is
+# "unknown". No real provider exists yet, so no model id is trusted.
+MOCK_PROPOSAL_MODELS = frozenset({DeterministicMockChunkAdapter.model_id})
+TRUSTED_MODEL_PROPOSAL_MODELS: frozenset[str] = frozenset()
+
+
+def proposal_mode_of(batch: AiChunkBatch) -> str:
+    models = {candidate.proposal_model for candidate in batch.candidates}
+    if models and models <= MOCK_PROPOSAL_MODELS:
+        return "mock"
+    if models and models <= TRUSTED_MODEL_PROPOSAL_MODELS:
+        return "model"
+    return "unknown"
+
+
 def _require_current_library_source(candidate: AiChunkCandidate, item) -> None:
     """Personal twin of the Cloud accept-time check (`_validate_library_evidence`):
     every field the evidence copied from the Library must still match. Target
@@ -182,15 +199,12 @@ class AiChunkOrganizerService:
     def get_batch(self, owner: str, batch_id: str) -> AiChunkBatch:
         return self.store.get_batch(owner, batch_id)
 
-    @property
-    def proposal_mode(self) -> str:
-        # Only the offline mock exists today; any other adapter is a model.
-        return "mock" if getattr(self.adapter, "mode", None) == "mock" else "model"
-
-    def describe(self, batch: AiChunkBatch) -> AiChunkBatch:
-        """The batch as returned to the learner, labelled with how its
-        candidates were proposed. Not persisted (CH-01 Step 1)."""
-        return batch.model_copy(update={"proposal_mode": self.proposal_mode})
+    @staticmethod
+    def describe(batch: AiChunkBatch) -> AiChunkBatch:
+        """The batch as returned to the learner, labelled from what its own
+        candidates recorded at generation, never from the current adapter
+        (R-M11). Not persisted."""
+        return batch.model_copy(update={"proposal_mode": proposal_mode_of(batch)})
 
     def decide(
         self, owner: str, batch_id: str, request: CandidateDecisionRequest
