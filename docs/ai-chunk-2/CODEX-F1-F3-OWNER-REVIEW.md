@@ -82,3 +82,51 @@ Conflicting evidence blocks admission pending reconciliation.
   approval or permission to integrate the full CH-01/CH-02 feature.
 
 Stop after the local commit and await Owner Review.
+
+
+## M7 follow-up — 2026-11-09, pending Owner Review
+
+Base: `25473ec59f5e3c107ba5f9b376edb19d2ebe780f`, same isolated
+`codex/ch-01-02-f1-f3` branch. This follow-up is explicitly authorised
+for a normal push after the local commit; it does not authorise a PR,
+merge, paid Provider call, production integration or deployment.
+
+### Root cause and minimal fix
+
+Two synthetic subtitles have exactly the same text and grounded spans but
+different sentence ids (20 and 7) and times (10–12 and 40–42). The original
+`_source_order` keys tie completely; Python's stable sort then retains
+observation arrival order. Sources/primary switch even though both scores
+are 3.
+
+The only runtime change appends `evidence.key` to the existing source-order
+tuple. After per-key deduplication this is a total identity within the one
+authorized snapshot. Quality and span precedence stay intact. No quality
+score, floor, gate, candidate rank key or deduplication rule changes.
+
+### Independently executed evidence
+
+- Before: input [20,7] gives sources [20,7], primary 20; reversed input
+  gives [7,20], primary 7. Both score 3; full ReduceResult equality is false.
+- Red test: the actual original `_source_order` from `25473ec` was injected
+  in memory only: **3 failed / 1 passed** in the new M7 test file.
+- After: both orders give sources [7,20], primary 7, score 3; the complete
+  ReduceResult values are equal.
+- Seven-file targeted regression: **130 passed in 2.67 s**, macOS,
+  Python 3.11.17. This includes all 126 prior algorithm/F1–F3 cases.
+- `test_chunk_curation_m7.py` adds three timing configurations (both timed,
+  both untimed, timed versus untimed) plus all **720 permutations** of six
+  observations. Direct dataclass equality checks all ReduceResult fields,
+  including coverage, assessments, sources, counters, notes and selections.
+  Rejections and mismatched provider claims are included. Rank keys and
+  source deduplication counts are explicitly asserted unchanged.
+- No full-suite, lint or build run; no production/frontend code changed.
+
+Remaining risks are unchanged: real semantic model quality, R-H3 Personal
+source re-validation, Step 1 R-M10/R-M11, worker/database fault integration,
+real billing evidence and two-version deployment remain outside this fix.
+The source identity tie-break chooses primary evidence only; it is not a
+quality preference or an automatic Study Bank merge.
+
+After scope/sensitive-content checks, commit and ordinary push, stop for
+Owner Review. This implementation record is not independent approval.

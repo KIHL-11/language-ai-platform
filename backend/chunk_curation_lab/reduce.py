@@ -5,7 +5,7 @@ Order independence is a design property, not an accident:
   read through sorted() or order-free aggregates);
 - each source uses minima, then sources use a lower median; scores are exact Fractions;
 - sources are de-duplicated by key and ordered by evidence quality, then by
-  sentence fingerprint, never by transcript position or arrival order;
+  sentence fingerprint and full source identity, never by arrival order;
 - ranking keys are quality only; exact ties form a group that is selected or
   excluded as a whole, so neither the alphabet nor arrival order decides
   inclusion. Inside a selected tie group the display order is by identity and
@@ -58,9 +58,11 @@ class ReduceResult:
 
 
 def _source_order(evidence: VerifiedEvidence):
-    # Evidence quality first; the fingerprint only makes the order total.
+    # Preserve quality/span precedence. Identical subtitle text can share
+    # the fingerprint and span, so finish with the complete de-duplicated
+    # source identity. This affects source presentation/primary only.
     return (-evidence.reliability, evidence.start is None, evidence.sentence_fingerprint,
-            evidence.evidence_start, evidence.evidence_end)
+            evidence.evidence_start, evidence.evidence_end, evidence.key)
 
 
 def _rank_key(candidate: CuratedCandidate):

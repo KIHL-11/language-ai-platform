@@ -152,8 +152,15 @@ Observations with the same identity form one candidate.
     semantic score, so taking the maximum cannot raise unproven quality.
   - It replaces the earlier dictionary in which the last record won.
 - **Source order** is: higher reliability, then timestamps present, then
-  sentence fingerprint, then span. **Never by transcript position or
-  arrival order.** The primary source is the first in this order.
+  sentence fingerprint, then span, then the complete source identity
+  `(library_item_id, sentence_id, evidence_start, evidence_end)` within the
+  one authorized snapshot (M7). The primary source is the first in this order.
+  Identical subtitle text can share a fingerprint and span; fingerprint
+  alone is not a total key. Source identity is the last presentation-only
+  tie-break, never a candidate-quality or inclusion feature. Timestamp
+  values remain trusted metadata, not new rank features. Deduplication,
+  score aggregation, quality gates and candidate rank keys are unchanged.
+  This is independent of observation arrival order.
 
 ## 6. Quality model (`scoring.py`)
 
@@ -272,7 +279,7 @@ only through:
 - **sets:** source keys, variations;
 - **order-free aggregates:** per-source `min`, lower median across sources, `max`, `len`,
   and exact `Fraction` arithmetic;
-- **`sorted()` on total keys:** sources (quality, then fingerprint), tie
+- **`sorted()` on total keys:** sources (quality, fingerprint, span, full identity), tie
   groups (quality key), members inside a group (identity), and the other
   list (identity).
 
