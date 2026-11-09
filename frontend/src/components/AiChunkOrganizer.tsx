@@ -15,11 +15,36 @@ import type { SourceLanguage } from '../types/lesson'
 // not analysed in full, and the page says so (CH-00 R2).
 const MAX_LIBRARY_SENTENCES = 12
 
-function coverageText(total: number): string {
-  const analysed = Math.min(total, MAX_LIBRARY_SENTENCES)
-  return total > analysed
-    ? `Only ${analysed}/${total} sentences are analysed (the first ${analysed}). This is not a full-lesson recommendation.`
-    : `All ${total} sentences are analysed.`
+// R-M10: the page knows the planned and the submitted request scope. The
+// server does not report which sentences it actually processed, so nothing
+// here may claim that sentences were analysed.
+type RequestPhase = 'planned' | 'submitting' | 'completed' | 'failed'
+
+interface RequestScope {
+  phase: RequestPhase
+  count: number
+  total: number
+}
+
+function scopeLabel({ count, total }: RequestScope): string {
+  return count < total ? `the first ${count} of ${total} sentences` : `all ${total} sentences`
+}
+
+function requestScopeText(scope: RequestScope): string {
+  switch (scope.phase) {
+    case 'planned':
+      return `Will request analysis of ${scopeLabel(scope)}.${scope.count < scope.total ? ' This is not a full-lesson analysis.' : ''}`
+    case 'submitting':
+      return `Submitting a request for ${scopeLabel(scope)}.`
+    case 'completed':
+      return `Request completed for the selected range (${scopeLabel(scope)}). Actual sentence-level coverage is not reported.`
+    case 'failed':
+      return `The request did not complete. Planned scope: ${scopeLabel(scope)}.`
+  }
+}
+
+function plannedScope(sentenceIds: number[]): RequestScope {
+  return { phase: 'planned', count: Math.min(sentenceIds.length, MAX_LIBRARY_SENTENCES), total: sentenceIds.length }
 }
 
 export interface LibraryChunkSource {
@@ -57,6 +82,7 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [requestScope, setRequestScope] = useState<RequestScope | null>(null)
   // Held until a generation succeeds, so retrying a failed or lost request
   // replays it instead of creating a second batch. A fixed per-lesson key
   // would instead pin a re-imported or expired lesson to its first batch.
@@ -84,10 +110,18 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
     try {
       if (librarySource) {
         generationKey.current ??= newIdempotencyKey()
-        showBatch(await generateLibraryChunkSuggestions(
-          learnerId, librarySource.language, librarySource.libraryItemId,
-          librarySource.sentenceIds.slice(0, MAX_LIBRARY_SENTENCES), generationKey.current,
-        ))
+        const submitted = librarySource.sentenceIds.slice(0, MAX_LIBRARY_SENTENCES)
+        const scope = { count: submitted.length, total: librarySource.sentenceIds.length }
+        setRequestScope({ ...scope, phase: 'submitting' })
+        try {
+          showBatch(await generateLibraryChunkSuggestions(
+            learnerId, librarySource.language, librarySource.libraryItemId, submitted, generationKey.current,
+          ))
+        } catch (reason) {
+          setRequestScope({ ...scope, phase: 'failed' })
+          throw reason
+        }
+        setRequestScope({ ...scope, phase: 'completed' })
         generationKey.current = null
       } else {
         showBatch(await generateChunkSuggestions(learnerId, language, text))
@@ -140,7 +174,7 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
     <p className="mt-1 text-sm text-[#66726e]">Candidates must appear in the source text. Nothing is saved until you accept it.</p>
     {librarySource ? <>
       <p className="mt-4 text-sm">From your lesson <strong>{librarySource.title}</strong> ({librarySource.language === 'en' ? 'English' : 'German'}).</p>
-      <p className="mt-1 text-sm text-[#8a5b00]" aria-label="Analysis coverage">{coverageText(librarySource.sentenceIds.length)}</p>
+      <p className="mt-1 text-sm text-[#8a5b00]" aria-label="Request scope">{requestScopeText(requestScope ?? plannedScope(librarySource.sentenceIds))}</p>
       <button type="button" disabled={busy !== null || librarySource.sentenceIds.length === 0} onClick={() => void generate()} className="mt-3 h-10 bg-[#176b5b] px-4 text-white disabled:opacity-50">{busy === 'generate' ? 'Generating…' : 'Find chunks'}</button>
     </> : <>
       <div className="mt-4 flex gap-2">

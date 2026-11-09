@@ -34,7 +34,13 @@ const batch = (candidates: AiChunkCandidate[], extra: Partial<AiChunkBatch> = {}
   candidates, ...extra,
 })
 
-beforeEach(() => { vi.mocked(decideChunkSuggestion).mockReset(); vi.mocked(getChunkSuggestions).mockReset() })
+beforeEach(() => {
+  vi.mocked(decideChunkSuggestion).mockReset()
+  vi.mocked(getChunkSuggestions).mockReset()
+  // Unconsumed *Once values must not leak into the next test.
+  vi.mocked(generateChunkSuggestions).mockReset()
+  vi.mocked(generateLibraryChunkSuggestions).mockReset()
+})
 
 describe('AiChunkOrganizer', () => {
   it('keeps the Personal/manual-text actions unchanged: no save-only edit', async () => {
@@ -85,25 +91,111 @@ describe('AiChunkOrganizer', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('expired'))
   })
 
-  it('says how much of a long lesson is analysed and never claims the full lesson (CH-00 R2)', async () => {
-    vi.mocked(generateLibraryChunkSuggestions).mockResolvedValueOnce(batch([], { source_type: 'library_passage', proposal_mode: 'mock' }))
+  describe('request scope (R-M10)', () => {
     const ids = Array.from({ length: 80 }, (_, index) => index + 1)
-    const user = userEvent.setup()
-    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Podcast', language: 'en', sentenceIds: ids }} />)
+    const renderLesson = (sentenceIds = ids) =>
+      render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Podcast', language: 'en', sentenceIds }} />)
+    const scope = () => screen.getByLabelText('Request scope')
+    // No phase may claim that sentences were analysed or that the lesson is covered.
+    const neverClaimsAnalysis = () => {
+      expect(scope()).not.toHaveTextContent(/are analysed|were analysed|analysed in full|full-lesson recommendation/)
+      expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument()
+    }
 
-    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('Only 12/80 sentences are analysed (the first 12). This is not a full-lesson recommendation.')
-    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    function deferred() {
+      let resolve!: (value: AiChunkBatch) => void
+      let reject!: (reason: unknown) => void
+      const promise = new Promise<AiChunkBatch>((ok, fail) => { resolve = ok; reject = fail })
+      return { promise, resolve, reject }
+    }
 
-    await waitFor(() => expect(generateLibraryChunkSuggestions).toHaveBeenCalled())
-    expect(vi.mocked(generateLibraryChunkSuggestions).mock.calls.at(-1)?.[3]).toEqual(ids.slice(0, 12))
-    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('Only 12/80')
-    expect(screen.queryByText(/in this lesson/)).not.toBeInTheDocument()
-  })
+    it('before the request shows only the planned scope', () => {
+      renderLesson()
 
-  it('a short lesson is analysed in full', () => {
-    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{ libraryItemId: 'item-1', title: 'Short', language: 'de', sentenceIds: [1, 2, 3, 4, 5] }} />)
+      expect(scope()).toHaveTextContent('Will request analysis of the first 12 of 80 sentences. This is not a full-lesson analysis.')
+      neverClaimsAnalysis()
+    })
 
-    expect(screen.getByLabelText('Analysis coverage')).toHaveTextContent('All 5 sentences are analysed.')
+    it('while submitting, then after success, shows the submitted scope and no coverage claim', async () => {
+      const pending = deferred()
+      vi.mocked(generateLibraryChunkSuggestions).mockReturnValueOnce(pending.promise)
+      const user = userEvent.setup()
+      renderLesson()
+
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      expect(scope()).toHaveTextContent('Submitting a request for the first 12 of 80 sentences.')
+      neverClaimsAnalysis()
+      expect(vi.mocked(generateLibraryChunkSuggestions).mock.calls.at(-1)?.[3]).toEqual(ids.slice(0, 12))
+      pending.resolve(batch([candidate('a', 'take part')], { source_type: 'library_passage', proposal_mode: 'mock' }))
+      await waitFor(() => expect(scope()).toHaveTextContent(
+        'Request completed for the selected range (the first 12 of 80 sentences). Actual sentence-level coverage is not reported.'))
+      neverClaimsAnalysis()
+    })
+
+    it('after a failure states the failure and only the planned scope', async () => {
+      vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(new Error('server error'))
+      const user = userEvent.setup()
+      renderLesson()
+
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      await waitFor(() => expect(scope()).toHaveTextContent('The request did not complete. Planned scope: the first 12 of 80 sentences.'))
+      expect(screen.getByRole('alert')).toHaveTextContent('could not be generated')
+      expect(scope()).not.toHaveTextContent(/completed|Submitting/)
+      neverClaimsAnalysis()
+    })
+
+    it('after a timeout behaves like a failure', async () => {
+      vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(new DOMException('The operation timed out.', 'TimeoutError'))
+      const user = userEvent.setup()
+      renderLesson()
+
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      await waitFor(() => expect(scope()).toHaveTextContent('The request did not complete.'))
+      expect(scope()).not.toHaveTextContent(/completed|Submitting/)
+      neverClaimsAnalysis()
+    })
+
+    it('an empty result completes the request without implying the lesson has no useful chunks', async () => {
+      vi.mocked(generateLibraryChunkSuggestions).mockResolvedValueOnce(batch([], { source_type: 'library_passage', proposal_mode: 'unknown' }))
+      const user = userEvent.setup()
+      renderLesson()
+
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      await waitFor(() => expect(scope()).toHaveTextContent('Request completed for the selected range'))
+      expect(screen.getByText(/No candidates were returned for this request/)).toHaveTextContent(
+        'This does not mean the text has no useful chunks.')
+      neverClaimsAnalysis()
+    })
+
+    it('a short lesson names all of its sentences as the requested scope', async () => {
+      vi.mocked(generateLibraryChunkSuggestions).mockResolvedValueOnce(batch([], { source_type: 'library_passage', proposal_mode: 'unknown' }))
+      const user = userEvent.setup()
+      renderLesson([1, 2, 3, 4, 5])
+
+      expect(scope()).toHaveTextContent('Will request analysis of all 5 sentences.')
+      expect(scope()).not.toHaveTextContent('not a full-lesson analysis')
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+      await waitFor(() => expect(scope()).toHaveTextContent('Request completed for the selected range (all 5 sentences).'))
+      neverClaimsAnalysis()
+    })
+
+    it('a retry after a failure moves from failed to submitted to completed', async () => {
+      vi.mocked(generateLibraryChunkSuggestions)
+        .mockRejectedValueOnce(new TypeError('response lost'))
+        .mockResolvedValueOnce(batch([], { source_type: 'library_passage', proposal_mode: 'unknown' }))
+      const user = userEvent.setup()
+      renderLesson()
+
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+      await waitFor(() => expect(scope()).toHaveTextContent('did not complete'))
+      await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+
+      await waitFor(() => expect(scope()).toHaveTextContent('Request completed for the selected range'))
+    })
   })
 
   it('labels mock results as not AI curation (CH-00 R1)', async () => {
