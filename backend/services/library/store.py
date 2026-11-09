@@ -3,10 +3,10 @@ import mimetypes
 import os
 import re
 import shutil
-import threading
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
+from services.library.source_guard import guard_for
 from services.schemas.lesson import Lesson
 from services.schemas.library import (
     LibraryItem,
@@ -206,11 +207,14 @@ class LearningLibraryStore:
         self.media_root = Path(media_root)
         self.source_media_root = Path(source_media_root)
         self.clock = clock
-        self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.media_root.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write_items([])
+        # Shared by every store instance and process using this file (R-H3).
+        self._lock = guard_for(self.path)
+        if not self.path.exists():  # opening an existing Library never waits
+            with self._lock:
+                if not self.path.exists():
+                    self._write_items([])
 
     def list_items(self) -> list[LibraryItem]:
         with self._lock:
@@ -219,6 +223,14 @@ class LearningLibraryStore:
 
     def list_summaries(self) -> list[LibraryItemSummary]:
         return [summary_for_item(item) for item in self.list_items()]
+
+    @contextmanager
+    def consistent_item(self, item_id: str) -> Iterator[LibraryItem | None]:
+        """The current item (None when deleted), read under the Library guard
+        and held until the block exits, so no delete, re-import or transcript
+        change from any thread, store instance or process can interleave."""
+        with self._lock:
+            yield next((item for item in self._read_items() if item.id == item_id), None)
 
     def get_item(self, item_id: str) -> LibraryItem:
         with self._lock:

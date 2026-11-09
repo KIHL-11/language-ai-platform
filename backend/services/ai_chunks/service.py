@@ -16,7 +16,7 @@ from services.ai_chunks.adapter import (
     SourceSegment,
     normalize_phrase,
 )
-from services.ai_chunks.store import InMemoryAiChunkStore
+from services.ai_chunks.store import CandidateConflictError, InMemoryAiChunkStore
 from services.ai_chunks.postgres import (
     CloudAiChunkUnavailableError,
     PostgresOwnerScopedAiChunkRepository,
@@ -53,6 +53,30 @@ class AiChunkValidationError(ValueError):
 
 class AiChunkProviderError(RuntimeError):
     pass
+
+
+def _require_current_library_source(candidate: AiChunkCandidate, item) -> None:
+    """Personal twin of the Cloud accept-time check (`_validate_library_evidence`):
+    every field the evidence copied from the Library must still match. Target
+    language is not compared, so non-Chinese target lessons keep working."""
+    if item is None:
+        raise CandidateConflictError("Authorized Library source is no longer available")
+    evidence = candidate.evidence
+    lesson = item.lesson
+    sentence = next((value for value in lesson.sentences if value.id == evidence.sentence_id), None)
+    expected = (
+        item.id, lesson.id, lesson.title, lesson.source_url, lesson.source_language,
+        sentence.text if sentence else None,
+        sentence.translation if sentence else None,
+        sentence.start if sentence else None,
+        sentence.end if sentence else None,
+    )
+    actual = (
+        evidence.library_item_id, evidence.lesson_id, evidence.source_label, evidence.source_url,
+        candidate.source_language, evidence.quote, evidence.sentence_translation, evidence.start, evidence.end,
+    )
+    if sentence is None or actual != expected:
+        raise CandidateConflictError("Candidate evidence no longer matches the authorized Library source")
 
 
 class AiChunkOrganizerService:
@@ -196,6 +220,16 @@ class AiChunkOrganizerService:
             # Save-only edits are a cloud (B-3) capability; Personal Desktop
             # keeps its accept/edit_and_accept/reject contract unchanged.
             raise AiChunkValidationError("Saving edits without a decision is only available in cloud")
+        if candidate.evidence.source_type == "library_sentence":
+            # R-H3: re-read the trusted Library source and hold it unchanged
+            # until the Study Bank save completes. Lock order: decision lock,
+            # candidate store, Library guard, Study Bank, Chunk Memory.
+            with self.library.consistent_item(candidate.evidence.library_item_id) as item:
+                _require_current_library_source(candidate, item)
+                return self._accept(owner, candidate, request)
+        return self._accept(owner, candidate, request)
+
+    def _accept(self, owner, candidate, request):
         edit = request.edit
         text = edit.text if edit else candidate.text
         meaning = edit.suggested_meaning_zh if edit else candidate.suggested_meaning_zh

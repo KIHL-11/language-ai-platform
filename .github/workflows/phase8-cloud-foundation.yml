@@ -32,6 +32,7 @@ on:
       - claude/ch-01-step1-chunk-honesty
       - claude/ch-01-02-design-revision
       - claude/ch-01-02-remediation-r3
+      - claude/ai-chunk-integration-readiness
   workflow_dispatch:
 
 permissions:
