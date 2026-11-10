@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 
 import { CloudConflictError } from '../auth/client'
 import {
+  ChunkApiError,
   decideChunkSuggestion,
   generateChunkSuggestions,
   generateLibraryChunkSuggestions,
@@ -18,7 +19,7 @@ const MAX_LIBRARY_SENTENCES = 12
 // R-M10: the page knows the planned and the submitted request scope. The
 // server does not report which sentences it actually processed, so nothing
 // here may claim that sentences were analysed.
-type RequestPhase = 'planned' | 'submitting' | 'completed' | 'failed'
+type RequestPhase = 'planned' | 'submitting' | 'completed' | 'failed' | 'uncertain'
 
 interface RequestScope {
   phase: RequestPhase
@@ -30,6 +31,15 @@ function scopeLabel({ count, total }: RequestScope): string {
   return count < total ? `the first ${count} of ${total} sentences` : `all ${total} sentences`
 }
 
+const UNCONFIRMED_REQUEST = 'Request completion could not be confirmed. The server may have processed the request. Retry using the same request key.'
+
+function isDefiniteRejection(reason: unknown): boolean {
+  // Transport errors, unreadable responses and server failures cannot tell
+  // us whether a batch was committed. Only an explicit client rejection can.
+  return reason instanceof ChunkApiError && reason.status >= 400 && reason.status < 500
+    && reason.status !== 408 && reason.status !== 499
+}
+
 function requestScopeText(scope: RequestScope): string {
   switch (scope.phase) {
     case 'planned':
@@ -38,6 +48,8 @@ function requestScopeText(scope: RequestScope): string {
       return `Submitting a request for ${scopeLabel(scope)}.`
     case 'completed':
       return `Request completed for the selected range (${scopeLabel(scope)}). Actual sentence-level coverage is not reported.`
+    case 'uncertain':
+      return UNCONFIRMED_REQUEST
     case 'failed':
       return `The request did not complete. Planned scope: ${scopeLabel(scope)}.`
   }
@@ -118,7 +130,7 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
             learnerId, librarySource.language, librarySource.libraryItemId, submitted, generationKey.current,
           ))
         } catch (reason) {
-          setRequestScope({ ...scope, phase: 'failed' })
+          setRequestScope({ ...scope, phase: isDefiniteRejection(reason) ? 'failed' : 'uncertain' })
           throw reason
         }
         setRequestScope({ ...scope, phase: 'completed' })
@@ -128,7 +140,10 @@ export default function AiChunkOrganizer({ learnerId, librarySource }: Props) {
       }
       setError(null)
       setNotice(null)
-    } catch { setError('Chunk candidates could not be generated.') }
+    } catch (reason) {
+      setError(librarySource && !isDefiniteRejection(reason)
+        ? UNCONFIRMED_REQUEST : 'Chunk candidates could not be generated.')
+    }
     finally { setBusy(null) }
   }
 

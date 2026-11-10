@@ -81,4 +81,41 @@ describe('AiChunkOrganizer', () => {
     await user.click(screen.getByRole('button', { name: 'Generate candidates' }))
     expect(await screen.findByText(/archived; accepting will not restore it/)).toBeInTheDocument()
   })
+  it('replays a committed library batch after a lost response with the same wire key', async () => {
+    const saved = new Map<string, object>()
+    const keys: string[] = []
+    fetchMock.mockImplementation((_url, options) => {
+      const request = JSON.parse(String(options.body))
+      keys.push(request.idempotency_key)
+      if (!saved.has(request.idempotency_key)) {
+        saved.set(request.idempotency_key, { batch_id: 'committed-batch', candidates: [candidate] })
+        return Promise.reject(new TypeError('response lost after commit'))
+      }
+      return response(saved.get(request.idempotency_key))
+    })
+    render(<AiChunkOrganizer learnerId="owner-a" librarySource={{
+      libraryItemId: 'item-1', title: 'Synthetic', language: 'en', sentenceIds: [1],
+    }} />)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('server may have processed')
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    await screen.findByRole('button', { name: 'Accept' })
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBe(keys[1])
+    expect(saved.size).toBe(1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it.each([[422, 'did not complete'], [504, 'could not be confirmed']])(
+    'classifies an actual HTTP %s response', async (status, message) => {
+      fetchMock.mockImplementationOnce(() => response({ detail: 'synthetic' }, status))
+      render(<AiChunkOrganizer learnerId="owner-a" librarySource={{
+        libraryItemId: 'item-1', title: 'Synthetic', language: 'en', sentenceIds: [1],
+      }} />)
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Find chunks' }))
+      await waitFor(() => expect(screen.getByLabelText('Request scope')).toHaveTextContent(message))
+    },
+  )
+
 })

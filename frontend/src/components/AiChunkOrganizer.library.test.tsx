@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CloudConflictError } from '../auth/client'
 import {
+  ChunkApiError,
   decideChunkSuggestion,
   generateChunkSuggestions,
   generateLibraryChunkSuggestions,
@@ -12,7 +13,8 @@ import {
 import type { AiChunkBatch, AiChunkCandidate } from '../types/aiChunks'
 import AiChunkOrganizer from './AiChunkOrganizer'
 
-vi.mock('../api/aiChunks', () => ({
+vi.mock('../api/aiChunks', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/aiChunks')>(),
   decideChunkSuggestion: vi.fn(),
   generateChunkSuggestions: vi.fn(),
   generateLibraryChunkSuggestions: vi.fn(),
@@ -134,7 +136,7 @@ describe('AiChunkOrganizer', () => {
     })
 
     it('after a failure states the failure and only the planned scope', async () => {
-      vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(new Error('server error'))
+      vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(new ChunkApiError('rejected', 422))
       const user = userEvent.setup()
       renderLesson()
 
@@ -146,15 +148,32 @@ describe('AiChunkOrganizer', () => {
       neverClaimsAnalysis()
     })
 
-    it('after a timeout behaves like a failure', async () => {
+    it('after a timeout reports an unconfirmed server result', async () => {
       vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(new DOMException('The operation timed out.', 'TimeoutError'))
       const user = userEvent.setup()
       renderLesson()
 
       await user.click(screen.getByRole('button', { name: 'Find chunks' }))
 
-      await waitFor(() => expect(scope()).toHaveTextContent('The request did not complete.'))
+      await waitFor(() => expect(scope()).toHaveTextContent('Request completion could not be confirmed. The server may have processed the request. Retry using the same request key.'))
       expect(scope()).not.toHaveTextContent(/completed|Submitting/)
+      neverClaimsAnalysis()
+    })
+
+    it.each([
+      new TypeError('connection interrupted'),
+      new DOMException('cancelled connection', 'AbortError'),
+      new SyntaxError('truncated JSON'),
+      new ChunkApiError('server failure', 500),
+      new ChunkApiError('gateway timeout', 504),
+      new ChunkApiError('request timeout', 408),
+    ])('keeps an ambiguous result uncertain: %s', async (reason) => {
+      vi.mocked(generateLibraryChunkSuggestions).mockRejectedValueOnce(reason)
+      renderLesson()
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Find chunks' }))
+      await waitFor(() => expect(scope()).toHaveTextContent('could not be confirmed'))
+      expect(scope()).not.toHaveTextContent('did not complete')
+      expect(screen.getByRole('alert')).toHaveTextContent('Retry using the same request key.')
       neverClaimsAnalysis()
     })
 
@@ -191,7 +210,7 @@ describe('AiChunkOrganizer', () => {
       renderLesson()
 
       await user.click(screen.getByRole('button', { name: 'Find chunks' }))
-      await waitFor(() => expect(scope()).toHaveTextContent('did not complete'))
+      await waitFor(() => expect(scope()).toHaveTextContent('could not be confirmed'))
       await user.click(screen.getByRole('button', { name: 'Find chunks' }))
 
       await waitFor(() => expect(scope()).toHaveTextContent('Request completed for the selected range'))
@@ -261,7 +280,7 @@ describe('AiChunkOrganizer', () => {
     const find = screen.getByRole('button', { name: 'Find chunks' })
 
     await user.click(find)
-    expect(await screen.findByRole('alert')).toHaveTextContent('could not be generated')
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be confirmed')
     await user.click(find)
     await screen.findByRole('button', { name: 'Accept' })
     await user.click(find)
@@ -272,4 +291,31 @@ describe('AiChunkOrganizer', () => {
     expect(keys[2]).not.toBe(keys[1])
     expect(keys.every((value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value!))).toBe(true)
   })
+  it('a keyed course switch discards the old scope, batch and retry key, including a late response', async () => {
+    let finish!: (result: AiChunkBatch) => void
+    vi.mocked(generateLibraryChunkSuggestions)
+      .mockRejectedValueOnce(new TypeError('lost'))
+      .mockReturnValueOnce(new Promise<AiChunkBatch>((resolve) => { finish = resolve }))
+      .mockResolvedValueOnce(batch([], { batch_id: 'new-course' }))
+    const user = userEvent.setup()
+    const first = { libraryItemId: 'first', title: 'First', language: 'en' as const, sentenceIds: [1, 2] }
+    const view = render(<AiChunkOrganizer key="first" learnerId="owner-a" librarySource={first} />)
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    view.rerender(<AiChunkOrganizer key="second" learnerId="owner-a" librarySource={{
+      libraryItemId: 'second', title: 'Second', language: 'en', sentenceIds: [3],
+    }} />)
+    finish(batch([candidate('stale', 'stale phrase')]))
+    expect(screen.getByLabelText('Request scope')).toHaveTextContent('Will request analysis of all 1 sentences')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Find chunks' }))
+    await screen.findByText(/No candidates were returned/)
+    expect(screen.queryByDisplayValue('stale phrase')).not.toBeInTheDocument()
+    const calls = vi.mocked(generateLibraryChunkSuggestions).mock.calls
+    expect(calls[0][4]).toBe(calls[1][4])
+    expect(calls[2][4]).not.toBe(calls[1][4])
+    expect(calls[2][2]).toBe('second')
+  })
+
 })

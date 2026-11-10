@@ -3,8 +3,17 @@ import { API_BASE_URL } from './apiBase'
 import type { SourceLanguage } from '../types/lesson'
 import type { AiChunkBatch, CandidateDecisionResult, CandidateEdit } from '../types/aiChunks'
 
+export class ChunkApiError extends Error {
+  readonly status: number
+
+  constructor(action: string, status: number) {
+    super(`${action} (${status})`)
+    this.status = status
+  }
+}
+
 async function responseJson<T>(response: Response, action: string): Promise<T> {
-  if (!response.ok) throw new Error(`${action} (${response.status})`)
+  if (!response.ok) throw new ChunkApiError(action, response.status)
   return await response.json() as T
 }
 
