@@ -3,6 +3,7 @@ name: Phase 8 cloud foundation
 on:
   pull_request:
     branches:
+      - main
       - codex/phase8-cloud-foundation-design
       - codex/p8-02a-auth-tenant-boundary
       - codex/p8-02b1-owner-scoped-library
@@ -17,6 +18,7 @@ on:
       - "**/*.md"
   push:
     branches:
+      - main
       - codex/p8-02b1-owner-scoped-library
       - codex/p8-03a-ai-chunk-candidates
       - codex/p8-03b1-study-bank-review-postgres
