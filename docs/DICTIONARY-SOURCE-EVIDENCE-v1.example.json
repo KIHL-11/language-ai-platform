@@ -1,0 +1,67 @@
+{
+  "evidence_version": 1,
+  "sources": [
+    {
+      "edition": "English Wiktionary",
+      "entry_language": "en",
+      "acquisition_url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "resolved_url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "rolling_url": true,
+      "snapshot_identity": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0
+      },
+      "dates": {
+        "dump_date": null,
+        "dump_date_status": "unverified",
+        "extraction_date": null,
+        "extraction_date_status": "unverified",
+        "retrieved_at": "2026-10-27T10:00:00Z"
+      },
+      "http_evidence": {
+        "etag": null,
+        "last_modified": null,
+        "content_length": null
+      },
+      "license": {
+        "label": "CC BY-SA 4.0",
+        "notice_url": "https://kaikki.org/dictionary/",
+        "attribution": "English Wiktionary contributors; extracted by Wiktextract/Kaikki",
+        "verified": false,
+        "verified_at": null
+      },
+      "artifact_name": "kaikki-en-UNVERIFIED-000000000000.jsonl.gz"
+    },
+    {
+      "edition": "German Wiktionary",
+      "entry_language": "de",
+      "acquisition_url": "https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz",
+      "resolved_url": "https://kaikki.org/dewiktionary/raw-wiktextract-data.jsonl.gz",
+      "rolling_url": true,
+      "snapshot_identity": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size_bytes": 0
+      },
+      "dates": {
+        "dump_date": null,
+        "dump_date_status": "unverified",
+        "extraction_date": null,
+        "extraction_date_status": "unverified",
+        "retrieved_at": "2026-10-27T10:00:00Z"
+      },
+      "http_evidence": {
+        "etag": null,
+        "last_modified": null,
+        "content_length": null
+      },
+      "license": {
+        "label": "CC BY-SA 4.0",
+        "notice_url": "https://kaikki.org/dewiktionary/",
+        "attribution": "German Wiktionary contributors; extracted by Wiktextract/Kaikki",
+        "verified": false,
+        "verified_at": null
+      },
+      "artifact_name": "kaikki-de-UNVERIFIED-000000000000.jsonl.gz"
+    }
+  ]
+}

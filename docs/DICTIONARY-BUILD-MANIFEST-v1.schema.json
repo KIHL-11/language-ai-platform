@@ -264,13 +264,14 @@
             },
             "rejected": {
               "type": "object",
-              "required": ["ambiguous_or_tied", "zero_evidence", "generic_stopword_or_lemma_only", "single_sense_mismatch", "unsupported_morphology", "over_limit", "total"],
+              "required": ["ambiguous_or_tied", "zero_evidence", "generic_stopword_or_lemma_only", "single_sense_mismatch", "unsupported_morphology", "weak_single_token_evidence", "over_limit", "total"],
               "properties": {
                 "ambiguous_or_tied": {"type": "integer", "minimum": 0},
                 "zero_evidence": {"type": "integer", "minimum": 0},
                 "generic_stopword_or_lemma_only": {"type": "integer", "minimum": 0},
                 "single_sense_mismatch": {"type": "integer", "minimum": 0},
                 "unsupported_morphology": {"type": "integer", "minimum": 0},
+                "weak_single_token_evidence": {"type": "integer", "minimum": 0},
                 "over_limit": {"type": "integer", "minimum": 0},
                 "total": {"type": "integer", "minimum": 0}
               },

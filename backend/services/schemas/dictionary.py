@@ -97,3 +97,9 @@ class DictionaryLookupResponse(DictionaryModel):
     examples: list[str] = Field(default_factory=list, max_length=10)
     alternate_senses: list[DictionarySense] = Field(default_factory=list)
     source_attribution: list[DictionaryAttribution] = Field(default_factory=list)
+
+
+class DictionaryRuntimeStatus(DictionaryModel):
+    configured: bool
+    release_id: str | None = None
+    forms_index_status: InflectionsStatus

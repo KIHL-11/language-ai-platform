@@ -1,0 +1,183 @@
+{
+  "gold_set_version": 1,
+  "scope": "synthetic_fixture",
+  "approved": true,
+  "description": "Synthetic cloud fixture mirroring the DQ-02 required gold cases. Not production evidence.",
+  "cases": [
+    {
+      "id": "en-get-understand",
+      "language": "en",
+      "word": "get",
+      "sentence": "I get what you mean.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "understand"
+        ],
+        "chinese_any": [
+          "明白"
+        ],
+        "chinese_forbidden": [
+          "得到",
+          "变得"
+        ]
+      }
+    },
+    {
+      "id": "en-get-obtain",
+      "language": "en",
+      "word": "get",
+      "sentence": "I need to get a new laptop.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "obtain",
+          "acquire"
+        ],
+        "chinese_any": [
+          "得到"
+        ],
+        "chinese_forbidden": [
+          "明白",
+          "变得"
+        ]
+      }
+    },
+    {
+      "id": "en-got-become",
+      "language": "en",
+      "word": "got",
+      "sentence": "He got sick yesterday.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "become"
+        ],
+        "chinese_any": [
+          "变得"
+        ],
+        "chinese_forbidden": [
+          "明白"
+        ]
+      }
+    },
+    {
+      "id": "de-komme-kommen",
+      "language": "de",
+      "word": "komme",
+      "sentence": "Ich komme morgen nach Hause.",
+      "expect": {
+        "lemma": "kommen"
+      }
+    },
+    {
+      "id": "de-entwicklung-honest-missing",
+      "language": "de",
+      "word": "Entwicklung",
+      "sentence": "Die Entwicklung dauert mehrere Jahre.",
+      "expect": {
+        "lemma": "Entwicklung",
+        "definition_contains_any": [
+          "Zeitraum"
+        ],
+        "chinese_any": [
+          "发展"
+        ],
+        "chinese_may_be_missing": true
+      }
+    },
+    {
+      "id": "en-bank-river",
+      "language": "en",
+      "word": "bank",
+      "sentence": "They sat on the river bank.",
+      "expect": {
+        "lemma": "bank",
+        "definition_contains_any": [
+          "river"
+        ],
+        "definition_excludes": [
+          "financial"
+        ],
+        "chinese_any": [
+          "河岸"
+        ],
+        "chinese_forbidden": [
+          "银行"
+        ]
+      }
+    },
+    {
+      "id": "en-bank-financial",
+      "language": "en",
+      "word": "bank",
+      "sentence": "She deposited money at the bank.",
+      "expect": {
+        "lemma": "bank",
+        "definition_contains_any": [
+          "financial"
+        ],
+        "chinese_any": [
+          "银行"
+        ],
+        "chinese_forbidden": [
+          "河岸"
+        ]
+      }
+    },
+    {
+      "id": "en-die-not-stopword",
+      "language": "en",
+      "word": "die",
+      "sentence": "Old stars die slowly.",
+      "expect": {
+        "lemma": "die",
+        "definition_contains_any": [
+          "stop living"
+        ],
+        "chinese_any": [
+          "死"
+        ]
+      }
+    },
+    {
+      "id": "de-compound-no-fabrication",
+      "language": "de",
+      "word": "Haustür",
+      "sentence": "Die Haustür ist offen.",
+      "expect": {
+        "lemma": "Haustür",
+        "chinese_forbidden": [
+          "家门",
+          "前门"
+        ]
+      }
+    }
+  ],
+  "common_words": {
+    "en": [
+      "get",
+      "go",
+      "house",
+      "bank"
+    ],
+    "de": [
+      "Haus",
+      "kommen",
+      "Entwicklung"
+    ]
+  },
+  "performance_terms": {
+    "en": [
+      "get",
+      "bank",
+      "house",
+      "go"
+    ],
+    "de": [
+      "Haus",
+      "kommen",
+      "Entwicklung"
+    ]
+  }
+}

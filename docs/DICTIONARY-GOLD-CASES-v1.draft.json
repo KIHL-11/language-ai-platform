@@ -1,0 +1,237 @@
+{
+  "gold_set_version": 1,
+  "scope": "production",
+  "approved": false,
+  "description": "DRAFT DQ-02 production gold set. Expectations are proposals; the Owner must review every case against the real candidate output and set approved=true before prepare_dictionary_release.py will accept it.",
+  "cases": [
+    {
+      "id": "en-get-understand",
+      "language": "en",
+      "word": "get",
+      "sentence": "I get what you mean.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "understand",
+          "comprehend"
+        ],
+        "chinese_forbidden": [
+          "得到",
+          "获得",
+          "变得",
+          "成为"
+        ]
+      }
+    },
+    {
+      "id": "en-get-obtain",
+      "language": "en",
+      "word": "get",
+      "sentence": "I need to get a new laptop.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "obtain",
+          "acquire",
+          "receive"
+        ],
+        "chinese_forbidden": [
+          "明白",
+          "理解",
+          "变得"
+        ]
+      }
+    },
+    {
+      "id": "en-got-become",
+      "language": "en",
+      "word": "got",
+      "sentence": "He got sick yesterday.",
+      "expect": {
+        "lemma": "get",
+        "definition_contains_any": [
+          "become"
+        ],
+        "chinese_forbidden": [
+          "明白",
+          "理解"
+        ]
+      }
+    },
+    {
+      "id": "de-komme-kommen",
+      "language": "de",
+      "word": "komme",
+      "sentence": "Ich komme morgen nach Hause.",
+      "expect": {
+        "lemma": "kommen"
+      }
+    },
+    {
+      "id": "de-entwicklung",
+      "language": "de",
+      "word": "Entwicklung",
+      "sentence": "Die Entwicklung dauert mehrere Jahre.",
+      "expect": {
+        "lemma": "Entwicklung",
+        "chinese_any": [
+          "发展",
+          "开发",
+          "进展"
+        ],
+        "chinese_may_be_missing": true
+      }
+    },
+    {
+      "id": "en-bank-river",
+      "language": "en",
+      "word": "bank",
+      "sentence": "They sat on the river bank.",
+      "expect": {
+        "lemma": "bank",
+        "definition_contains_any": [
+          "river",
+          "stream",
+          "water"
+        ],
+        "definition_excludes": [
+          "financial",
+          "money"
+        ],
+        "chinese_forbidden": [
+          "银行"
+        ]
+      }
+    },
+    {
+      "id": "en-bank-financial",
+      "language": "en",
+      "word": "bank",
+      "sentence": "She deposited money at the bank.",
+      "expect": {
+        "lemma": "bank",
+        "definition_contains_any": [
+          "financial",
+          "money"
+        ],
+        "chinese_any": [
+          "银行"
+        ],
+        "chinese_forbidden": [
+          "河岸",
+          "岸"
+        ]
+      }
+    },
+    {
+      "id": "en-die-not-stopword",
+      "language": "en",
+      "word": "die",
+      "sentence": "Old stars die slowly.",
+      "expect": {
+        "lemma": "die",
+        "definition_contains_any": [
+          "stop living",
+          "death",
+          "dead"
+        ]
+      }
+    },
+    {
+      "id": "de-compound-no-fabrication",
+      "language": "de",
+      "word": "Haustür",
+      "sentence": "Die Haustür ist offen.",
+      "expect": {
+        "lemma": "Haustür",
+        "chinese_forbidden": [
+          "房子",
+          "家"
+        ]
+      }
+    }
+  ],
+  "common_words": {
+    "en": [
+      "be",
+      "have",
+      "do",
+      "say",
+      "get",
+      "make",
+      "go",
+      "know",
+      "take",
+      "see",
+      "come",
+      "think",
+      "look",
+      "want",
+      "give",
+      "use",
+      "find",
+      "tell",
+      "ask",
+      "work",
+      "time",
+      "year",
+      "people",
+      "way",
+      "day",
+      "man",
+      "thing",
+      "woman",
+      "life",
+      "child"
+    ],
+    "de": [
+      "sein",
+      "haben",
+      "werden",
+      "können",
+      "müssen",
+      "sagen",
+      "machen",
+      "geben",
+      "kommen",
+      "gehen",
+      "wissen",
+      "sehen",
+      "Zeit",
+      "Jahr",
+      "Mensch",
+      "Tag",
+      "Hand",
+      "Frau",
+      "Mann",
+      "Kind",
+      "Haus",
+      "Welt",
+      "Leben",
+      "Arbeit",
+      "Stadt"
+    ]
+  },
+  "performance_terms": {
+    "en": [
+      "get",
+      "bank",
+      "house",
+      "run",
+      "make",
+      "time",
+      "people",
+      "water"
+    ],
+    "de": [
+      "Haus",
+      "kommen",
+      "Entwicklung",
+      "gehen",
+      "Zeit",
+      "Kind",
+      "Arbeit",
+      "Stadt"
+    ]
+  }
+}
