@@ -1488,7 +1488,9 @@ def test_many_workers_under_lock_storm_delete_every_object_exactly_once(
 
     def lock_storm():
         # Repeatedly grab short row locks on random pending rows, as concurrent
-        # claim scans do, without ever claiming anything.
+        # claim scans do, without ever claiming anything. It pauses between
+        # grabs: a thread that held every remaining row all the time would
+        # starve SKIP LOCKED claims by design, which no real worker does.
         with psycopg.connect(_dsn()) as connection:
             while not stop.is_set():
                 connection.execute(
@@ -1497,30 +1499,38 @@ def test_many_workers_under_lock_storm_delete_every_object_exactly_once(
                 )
                 threading.Event().wait(0.01)
                 connection.rollback()
+                threading.Event().wait(0.02)
+
+    def run_workers(clock):
+        postgres_repository.clock = lambda: clock
+        barrier = threading.Barrier(6)
+
+        def worker(_):
+            barrier.wait()
+            return cleanup_worker.run_cleanup(postgres_repository, batch=3)
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            return list(executor.map(worker, range(6)))
 
     storm = threading.Thread(target=lock_storm, daemon=True)
     storm.start()
     clock = NOW + timedelta(hours=1)
     try:
-        for _ in range(5):
-            if not _outbox():
-                break
-            postgres_repository.clock = lambda c=clock: c
-            barrier = threading.Barrier(6)
-
-            def worker(_):
-                barrier.wait()
-                return cleanup_worker.run_cleanup(postgres_repository, batch=3)
-
-            with ThreadPoolExecutor(max_workers=6) as executor:
-                results = list(executor.map(worker, range(6)))
+        for _ in range(3):
+            results = run_workers(clock)
+            # Under contention: nothing stranded, nothing dead-lettered and no
+            # failure budget spent on any row still waiting.
             assert sum(result["skipped"] for result in results) == 0
             assert sum(result["dead"] for result in results) == 0
+            assert all(row[1:3] == ("pending", 1) for row in _outbox())
             clock = clock + library_postgres.CLEANUP_CLAIM_LEASE
     finally:
         stop.set()
         storm.join(10)
 
+    # Eventual deletion: once contention ends, one ordinary pass finishes.
+    results = run_workers(clock)
+    assert sum(result["skipped"] for result in results) == 0
     assert sorted(calls) == sorted(set(calls)) and len(calls) == 24
     assert _outbox() == []
     assert not any(path.exists() for path in paths)
