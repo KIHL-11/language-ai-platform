@@ -50,11 +50,32 @@ ROOT_MARKER = ".language-ai-media-root"
 UPLOAD_CLEANUP_GRACE = timedelta(minutes=15)
 CLEANUP_BACKOFF_BASE = timedelta(seconds=30)
 CLEANUP_BACKOFF_CAP = timedelta(hours=6)
+# attempt_count counts genuine object-store delete failures only. A claim is a
+# lease: it hides the row for this long, so a worker that crashes, times out
+# on the row lock or loses its database connection hands the row back without
+# spending the failure budget.
+CLEANUP_CLAIM_LEASE = timedelta(minutes=5)
+# How long processing waits for another worker's transient row lock (its claim
+# scan or its own processing) before giving the row back to its lease.
+CLEANUP_LOCK_TIMEOUT_MS = 2000
 MAX_CLEANUP_ATTEMPTS = 10
 MAX_CLEANUP_BATCH = 500
-CLEANUP_OUTCOMES = ("claimed", "deleted", "retry_scheduled", "dead", "skipped")
+CLEANUP_OUTCOMES = (
+    "claimed",
+    "deleted",
+    "retry_scheduled",
+    "dead",
+    "skipped",
+    "busy",
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_backoff(failures: int) -> timedelta:
+    """Delay after the ``failures``-th genuine delete failure (1 -> base)."""
+    exponent = min(max(failures - 1, 0), 30)
+    return min(CLEANUP_BACKOFF_BASE * (2**exponent), CLEANUP_BACKOFF_CAP)
 
 
 class OwnerNotProvisionedError(LibraryStoreError):
@@ -628,6 +649,11 @@ class PostgresOwnerScopedLibraryRepository:
 
         Safe with any number of concurrent workers: claims use SKIP LOCKED and
         each deletion runs under the row lock of the claim it was given.
+        Outcomes: ``deleted``; ``retry_scheduled`` and ``dead`` after a genuine
+        delete failure; ``skipped`` when the claim was superseded (adopted by
+        its upload, already done or re-claimed after the lease); ``busy`` when
+        the row lock was not obtained in time, which leaves the row to its
+        lease and spends no failure budget.
         """
 
         if not 1 <= limit <= MAX_CLEANUP_BATCH:
@@ -796,11 +822,16 @@ class PostgresOwnerScopedLibraryRepository:
     def _claim_cleanups(
         self, *, limit: int, cleanup_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """Claim rows by bumping attempt_count and pushing next_attempt_at.
+        """Lease rows by pushing next_attempt_at forward by the claim lease.
 
-        The claim commits on its own, so a crash after it counts as an attempt
-        and the row comes back after its backoff. Named rows are claimed even
-        when not yet due (immediate cleanup after a commit or a failed upload).
+        The claim commits on its own and does not touch attempt_count: a
+        worker that never finishes (crash, lock timeout, lost connection)
+        simply lets the lease expire and the row comes back. The returned
+        ``claim_token`` is the row version's xmin; any later write to the row
+        (another claim, a recorded failure, an upload adopting the key) changes
+        it, so processing can tell a current claim from a superseded one.
+        Named rows are claimed even when not yet due (immediate cleanup after a
+        commit or a failed upload).
         """
 
         now = self._now()
@@ -813,14 +844,8 @@ class PostgresOwnerScopedLibraryRepository:
                 return connection.execute(
                     f"""
                     UPDATE cloud_media_cleanup_outbox AS outbox
-                    SET attempt_count = outbox.attempt_count + 1,
-                        updated_at = GREATEST(outbox.updated_at, %(now)s),
-                        next_attempt_at = %(now)s + make_interval(
-                            secs => LEAST(
-                                %(base)s * power(2, LEAST(outbox.attempt_count, 30)),
-                                %(cap)s
-                            )
-                        )
+                    SET updated_at = GREATEST(outbox.updated_at, %(now)s),
+                        next_attempt_at = %(lease_until)s
                     FROM (
                         SELECT cleanup_id FROM cloud_media_cleanup_outbox
                         WHERE status = 'pending' AND {due}
@@ -831,14 +856,14 @@ class PostgresOwnerScopedLibraryRepository:
                     WHERE outbox.cleanup_id = claimable.cleanup_id
                     RETURNING outbox.cleanup_id, outbox.owner_user_id,
                               outbox.library_item_id, outbox.object_key,
-                              outbox.attempt_count
+                              outbox.attempt_count,
+                              outbox.xmin::text AS claim_token
                     """,
                     {
                         "now": now,
+                        "lease_until": now + CLEANUP_CLAIM_LEASE,
                         "ids": cleanup_ids,
                         "limit": limit,
-                        "base": CLEANUP_BACKOFF_BASE.total_seconds(),
-                        "cap": CLEANUP_BACKOFF_CAP.total_seconds(),
                     },
                 ).fetchall()
         except psycopg.Error as exc:
@@ -851,20 +876,35 @@ class PostgresOwnerScopedLibraryRepository:
         same key must delete this row first, so it either waits and then finds
         the row gone (and aborts), or it commits first and this finds nothing.
         Owner, item and key all come from the row, never from a caller.
+
+        The lock is waited for (bounded by CLEANUP_LOCK_TIMEOUT_MS) rather than
+        skipped: another worker's claim scan can hold this row's lock for the
+        length of its statement without claiming it, and skipping then would
+        strand a row this worker owns. The claim token fences the wait: if the
+        row changed meanwhile, the re-check finds nothing and the claim is
+        treated as superseded.
+
+        Semantics: lock timeout -> ``busy``, no write, the lease returns the
+        row; database error -> CloudLibraryUnavailableError, rolled back, the
+        lease returns the row; object-store error -> one failure is recorded
+        (``retry_scheduled``, or ``dead`` at MAX_CLEANUP_ATTEMPTS failures).
         """
 
         cleanup_id = str(claim["cleanup_id"])
         try:
             with self._connect() as connection:
+                connection.execute(
+                    f"SET LOCAL lock_timeout = '{int(CLEANUP_LOCK_TIMEOUT_MS)}ms'"
+                )
                 row = connection.execute(
                     """
                     SELECT owner_user_id, library_item_id, object_key, attempt_count
                     FROM cloud_media_cleanup_outbox
-                    WHERE cleanup_id = %s AND attempt_count = %s
+                    WHERE cleanup_id = %s AND xmin::text = %s
                       AND status = 'pending'
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE
                     """,
-                    (cleanup_id, claim["attempt_count"]),
+                    (cleanup_id, claim["claim_token"]),
                 ).fetchone()
                 if row is None:
                     # Adopted by its upload, re-claimed, or already done.
@@ -894,22 +934,27 @@ class PostgresOwnerScopedLibraryRepository:
                         cleanup_id,
                         type(exc).__name__,
                     )
-                    if row["attempt_count"] >= MAX_CLEANUP_ATTEMPTS:
-                        return self._mark_dead(
-                            connection, cleanup_id, "object_delete_failed"
-                        )
+                    failures = row["attempt_count"] + 1
+                    now = self._now()
                     connection.execute(
                         """
                         UPDATE cloud_media_cleanup_outbox
-                        SET last_error_code = 'object_delete_failed'
+                        SET attempt_count = %s,
+                            last_error_code = 'object_delete_failed',
+                            updated_at = GREATEST(updated_at, %s),
+                            next_attempt_at = %s
                         WHERE cleanup_id = %s
                         """,
-                        (cleanup_id,),
+                        (failures, now, now + _cleanup_backoff(failures), cleanup_id),
                     )
+                    if failures >= MAX_CLEANUP_ATTEMPTS:
+                        return self._mark_dead(
+                            connection, cleanup_id, "object_delete_failed"
+                        )
                     logger.warning(
                         "cloud media cleanup will retry cleanup_id=%s attempt=%s",
                         cleanup_id,
-                        row["attempt_count"],
+                        failures,
                     )
                     return "retry_scheduled"
                 connection.execute(
@@ -917,6 +962,11 @@ class PostgresOwnerScopedLibraryRepository:
                     (cleanup_id,),
                 )
                 return "deleted"
+        except psycopg.errors.LockNotAvailable:
+            # Rolled back, nothing written: the lease hands the row back later
+            # and no failure is counted.
+            logger.warning("cloud media cleanup row busy cleanup_id=%s", cleanup_id)
+            return "busy"
         except psycopg.Error as exc:
             # Rolled back: the claim stays committed and the row retries later.
             raise CloudLibraryUnavailableError("Cloud Library is unavailable") from exc

@@ -514,7 +514,19 @@ def test_two_concurrent_workers_delete_each_object_once(
         results = list(executor.map(worker, range(2)))
 
     assert sorted(calls) == sorted(set(calls))
+    # Contention must never strand a claimed row as "skipped". A row lock
+    # held past the timeout is "busy" and is only handed back to its lease.
+    assert sum(result["skipped"] for result in results) == 0
+    # Eventual deletion is the guarantee: anything left after this pass comes
+    # back once its claim lease expires, with no failure budget spent.
+    remaining = _outbox()
+    assert all(attempts == 1 for (_, _, attempts, _, _) in remaining)
+    _at(postgres_repository, timedelta(hours=1) + library_postgres.CLEANUP_CLAIM_LEASE)
+    cleanup_worker.run_cleanup(postgres_repository, batch=50)
+    assert sorted(calls) == sorted(set(calls))
     assert len(calls) == 12
+    assert _outbox() == []
+    assert not any(path.exists() for path in paths)
     assert sum(result["deleted"] for result in results) == 12
     assert not any(path.exists() for path in paths)
     assert _outbox() == []
@@ -535,7 +547,9 @@ def test_crash_after_claim_is_retried_by_next_worker(postgres_repository, monkey
     with pytest.raises(SimulatedCrash):
         cleanup_worker.run_cleanup(postgres_repository)
     [(_, status, attempts, next_at, _)] = _outbox()
-    assert (status, attempts) == ("pending", 2)
+    # Only the genuine delete failure counts; the crashed claim is a lease.
+    assert (status, attempts) == ("pending", 1)
+    assert next_at == NOW + timedelta(hours=1) + library_postgres.CLEANUP_CLAIM_LEASE
     assert path.exists()
 
     monkeypatch.setattr(postgres_repository.media_objects, "delete", real_delete)
@@ -559,7 +573,11 @@ def test_crash_after_object_delete_is_idempotent(postgres_repository, monkeypatc
     with pytest.raises(SimulatedCrash):
         postgres_repository.delete_for_owner(OWNER_A, item.id)
     assert not path.exists()
-    assert [row[1:3] for row in _outbox()] == [("pending", 1)]
+    # The object was removed before the crash: nothing failed, so no failure
+    # is counted and the row returns when the claim lease expires.
+    [(_, status, attempts, next_at, _)] = _outbox()
+    assert (status, attempts) == ("pending", 0)
+    assert next_at == NOW + library_postgres.CLEANUP_CLAIM_LEASE
 
     monkeypatch.setattr(postgres_repository.media_objects, "delete", real_delete)
     _at(postgres_repository, timedelta(hours=1))
@@ -604,7 +622,9 @@ def test_stale_claim_is_skipped_after_another_worker_reclaims(
     assert cleanup_worker.run_cleanup(postgres_repository)["retry_scheduled"] == 1
 
     assert postgres_repository._process_cleanup(stale) == "skipped"
-    assert _outbox()[0][2] == 3
+    # Two genuine failures (immediate cleanup and the re-claim); the stale
+    # claim itself spent nothing and its late processing wrote nothing.
+    assert _outbox()[0][2] == 2
 
 
 def _insert_outbox(owner, item_id, object_key):
@@ -1252,3 +1272,255 @@ def test_completed_send_on_a_pre_2_4_server_returns(postgres_repository):
     assert b"".join(body) == AUDIO
     assert ran == [True]
     assert audio.file.closed
+
+
+# --- N-1 / N-1b: lock contention must not strand rows or spend the budget ---
+
+
+class _RowLockHolder:
+    """Hold FOR UPDATE on outbox rows from another connection, as another
+    worker's claim scan or processing transaction would."""
+
+    def __init__(self, cleanup_ids, hold_seconds):
+        self._ids = [str(value) for value in cleanup_ids]
+        self._hold = hold_seconds
+        self.locked = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        with psycopg.connect(_dsn()) as connection:
+            connection.execute(
+                "SELECT 1 FROM cloud_media_cleanup_outbox"
+                " WHERE cleanup_id = ANY(%s::uuid[]) FOR UPDATE",
+                (self._ids,),
+            )
+            self.locked.set()
+            threading.Event().wait(self._hold)
+            connection.rollback()
+
+    def __enter__(self):
+        self._thread.start()
+        assert self.locked.wait(5)
+        return self
+
+    def __exit__(self, *_exc):
+        self._thread.join(10)
+
+
+def _pending_cleanup(repository, monkeypatch, source):
+    """One pending outbox row (attempt_count 1) whose object still exists."""
+    item = _item_with_audio(repository, source=source)
+    path = _object_path(repository, OWNER_A, item.id)
+    real_delete = repository.media_objects.delete
+    monkeypatch.setattr(repository.media_objects, "delete", _failing_delete)
+    repository.delete_for_owner(OWNER_A, item.id)
+    monkeypatch.setattr(repository.media_objects, "delete", real_delete)
+    return path
+
+
+def test_transient_foreign_row_lock_is_waited_for_not_skipped(
+    postgres_repository, monkeypatch
+):
+    """Deterministic N-1: another worker's claim scan briefly locks a row this
+    worker has already claimed. Before the fix processing skipped it."""
+    path = _pending_cleanup(postgres_repository, monkeypatch, "n1_wait")
+    _at(postgres_repository, timedelta(hours=1))
+    [claim] = postgres_repository._claim_cleanups(limit=1)
+
+    with _RowLockHolder([claim["cleanup_id"]], hold_seconds=0.3):
+        outcome = postgres_repository._process_cleanup(claim)
+
+    assert outcome == "deleted"
+    assert not path.exists()
+    assert _outbox() == []
+
+
+def test_lock_held_past_timeout_is_busy_and_spends_no_budget(
+    postgres_repository, monkeypatch
+):
+    path = _pending_cleanup(postgres_repository, monkeypatch, "n1_busy")
+    monkeypatch.setattr(library_postgres, "CLEANUP_LOCK_TIMEOUT_MS", 100)
+    _at(postgres_repository, timedelta(hours=1))
+    [claim] = postgres_repository._claim_cleanups(limit=1)
+
+    with _RowLockHolder([claim["cleanup_id"]], hold_seconds=1.0):
+        assert postgres_repository._process_cleanup(claim) == "busy"
+
+    [(_, status, attempts, next_at, error)] = _outbox()
+    assert (status, attempts, error) == ("pending", 1, "object_delete_failed")
+    assert next_at == NOW + timedelta(hours=1) + library_postgres.CLEANUP_CLAIM_LEASE
+    assert path.exists()
+    # Not due again until the lease expires; then an ordinary run deletes it.
+    assert cleanup_worker.run_cleanup(postgres_repository)["claimed"] == 0
+    postgres_repository.clock = lambda: next_at
+    assert cleanup_worker.run_cleanup(postgres_repository)["deleted"] == 1
+    assert not path.exists()
+
+
+def test_repeated_lock_conflicts_never_dead_letter_the_row(
+    postgres_repository, monkeypatch
+):
+    """N-1b: before the fix every claim spent budget, so repeated contention
+    followed by one genuine failure dead-lettered a deleted user's audio."""
+    path = _pending_cleanup(postgres_repository, monkeypatch, "n1_repeat")
+    monkeypatch.setattr(library_postgres, "CLEANUP_LOCK_TIMEOUT_MS", 50)
+    clock = NOW + timedelta(hours=1)
+    for _ in range(MAX_CLEANUP_ATTEMPTS + 5):
+        postgres_repository.clock = lambda c=clock: c
+        [claim] = postgres_repository._claim_cleanups(limit=1)
+        with _RowLockHolder([claim["cleanup_id"]], hold_seconds=0.3):
+            assert postgres_repository._process_cleanup(claim) == "busy"
+        clock = clock + library_postgres.CLEANUP_CLAIM_LEASE
+    [(_, status, attempts, _, _)] = _outbox()
+    assert (status, attempts) == ("pending", 1)
+
+    # One genuine failure after all that contention is just the second failure.
+    postgres_repository.clock = lambda: clock
+    monkeypatch.setattr(postgres_repository.media_objects, "delete", _failing_delete)
+    assert cleanup_worker.run_cleanup(postgres_repository)["retry_scheduled"] == 1
+    [(_, status, attempts, next_at, _)] = _outbox()
+    assert (status, attempts) == ("pending", 2)
+    assert next_at == clock + library_postgres.CLEANUP_BACKOFF_BASE * 2
+
+    monkeypatch.undo()
+    postgres_repository.clock = lambda: next_at
+    assert cleanup_worker.run_cleanup(postgres_repository)["deleted"] == 1
+    assert not path.exists() and _outbox() == []
+
+
+def test_dead_letter_boundary_counts_only_genuine_failures(
+    postgres_repository, monkeypatch
+):
+    path = _pending_cleanup(postgres_repository, monkeypatch, "n1_boundary")
+    monkeypatch.setattr(library_postgres, "CLEANUP_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(postgres_repository.media_objects, "delete", _failing_delete)
+    while True:
+        [(_, status, attempts, next_at, _)] = _outbox()
+        if attempts == MAX_CLEANUP_ATTEMPTS - 1:
+            break
+        # A busy pass between every failure must not move the count.
+        postgres_repository.clock = lambda n=next_at: n
+        [claim] = postgres_repository._claim_cleanups(limit=1)
+        with _RowLockHolder([claim["cleanup_id"]], hold_seconds=0.2):
+            assert postgres_repository._process_cleanup(claim) == "busy"
+        assert _outbox()[0][2] == attempts
+        lease_end = next_at + library_postgres.CLEANUP_CLAIM_LEASE
+        postgres_repository.clock = lambda n=lease_end: n
+        assert cleanup_worker.run_cleanup(postgres_repository)["retry_scheduled"] == 1
+
+    assert (status, attempts) == ("pending", MAX_CLEANUP_ATTEMPTS - 1)
+    postgres_repository.clock = lambda: next_at
+    assert cleanup_worker.run_cleanup(postgres_repository)["dead"] == 1
+    [(_, status, attempts, _, error)] = _outbox()
+    assert (status, attempts, error) == ("dead", MAX_CLEANUP_ATTEMPTS, "object_delete_failed")
+    assert path.exists()
+
+
+def test_worker_restart_recovers_claims_it_never_processed(
+    postgres_repository, monkeypatch
+):
+    paths = [
+        _pending_cleanup(postgres_repository, monkeypatch, f"n1_restart_{index}")
+        for index in range(4)
+    ]
+    _at(postgres_repository, timedelta(hours=1))
+    claims = postgres_repository._claim_cleanups(limit=10)  # the worker dies here
+    assert len(claims) == 4
+
+    assert cleanup_worker.run_cleanup(postgres_repository)["claimed"] == 0
+    _at(postgres_repository, timedelta(hours=1) + library_postgres.CLEANUP_CLAIM_LEASE)
+    assert cleanup_worker.run_cleanup(postgres_repository)["deleted"] == 4
+    assert not any(path.exists() for path in paths) and _outbox() == []
+    # The dead worker's late processing is fenced off by its stale token.
+    assert {postgres_repository._process_cleanup(claim) for claim in claims} == {"skipped"}
+
+
+def test_database_error_after_object_delete_retries_idempotently(
+    postgres_repository, monkeypatch
+):
+    path = _pending_cleanup(postgres_repository, monkeypatch, "n1_dberror")
+    _at(postgres_repository, timedelta(hours=1))
+    with psycopg.connect(_dsn(), autocommit=True) as admin:
+        admin.execute(
+            """
+            CREATE FUNCTION n1_refuse_delete() RETURNS trigger LANGUAGE plpgsql AS
+            $$BEGIN RAISE EXCEPTION 'synthetic database failure'; END$$;
+            CREATE TRIGGER n1_refuse_delete BEFORE DELETE ON cloud_media_cleanup_outbox
+            FOR EACH ROW EXECUTE FUNCTION n1_refuse_delete();
+            """
+        )
+        try:
+            with pytest.raises(library_postgres.CloudLibraryUnavailableError):
+                cleanup_worker.run_cleanup(postgres_repository)
+        finally:
+            admin.execute(
+                "DROP TRIGGER n1_refuse_delete ON cloud_media_cleanup_outbox;"
+                " DROP FUNCTION n1_refuse_delete();"
+            )
+    assert not path.exists()  # the object went before the row write failed
+    [(_, status, attempts, next_at, _)] = _outbox()
+    assert (status, attempts) == ("pending", 1)  # a database error is not a delete failure
+    postgres_repository.clock = lambda: next_at
+    assert cleanup_worker.run_cleanup(postgres_repository)["deleted"] == 1
+    assert _outbox() == []
+
+
+def test_many_workers_under_lock_storm_delete_every_object_exactly_once(
+    postgres_repository, monkeypatch
+):
+    paths = [
+        _pending_cleanup(postgres_repository, monkeypatch, f"n1_storm_{index}")
+        for index in range(24)
+    ]
+    store = library_postgres.FilesystemMediaObjectStore(
+        postgres_repository.media_objects.root
+    )
+    calls = []
+    calls_lock = threading.Lock()
+
+    def counting_delete(object_key, owner, item_id):
+        with calls_lock:
+            calls.append(object_key)
+        store.delete(object_key, owner, item_id)
+
+    monkeypatch.setattr(postgres_repository.media_objects, "delete", counting_delete)
+    stop = threading.Event()
+
+    def lock_storm():
+        # Repeatedly grab short row locks on random pending rows, as concurrent
+        # claim scans do, without ever claiming anything.
+        with psycopg.connect(_dsn()) as connection:
+            while not stop.is_set():
+                connection.execute(
+                    "SELECT 1 FROM cloud_media_cleanup_outbox WHERE status = 'pending'"
+                    " ORDER BY random() LIMIT 3 FOR UPDATE SKIP LOCKED"
+                )
+                threading.Event().wait(0.01)
+                connection.rollback()
+
+    storm = threading.Thread(target=lock_storm, daemon=True)
+    storm.start()
+    clock = NOW + timedelta(hours=1)
+    try:
+        for _ in range(5):
+            if not _outbox():
+                break
+            postgres_repository.clock = lambda c=clock: c
+            barrier = threading.Barrier(6)
+
+            def worker(_):
+                barrier.wait()
+                return cleanup_worker.run_cleanup(postgres_repository, batch=3)
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                results = list(executor.map(worker, range(6)))
+            assert sum(result["skipped"] for result in results) == 0
+            assert sum(result["dead"] for result in results) == 0
+            clock = clock + library_postgres.CLEANUP_CLAIM_LEASE
+    finally:
+        stop.set()
+        storm.join(10)
+
+    assert sorted(calls) == sorted(set(calls)) and len(calls) == 24
+    assert _outbox() == []
+    assert not any(path.exists() for path in paths)
