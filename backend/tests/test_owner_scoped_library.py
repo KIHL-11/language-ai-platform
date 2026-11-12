@@ -100,6 +100,7 @@ def postgres_repository(tmp_path):
     dsn = _dsn()
     _execute_migration(dsn, "0001_owner_scoped_library.down.sql")
     _execute_migration(dsn, "0001_owner_scoped_library.up.sql")
+    _execute_migration(dsn, "0010_library_media_cleanup_worker.up.sql")
     _provision_owner(dsn, OWNER_A)
     _provision_owner(dsn, OWNER_B)
     repository = PostgresOwnerScopedLibraryRepository(
@@ -381,7 +382,8 @@ def test_audio_read_rejects_metadata_with_wrong_owner_namespace(
         response = client.get(f"/api/library/items/{item.id}/audio")
 
     assert response.status_code == 500
-    assert response.content != b"must-not-leak"
+    assert response.json()["detail"]["code"] == "cloud_media_integrity_failed"
+    assert b"must-not-leak" not in response.content
 
 
 def test_cloud_delete_removes_only_authorized_metadata_and_object(postgres_repository):
@@ -393,7 +395,8 @@ def test_cloud_delete_removes_only_authorized_metadata_and_object(postgres_repos
         content_type="audio/wav",
         content=b"synthetic-wave",
     )
-    audio_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    with postgres_repository.audio_for_owner(OWNER_A, item.id) as audio:
+        audio_path = audio.path
 
     with _as_owner(OWNER_B, postgres_repository):
         assert client.delete(f"/api/library/items/{item.id}").status_code == 404
@@ -417,7 +420,8 @@ def test_delete_failure_keeps_durable_cleanup_outbox(
         content_type="audio/mpeg",
         content=b"cleanup-evidence",
     )
-    audio_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    with postgres_repository.audio_for_owner(OWNER_A, item.id) as audio:
+        audio_path = audio.path
 
     def fail_delete(*_args):
         from services.library.store import LibraryStoreError

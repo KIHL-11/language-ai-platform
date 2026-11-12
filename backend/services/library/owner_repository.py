@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, BinaryIO, Protocol, runtime_checkable
 
 from services.schemas.lesson import Lesson
 from services.schemas.library import LibraryItem, LibraryItemSummary
@@ -10,10 +10,27 @@ from services.schemas.library import LibraryItem, LibraryItemSummary
 
 @dataclass(frozen=True, slots=True)
 class OwnerScopedAudio:
-    """Authorized local object returned after metadata ownership is verified."""
+    """Authorized object whose bytes matched the stored size and SHA-256.
+
+    ``file`` is the handle that was hashed. Serve from it rather than reopening
+    ``path``, which could have been swapped after verification. The caller owns
+    the handle; use the value as a context manager when not streaming it.
+    """
 
     path: Path
     content_type: str
+    file: BinaryIO
+    byte_size: int
+    sha256: str
+
+    def close(self) -> None:
+        self.file.close()
+
+    def __enter__(self) -> "OwnerScopedAudio":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 @runtime_checkable
