@@ -66,12 +66,15 @@ class BrowserSessionRepository:
         Never exposed by HTTP; requires an existing server-provisioned account.
         Never accepts a browser learner ID as proof and never inserts cloud_users.
         """
-        token=secrets.token_urlsafe(32)
-        now=self._now()
         try:
             with self._connect() as connection:
-                connection.execute('INSERT INTO cloud_browser_sessions(session_id,owner_user_id,token_hash,created_at,expires_at,last_seen_at) VALUES(%s,%s,%s,%s,%s,%s)',(str(uuid.uuid4()),owner,digest(token),now,now+ABSOLUTE_LIFETIME,now))
+                return self.issue_in_transaction(connection,owner,self._now())
         except psycopg.Error as exc: raise SessionUnavailable('Session storage unavailable') from exc
+
+    def issue_in_transaction(self, connection, owner, now):
+        """Issue inside a trusted caller's transaction (verified login mapping)."""
+        token=secrets.token_urlsafe(32)
+        connection.execute('INSERT INTO cloud_browser_sessions(session_id,owner_user_id,token_hash,created_at,expires_at,last_seen_at) VALUES(%s,%s,%s,%s,%s,%s)',(str(uuid.uuid4()),owner,digest(token),now,now+ABSOLUTE_LIFETIME,now))
         return token
 
     def _row(self, connection, token):
