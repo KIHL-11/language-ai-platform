@@ -214,6 +214,14 @@ def forced_rls_tables(versions: list[str]) -> set[str]:
     return {table for version in versions for table in FORCED_RLS_BY_VERSION.get(version, ())}
 
 
+def validate_version(version: str) -> str:
+    if not (isinstance(version, str) and len(version) == 4 and version.isdigit()):
+        raise ValueError("Versions are four digits")
+    if not 1 <= int(version) < FIRST_FORBIDDEN_VERSION:
+        raise ValueError("Version is outside the Phase 1 set")
+    return version
+
+
 def validate_identifier(name: str) -> str:
     if not isinstance(name, str) or not SAFE_IDENTIFIER.fullmatch(name):
         raise ValueError("Role names must be lowercase identifiers")

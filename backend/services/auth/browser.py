@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from services.auth.identity import DeploymentMode, IdentityDependency, InvalidAuthentication, deployment_mode
+from services.cloud.composition import bootstrap_cloud_storage
 from services.auth.sessions import (
     ABSOLUTE_LIFETIME, COOKIE_NAME, BrowserSessionRepository,
     BrowserSessionVerifier, SessionPolicy, SessionUnavailable, csrf_token,
@@ -49,6 +50,9 @@ class BrowserSessionBoundary(BaseHTTPMiddleware):
             if deployment_mode() is not DeploymentMode.CLOUD:
                 return await call_next(request)
             _bootstrap(request.app)
+            # Learning repositories: all or none, only after the DB preflight.
+            # Off the event loop because the first call runs preflight queries.
+            await run_in_threadpool(bootstrap_cloud_storage,request.app)
             policy=getattr(request.app.state,'browser_session_policy',None)
             if policy is None:
                 return await call_next(request)  # existing protected routes remain fail closed
