@@ -1,0 +1,13 @@
+# Cloud Phase 1 migration set. Forward-only; applied in this order by
+# backend/scripts/cloud_db.py. 0010 and later are excluded on purpose (B1 media
+# cleanup worker and later work stay frozen). 0007-0009 are pinned to the
+# content of the P8-05B branches; a file that differs from its digest is refused.
+ca0a24da0ee69bac99f003f8630c02d314fb9cedacba6dd7c1536645d6ebd4c0  0001_owner_scoped_library.up.sql
+9aaf9eefd466b97ff51ff70536cbc221d746fed2d6a31aee84713eb5403543ef  0002_owner_scoped_study_bank.up.sql
+25b7f0bf97862c61dbb77cec918f8496ad5829ebf94e6224e602aea2131a7773  0003_owner_scoped_ai_chunk_candidates.up.sql
+c7a51a86bf8cc626ae9d3b85992e803b1be5a00514b6963903727301ab000d35  0004_owner_scoped_speaking.up.sql
+ecc46fb4103ab80fcf3814b302386baa60748d2fd0f2610903580723c0e48553  0005_browser_sessions.up.sql
+feb1d43132198a8a9e18e0d62478f43b97514878ebb249e3c59d0436f446578d  0006_topic_session_json_integrity.up.sql
+3a99987962efe95f4e052381c4fa089e4f5d7953ab006b9592a39f3963999f11  0007_email_login.up.sql
+6d335603a84f7780bee3f00fd040858b7906f9a6519ac26495555554c026847f  0008_account_identity.up.sql
+f8c57b989f4f9b02319d276cf12b95ee32fc77fb74bfe8bd2db4713e43020ca4  0009_email_management.up.sql
