@@ -78,6 +78,7 @@ def storage(tmp_path):
 
 def _backup(storage: Path, tmp_path: Path, **kwargs):
     kwargs.setdefault("port", None)
+    kwargs.setdefault("confirm_app_stopped", True)
     return personal.create_backup(storage, tmp_path / "backups", now=STAMP, **kwargs)
 
 
@@ -93,7 +94,9 @@ def test_backup_is_complete_hashed_and_verifiable(storage, tmp_path):
     assert metadata["summary"]["study_bank"]["count"] == 2
     assert metadata["summary"]["speaking"] == {**metadata["summary"]["speaking"], "count": 1, "events": 1}
     assert metadata["summary"]["chunk_memory"]["count"] == 2
-    assert metadata["summary"]["sqlite"]["dictionary.sqlite3"] == {"integrity": "ok", "rows": {"entries": 2}}
+    sqlite_summary = metadata["summary"]["sqlite"]["dictionary.sqlite3"]
+    assert sqlite_summary["integrity"] == "ok" and sqlite_summary["rows"] == {"entries": 2}
+    assert len(sqlite_summary["logical_sha256"]) == 64
     copied = {p.relative_to(result.path / "storage").as_posix() for p in (result.path / "storage").rglob("*") if p.is_file()}
     assert copied == {"learning_library.json", "library_media/synthetic.mp3", "study_bank.json",
                       "speaking_sessions.json", "chunk_bank.json", "dictionary.sqlite3"}
@@ -131,7 +134,7 @@ def test_backup_refuses_while_the_app_is_listening(storage, tmp_path):
         server.bind(("127.0.0.1", 0))
         server.listen()
         port = server.getsockname()[1]
-        with pytest.raises(BackupRefused, match="stop it before backing up"):
+        with pytest.raises(BackupRefused, match="stop the app before backing up"):
             _backup(storage, tmp_path, port=port)
     assert not (tmp_path / "backups").exists()
 
@@ -189,7 +192,7 @@ def test_existing_backup_is_never_overwritten(storage, tmp_path):
 
 def test_destination_inside_storage_is_refused(storage, tmp_path):
     with pytest.raises(BackupRefused, match="outside the storage directory"):
-        personal.create_backup(storage, storage / "backups", port=None, now=STAMP)
+        personal.create_backup(storage, storage / "backups", port=None, now=STAMP, confirm_app_stopped=True)
     assert not (storage / "backups").exists()
 
 
@@ -210,7 +213,7 @@ def test_restore_never_targets_live_storage_or_an_existing_directory(storage, tm
 # Consistency -----------------------------------------------------------------
 
 def test_storage_changing_during_the_copy_discards_the_backup(storage, tmp_path, monkeypatch):
-    real_copy = personal.shutil.copyfile
+    real_copy = personal._copy_bytes
     touched = []
 
     def copy_then_write(source, target):
@@ -221,7 +224,7 @@ def test_storage_changing_during_the_copy_discards_the_backup(storage, tmp_path,
                 handle.write(" ")
         return result
 
-    monkeypatch.setattr(personal.shutil, "copyfile", copy_then_write)
+    monkeypatch.setattr(personal, "_copy_bytes", copy_then_write)
     with pytest.raises(BackupRefused, match="Storage changed while the backup was running"):
         _backup(storage, tmp_path)
     assert list((tmp_path / "backups").iterdir()) == []
@@ -255,7 +258,7 @@ def test_sqlite_wal_content_is_captured_without_copying_wal_files(storage, tmp_p
 def test_empty_storage_backs_up_and_restores(tmp_path):
     root = tmp_path / "empty-storage"
     root.mkdir()
-    result = personal.create_backup(root, tmp_path / "b", port=None, now=STAMP)
+    result = personal.create_backup(root, tmp_path / "b", port=None, now=STAMP, confirm_app_stopped=True)
     assert result.summary == {}
     assert personal.restore_backup(result.path, tmp_path / "r", live_storage=root)["matches_backup"]
 
@@ -273,7 +276,8 @@ def test_cli_backup_verify_restore_round_trip(storage, tmp_path):
         probe.bind(("127.0.0.1", 0))
         free_port = probe.getsockname()[1]  # nothing listens once closed
     before = _tree_state(storage)
-    made = _cli("backup", "--storage", str(storage), "--dest", str(tmp_path / "cli"), "--port", str(free_port))
+    made = _cli("backup", "--confirm-app-stopped", "--storage", str(storage), "--dest", str(tmp_path / "cli"),
+                "--port", str(free_port))
     assert made.returncode == 0, made.stdout + made.stderr
     backup_path = json.loads(made.stdout)["backup"]
     assert json.loads(made.stdout)["datasets"]["study_bank"] == 2
@@ -285,3 +289,209 @@ def test_cli_backup_verify_restore_round_trip(storage, tmp_path):
     refused = _cli("restore", "--backup", backup_path, "--target", str(storage), "--live-storage", str(storage))
     assert refused.returncode == 2
     assert _tree_state(storage) == before
+
+
+# ----------------------------------------------------------------------------
+# Remediation batch 2 (independent review CHANGES_REQUIRED). Test IDs PRP-R*.
+# ----------------------------------------------------------------------------
+
+def _no_restore_staging_left(parent: Path, name: str) -> bool:
+    return not list(parent.glob(f".{name}.restore-staging-*"))
+
+
+def _flip_middle_byte(path: Path) -> None:
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2] ^= 0x01
+    path.write_bytes(bytes(data))
+
+
+# PRP-R1: the operator confirmation is the precondition, not the port probe.
+def test_prp_r1_backup_requires_explicit_operator_confirmation(storage, tmp_path):
+    for value in (False, None, "yes", 1):
+        with pytest.raises(BackupRefused, match="confirm it explicitly"):
+            personal.create_backup(storage, tmp_path / "backups", port=None, now=STAMP,
+                                   confirm_app_stopped=value)
+    assert not (tmp_path / "backups").exists()
+    refused = _cli("backup", "--storage", str(storage), "--dest", str(tmp_path / "cli"), "--port", "1")
+    assert refused.returncode == 2
+    assert "confirm it explicitly" in refused.stdout
+    assert not (tmp_path / "cli").exists()
+
+
+# PRP-R2: the best-effort probe also covers loopback IPv6.
+def test_prp_r2_port_probe_covers_ipv6_loopback(storage, tmp_path):
+    try:
+        server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        server.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback is not available on this host")
+    with server:
+        server.listen()
+        port = server.getsockname()[1]
+        assert personal.service_is_listening(port)
+        with pytest.raises(BackupRefused, match="listening on loopback port"):
+            _backup(storage, tmp_path, port=port)
+    assert not (tmp_path / "backups").exists()
+
+
+def _corrupting_copy(monkeypatch, *, when):
+    real_copy = personal._copy_bytes
+
+    def copy(source, target):
+        digest = real_copy(source, target)
+        if when(Path(source)):
+            _flip_middle_byte(Path(target))
+        return digest
+
+    monkeypatch.setattr(personal, "_copy_bytes", copy)
+
+
+# PRP-R3: media bytes corrupted while being written into the backup.
+def test_prp_r3_backup_rejects_media_corrupted_during_copy(storage, tmp_path, monkeypatch):
+    _corrupting_copy(monkeypatch, when=lambda source: source.suffix == ".mp3")
+    with pytest.raises(BackupInvalid, match="Copy verification failed for synthetic.mp3"):
+        _backup(storage, tmp_path)
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+# PRP-R4: the SQLite copy produced by the backup API is damaged.
+@pytest.mark.parametrize("damage", ["page_bytes", "content"])
+def test_prp_r4_backup_rejects_sqlite_copy_corruption(storage, tmp_path, monkeypatch, damage):
+    real = personal._sqlite_backup
+
+    def damaged(staged, target):
+        real(staged, target)
+        if damage == "page_bytes":
+            data = bytearray(target.read_bytes())
+            data[100:4096] = b"\xff" * (4096 - 100)
+            target.write_bytes(bytes(data))
+        else:  # valid database, wrong content
+            connection = sqlite3.connect(target)
+            connection.execute("DELETE FROM entries WHERE word = 'weather'")
+            connection.commit()
+            connection.close()
+
+    monkeypatch.setattr(personal, "_sqlite_backup", damaged)
+    with pytest.raises(BackupInvalid, match="SQLite copy of dictionary.sqlite3"):
+        _backup(storage, tmp_path)
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+# PRP-R5: a failure halfway through the backup keeps nothing.
+def test_prp_r5_backup_midway_failure_keeps_nothing(storage, tmp_path, monkeypatch):
+    real_copy = personal._copy_bytes
+    calls = []
+
+    def failing(source, target):
+        calls.append(source)
+        if len(calls) == 3:
+            raise OSError("synthetic disk failure")
+        return real_copy(source, target)
+
+    monkeypatch.setattr(personal, "_copy_bytes", failing)
+    with pytest.raises(OSError, match="synthetic disk failure"):
+        _backup(storage, tmp_path)
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+# PRP-R6: media bytes corrupted while being restored; nothing is published.
+def test_prp_r6_restore_media_corruption_is_never_published(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    before = _tree_state(storage)
+    _corrupting_copy(monkeypatch, when=lambda source: source.suffix == ".mp3")
+    target = tmp_path / "restore"
+    with pytest.raises(BackupInvalid, match="Copy verification failed for synthetic.mp3"):
+        personal.restore_backup(result.path, target, live_storage=storage)
+    assert not target.exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
+    assert _tree_state(storage) == before
+
+
+# PRP-R7: a SQLite file damaged inside the backup, even with a recomputed
+# manifest, is caught by integrity_check / the logical digest; not published.
+@pytest.mark.parametrize("damage", ["page_bytes", "content"])
+def test_prp_r7_restore_sqlite_corruption_is_never_published(storage, tmp_path, damage):
+    result = _backup(storage, tmp_path)
+    database = result.path / "storage" / "dictionary.sqlite3"
+    if damage == "page_bytes":
+        data = bytearray(database.read_bytes())
+        data[100:4096] = b"\xff" * (4096 - 100)
+        database.write_bytes(bytes(data))
+    else:
+        connection = sqlite3.connect(database)
+        connection.execute("UPDATE entries SET meaning = 'tampered' WHERE word = 'weather'")
+        connection.commit()
+        connection.close()
+    personal._write_manifest(result.path)  # an attacker or bug that also rewrote the manifest
+    personal.verify_backup(result.path)  # hashes alone now agree
+    target = tmp_path / "restore"
+    with pytest.raises(BackupInvalid, match="sqlite"):
+        personal.restore_backup(result.path, target, live_storage=storage)
+    assert not target.exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
+
+
+# PRP-R8: a failure halfway through the restore publishes nothing.
+def test_prp_r8_restore_midway_failure_is_never_published(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    real_copy = personal._copy_bytes
+    calls = []
+
+    def failing(source, target):
+        calls.append(source)
+        if len(calls) == 2:
+            raise OSError("synthetic disk failure")
+        return real_copy(source, target)
+
+    monkeypatch.setattr(personal, "_copy_bytes", failing)
+    target = tmp_path / "restore"
+    with pytest.raises(OSError, match="synthetic disk failure"):
+        personal.restore_backup(result.path, target, live_storage=storage)
+    assert not target.exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
+
+
+# PRP-R9: every restored file is re-hashed against the manifest, and the
+# summary load must not change the tree before it is published.
+def test_prp_r9_restored_tree_equals_manifest_before_and_after_loading(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    manifest_files = [line.split("  ", 1)[1] for line in
+                      (result.path / "MANIFEST.sha256").read_text().splitlines() if line.strip()]
+    report = personal.restore_backup(result.path, tmp_path / "good", live_storage=storage)
+    storage_files = [name for name in manifest_files if name.startswith("storage/")]
+    assert report["files_verified"] == len(storage_files) == 6
+    for name in storage_files:
+        relative = name[len("storage/"):]
+        assert hashlib.sha256((tmp_path / "good" / relative).read_bytes()).hexdigest() == \
+            hashlib.sha256((result.path / name).read_bytes()).hexdigest()
+
+    real_summarize = personal.summarize
+
+    def summarize_with_side_effect(directory):
+        summary = real_summarize(directory)
+        (directory / "side-effect.json").write_text("{}")
+        return summary
+
+    monkeypatch.setattr(personal, "summarize", summarize_with_side_effect)
+    with pytest.raises(BackupInvalid, match="Unexpected restored files: side-effect.json"):
+        personal.restore_backup(result.path, tmp_path / "bad", live_storage=storage)
+    assert not (tmp_path / "bad").exists()
+    assert _no_restore_staging_left(tmp_path, "bad")
+
+
+# PRP-R10: a backup file changed between verify_backup and the copy is caught
+# by comparing the bytes read to the manifest digest.
+def test_prp_r10_restore_detects_source_changed_after_verification(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    real_verify = personal.verify_backup
+
+    def verify_then_tamper(backup):
+        metadata = real_verify(backup)
+        _flip_middle_byte(backup / "storage" / "chunk_bank.json")
+        return metadata
+
+    monkeypatch.setattr(personal, "verify_backup", verify_then_tamper)
+    with pytest.raises(BackupInvalid, match="Source changed or was corrupt while copying chunk_bank.json"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
