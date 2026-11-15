@@ -54,6 +54,44 @@ FORCED_RLS_BY_VERSION: dict[str, tuple[str, ...]] = {
     "0004": TABLES_BY_VERSION["0004"],
 }
 
+# The complete row-level-security policy set. Every forced-RLS table has
+# exactly one policy with this definition (as deparsed by PostgreSQL 16 in
+# pg_policies); preflight requires an exact match, and no other policy may
+# exist in the public schema. A test compares this to a clean apply.
+OWNER_POLICY_EXPRESSION = "((owner_user_id)::text = current_setting('app.current_owner'::text, true))"
+POLICY_NAMES: dict[str, str] = {
+    "cloud_study_items": "cloud_study_owner_policy",
+    "cloud_study_media_provenance": "cloud_study_media_owner_policy",
+    "cloud_ai_chunk_batches": "cloud_ai_batch_owner_policy",
+    "cloud_ai_chunk_candidates": "cloud_ai_candidate_owner_policy",
+    "cloud_ai_chunk_evidence": "cloud_ai_evidence_owner_policy",
+    "cloud_ai_chunk_generation_requests": "cloud_ai_request_owner_policy",
+    "cloud_ai_chunk_decisions": "cloud_ai_decision_owner_policy",
+    "cloud_ai_chunk_decision_keys": "cloud_ai_decision_key_owner_policy",
+    "cloud_topic_sessions": "cloud_topic_sessions_owner",
+    "cloud_topic_targets": "cloud_topic_targets_owner",
+    "cloud_topic_requests": "cloud_topic_requests_owner",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyDefinition:
+    table: str
+    name: str
+    permissive: str = "PERMISSIVE"
+    roles: tuple[str, ...] = ("public",)
+    command: str = "ALL"
+    using: str | None = OWNER_POLICY_EXPRESSION
+    with_check: str | None = OWNER_POLICY_EXPRESSION
+
+
+def expected_policies(versions: list[str]) -> dict[tuple[str, str], "PolicyDefinition"]:
+    return {
+        (table, POLICY_NAMES[table]): PolicyDefinition(table, POLICY_NAMES[table])
+        for table in sorted(forced_rls_tables(versions))
+    }
+
+
 # Columns and constraints added by versions that create no table; preflight
 # checks them so a half-applied or hand-edited schema is refused.
 COLUMNS_BY_VERSION: dict[str, tuple[tuple[str, str], ...]] = {

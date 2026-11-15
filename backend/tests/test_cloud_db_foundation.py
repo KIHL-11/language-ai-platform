@@ -31,6 +31,8 @@ PROVENANCE = '[{"source": "synthetic"}]'
 def _admin_dsn() -> str:
     value = os.getenv("TEST_POSTGRES_DSN")
     if not value:
+        if os.getenv("CLOUD_P1_REQUIRE_POSTGRES") == "1":
+            pytest.fail("CLOUD_P1_REQUIRE_POSTGRES=1 but TEST_POSTGRES_DSN is not set; refusing to skip")
         pytest.skip("TEST_POSTGRES_DSN is required for the Cloud database foundation tests")
     return value
 
@@ -308,14 +310,14 @@ NEGATIVE_CASES = {
     "predefined_role": (lambda db, r: db.execute(sql.SQL("GRANT pg_read_all_data TO {}").format(_ident(r))),
                         "runtime role is a member of other roles: pg_read_all_data"),
     "excess_truncate": (lambda db, r: db.execute(sql.SQL("GRANT TRUNCATE ON cloud_users TO {}").format(_ident(r))),
-                        "excess privilege TRUNCATE on cloud_users"),
+                        "excess table-level privilege TRUNCATE on cloud_users"),
     "excess_column_update": (
         lambda db, r: db.execute(sql.SQL("GRANT UPDATE (created_at) ON cloud_users TO {}").format(_ident(r))),
-        "excess privilege UPDATE on cloud_users"),
+        "excess column-level privilege UPDATE on cloud_users"),
     "excess_public_grant": (lambda db, r: db.execute("GRANT DELETE ON cloud_users TO PUBLIC"),
-                            "excess privilege DELETE on cloud_users"),
+                            "excess table-level privilege DELETE on cloud_users"),
     "missing_insert": (lambda db, r: db.execute(sql.SQL("REVOKE INSERT ON cloud_users FROM {}").format(_ident(r))),
-                       "missing privilege INSERT on cloud_users"),
+                       "missing table-level privilege INSERT on cloud_users"),
     "create_on_public": (lambda db, r: db.execute(sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(_ident(r))),
                          "runtime role can CREATE in schema public"),
     "create_on_database": (lambda db, r: db.execute(sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(_ident(db.dbname), _ident(r))),
@@ -532,3 +534,161 @@ def test_cli_end_to_end_never_prints_credentials(cloud_db):
     for output in (plan_out, good, bad):
         assert SYNTHETIC_PASSWORD not in output.stdout + output.stderr
         assert cloud_db.admin_dsn not in output.stdout + output.stderr
+
+
+# ----------------------------------------------------------------------------
+# Remediation batch 2 (independent review CHANGES_REQUIRED). Test IDs PRR-R*.
+# ----------------------------------------------------------------------------
+
+def _policies(db):
+    with psycopg.connect(db.admin_dsn) as connection:
+        return {
+            (row[0], row[1]): row[2:]
+            for row in connection.execute(
+                "SELECT tablename, policyname, permissive, roles::text[], cmd, qual, with_check"
+                " FROM pg_policies WHERE schemaname = 'public'")
+        }
+
+
+# PRR-R1: the pinned policy definitions equal what a clean apply produces.
+def test_prr_r1_clean_apply_matches_the_pinned_policy_definitions(cloud_db):
+    dsn = cloud_db.runtime()
+    present = _present_versions()
+    expected = schema.expected_policies(present)
+    live = _policies(cloud_db)
+    assert set(live) == set(expected)
+    for key, definition in expected.items():
+        assert live[key] == (definition.permissive, list(definition.roles), definition.command,
+                             definition.using, definition.with_check)
+    assert preflight.run_preflight(dsn).ok
+
+
+POLICY_DRIFT = {
+    "using_true": ("ALTER POLICY cloud_study_owner_policy ON cloud_study_items USING (true)",
+                   "policy cloud_study_owner_policy on cloud_study_items has USING 'true'"),
+    "with_check_true": ("ALTER POLICY cloud_study_owner_policy ON cloud_study_items WITH CHECK (true)",
+                        "policy cloud_study_owner_policy on cloud_study_items has WITH CHECK 'true'"),
+    "other_qualifier": ("ALTER POLICY cloud_topic_sessions_owner ON cloud_topic_sessions"
+                        " USING (owner_user_id IS NOT NULL)",
+                        "policy cloud_topic_sessions_owner on cloud_topic_sessions has USING"),
+    "restrictive": ("DROP POLICY cloud_ai_batch_owner_policy ON cloud_ai_chunk_batches;"
+                    " CREATE POLICY cloud_ai_batch_owner_policy ON cloud_ai_chunk_batches AS RESTRICTIVE"
+                    " USING (owner_user_id = current_setting('app.current_owner', true))"
+                    " WITH CHECK (owner_user_id = current_setting('app.current_owner', true))",
+                    "policy cloud_ai_batch_owner_policy on cloud_ai_chunk_batches has permissive 'RESTRICTIVE'"),
+    "command_select_only": ("DROP POLICY cloud_topic_targets_owner ON cloud_topic_targets;"
+                            " CREATE POLICY cloud_topic_targets_owner ON cloud_topic_targets FOR SELECT"
+                            " USING (owner_user_id = current_setting('app.current_owner', true))",
+                            "policy cloud_topic_targets_owner on cloud_topic_targets has command 'SELECT'"),
+    "roles_narrowed": ("ALTER POLICY cloud_study_media_owner_policy ON cloud_study_media_provenance TO {role}",
+                       "policy cloud_study_media_owner_policy on cloud_study_media_provenance has roles"),
+    "extra_permissive_true": ("CREATE POLICY lap_bypass ON cloud_study_items USING (true) WITH CHECK (true)",
+                              "unexpected policy lap_bypass on cloud_study_items"),
+    "extra_on_non_rls_table": ("CREATE POLICY lap_library ON cloud_library_items USING (true)",
+                               "unexpected policy lap_library on cloud_library_items"),
+    "dropped": ("DROP POLICY cloud_ai_request_owner_policy ON cloud_ai_chunk_generation_requests",
+                "missing policy cloud_ai_request_owner_policy on cloud_ai_chunk_generation_requests"),
+}
+
+
+# PRR-R2: any change to a policy definition, or any extra/missing policy, is refused.
+@pytest.mark.parametrize("case", sorted(POLICY_DRIFT))
+def test_prr_r2_policy_drift_is_refused(cloud_db, case):
+    dsn = cloud_db.runtime()
+    statement, expected = POLICY_DRIFT[case]
+    for part in statement.split(";"):
+        if "{role}" in part:
+            cloud_db.execute(sql.SQL(part.replace("{role}", "{}")).format(sql.Identifier(cloud_db.runtime_role)))
+        else:
+            cloud_db.execute(part)
+    report = preflight.run_preflight(dsn)
+    assert not report.ok
+    assert any(expected in failure for failure in report.failures), report.failures
+    with pytest.raises(preflight.CloudPreflightFailed):
+        preflight.require_preflight(dsn)
+
+
+# PRR-R2b: the drift is a real isolation break, not a cosmetic difference.
+def test_prr_r2b_using_true_lets_the_runtime_role_read_other_owners(cloud_db):
+    dsn = cloud_db.runtime()
+    cloud_db.execute("INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s), (%s, %s)",
+                     (OWNER_A, NOW, OWNER_B, NOW))
+    cloud_db.execute(
+        "INSERT INTO cloud_study_items (owner_user_id, item_id, kind, source_language, target_language,"
+        " text, normalized_text, provenance_json, created_at, updated_at, due_at)"
+        " VALUES (%s, %s, 'word', 'en', 'zh-CN', 'x', 'x', %s, %s, %s, %s)",
+        (OWNER_A, str(uuid.uuid4()), PROVENANCE, NOW, NOW, NOW))
+    cloud_db.execute("ALTER POLICY cloud_study_owner_policy ON cloud_study_items USING (true)")
+    with psycopg.connect(dsn) as connection:
+        connection.execute("SELECT set_config('app.current_owner', %s, true)", (OWNER_B,))
+        assert connection.execute("SELECT count(*) FROM cloud_study_items").fetchone()[0] == 1
+    assert not preflight.run_preflight(dsn).ok
+
+
+# PRR-R3: a column-level SELECT never stands in for the required table-level SELECT.
+@pytest.mark.parametrize("privilege, table, columns", [
+    ("SELECT", "cloud_users", "user_id"),
+    ("UPDATE", "cloud_study_items", "meaning"),
+    ("INSERT", "cloud_topic_requests", "owner_user_id"),
+])
+def test_prr_r3_column_level_grant_does_not_satisfy_a_table_level_requirement(
+        cloud_db, privilege, table, columns):
+    dsn = cloud_db.runtime()
+    role = sql.Identifier(cloud_db.runtime_role)
+    cloud_db.execute(sql.SQL("REVOKE {} ON {} FROM {}").format(sql.SQL(privilege), sql.Identifier(table), role))
+    cloud_db.execute(sql.SQL("GRANT {} ({}) ON {} TO {}").format(
+        sql.SQL(privilege), sql.Identifier(columns), sql.Identifier(table), role))
+    report = preflight.run_preflight(dsn)
+    assert (f"missing table-level privilege {privilege} on {table} (only column-level grants present)"
+            in report.failures), report.failures
+
+
+# PRR-R4: required and forbidden privileges are verified and reported separately.
+def test_prr_r4_missing_and_excess_privileges_are_reported_independently(cloud_db):
+    dsn = cloud_db.runtime()
+    role = sql.Identifier(cloud_db.runtime_role)
+    cloud_db.execute(sql.SQL("REVOKE DELETE ON cloud_library_items FROM {}").format(role))
+    cloud_db.execute(sql.SQL("GRANT DELETE ON cloud_users TO {}").format(role))
+    cloud_db.execute(sql.SQL("GRANT SELECT (owner_user_id) ON cloud_study_media_provenance TO {}").format(role))
+    failures = preflight.run_preflight(dsn).failures
+    assert "missing table-level privilege DELETE on cloud_library_items" in failures
+    assert "excess table-level privilege DELETE on cloud_users" in failures
+    assert "excess column-level privilege SELECT on cloud_study_media_provenance" in failures
+
+
+# PRR-R5: an empty ledger fails closed everywhere it is read.
+def test_prr_r5_empty_ledger_fails_closed(cloud_db):
+    dsn = cloud_db.runtime()
+    cloud_db.execute("DELETE FROM cloud_schema_migrations")
+    report = preflight.run_preflight(dsn)
+    assert not report.ok
+    assert "migration ledger: Migration ledger is empty" in report.failures
+    with pytest.raises(migrations.MigrationRefused, match="ledger is empty but the database holds tables"):
+        migrations.apply(cloud_db.admin_dsn)
+    with pytest.raises(migrations.MigrationRefused, match="ledger is empty but the database holds tables"):
+        migrations.plan(cloud_db.admin_dsn)
+    with pytest.raises(roles.RoleRefused, match="Migration ledger is empty"):
+        roles.grant_runtime(cloud_db.admin_dsn, cloud_db.runtime_role)
+
+
+# PRR-R6: an empty ledger with no other tables (first version failed) can resume.
+def test_prr_r6_empty_ledger_without_tables_resumes_safely(cloud_db, tmp_path):
+    import hashlib
+    directory = tmp_path / "m"
+    directory.mkdir()
+    broken = b"BEGIN;\nSELECT 1 / 0;\nCOMMIT;\n"
+    (directory / "0001_broken.up.sql").write_bytes(broken)
+    (directory / schema.MANIFEST_NAME).write_text(f"{hashlib.sha256(broken).hexdigest()}  0001_broken.up.sql\n")
+    with pytest.raises(psycopg.errors.DivisionByZero):
+        migrations.apply(cloud_db.admin_dsn, directory=directory)
+    assert cloud_db.tables() == {"cloud_schema_migrations"}
+    assert cloud_db.scalar("SELECT count(*) FROM cloud_schema_migrations") == 0
+    assert migrations.apply(cloud_db.admin_dsn) == _present_versions()
+
+
+# PRR-R7: schema USAGE is a required privilege too.
+def test_prr_r7_missing_schema_usage_is_refused(cloud_db):
+    dsn = cloud_db.runtime()
+    cloud_db.execute(sql.SQL("REVOKE USAGE ON SCHEMA public FROM {}").format(sql.Identifier(cloud_db.runtime_role)))
+    cloud_db.execute("REVOKE USAGE ON SCHEMA public FROM PUBLIC")
+    assert "missing USAGE on schema public" in preflight.run_preflight(dsn).failures

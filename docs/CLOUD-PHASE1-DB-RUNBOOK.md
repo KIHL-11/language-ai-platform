@@ -36,10 +36,13 @@ Preflight 会拒绝下面任何一种情况：
 | 拥有表（表的所有者可以关闭 RLS）、拥有 schema、拥有数据库 | `pg_class`、`pg_namespace`、`pg_database` |
 | 通过成员关系继承权限（包括 `SET ROLE` 和 `pg_read_all_data` 这类预定义角色） | `pg_auth_members` 中**不能有任何**成员关系；同时要求 `current_user` 等于 `session_user` |
 | 可以在 public schema 或数据库中 CREATE | `has_schema_privilege`、`has_database_privilege` |
-| 权限过多或缺少（包括列级权限和授予 PUBLIC 的权限） | 对每张表的每种权限，比较 `has_any_column_privilege` 或 `has_table_privilege` 与权限表，**必须完全相等** |
+| 缺少必需权限 | 每项必需权限都必须是**表级**授权（`has_table_privilege`）。只授予部分列的权限（例如单列 SELECT）**不能**满足表级要求 |
+| 多出禁止的权限（包括列级授权和授予 PUBLIC 的授权） | 不在权限表中的任何权限，无论是表级授权（`has_table_privilege`）还是任意一列上的授权（`has_any_column_privilege`），都算作越权 |
+| 缺少 schema 的 USAGE 权限 | `has_schema_privilege(..., 'USAGE')` |
+| RLS policy 漂移 | `pg_policies` 中 public schema 的 policy 集合，必须**完全等于**固定的定义。每张强制 RLS 的表只能有一个 policy，并且要求：PERMISSIVE；roles 为 `{public}`；命令为 ALL；USING 和 WITH CHECK 都是 owner 条件。下面任何一种情况都会被拒绝：`USING (true)` 或 `WITH CHECK (true)`、其他条件表达式、RESTRICTIVE、只对 SELECT 生效、roles 被改动、多出 policy（包括在没有开启 RLS 的表上）、缺少 policy |
 | 多出了表、视图、序列或 schema（例如 0010 建立的对象） | 当前的表集合必须**等于**已执行版本建立的表集合，再加上版本记录表 |
 | RLS 被关闭，或者没有 FORCE | `relrowsecurity` 和 `relforcerowsecurity` |
-| 版本记录被篡改 | 版本记录必须是清单的连续前缀，并且 SHA-256 一致 |
+| 版本记录被篡改，或者为空 | 版本记录必须是清单的连续前缀，并且 SHA-256 一致。记录为空时，preflight 和授权都会失败关闭。执行器只在数据库中除了版本记录表之外没有任何表时才继续执行（例如第一个版本执行失败之后），否则拒绝 |
 
 ## 4. 操作步骤
 

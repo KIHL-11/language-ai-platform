@@ -153,6 +153,8 @@ def plan(dsn: str, *, target: str | None = None, directory: Path = MIGRATIONS_DI
                 raise MigrationRefused("Database holds tables but no migration ledger")
             applied: list[str] = []
         else:
+            if rows == [] and _public_tables(connection) - {LEDGER_TABLE}:
+                raise MigrationRefused("Migration ledger is empty but the database holds tables")
             applied = _check_ledger(manifest, rows)
     return _build_plan(manifest, applied, resolved)
 
@@ -170,6 +172,8 @@ def apply(dsn: str, *, target: str | None = None, directory: Path = MIGRATIONS_D
             rows = _ledger_rows(connection)
             if rows is None and _public_tables(connection):
                 raise MigrationRefused("Database holds tables but no migration ledger")
+            if rows == [] and _public_tables(connection) - {LEDGER_TABLE}:
+                raise MigrationRefused("Migration ledger is empty but the database holds tables")
             applied = _check_ledger(manifest, rows or [])
             # Validate every pending file before the first write, including the ledger.
             migration_plan = _build_plan(manifest, applied, resolved)
@@ -195,10 +199,16 @@ def apply(dsn: str, *, target: str | None = None, directory: Path = MIGRATIONS_D
 
 
 def applied_versions(connection, directory: Path = MIGRATIONS_DIR) -> list[str]:
-    """Versions recorded in the ledger, validated against the pinned manifest."""
+    """Versions recorded in the ledger, validated against the pinned manifest.
+
+    Fails closed: a missing or empty ledger is refused, never read as "nothing
+    to check".
+    """
     rows = _ledger_rows(connection)
     if rows is None:
         raise MigrationRefused("No migration ledger")
+    if not rows:
+        raise MigrationRefused("Migration ledger is empty")
     try:
         manifest = load_manifest(directory)
     except SchemaDefinitionError as exc:

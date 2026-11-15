@@ -22,6 +22,7 @@ from services.cloud.schema import (
     MIGRATIONS_DIR,
     RUNTIME_GRANTS,
     TABLE_PRIVILEGES,
+    expected_policies,
     expected_tables,
     forced_rls_tables,
 )
@@ -93,6 +94,10 @@ def _role_checks(connection) -> tuple[str, list[str]]:
     ).fetchone()[0]
     if owns_db:
         failures.append("runtime role owns the database")
+    if not connection.execute(
+        "SELECT has_schema_privilege(current_user, 'public', 'USAGE')"
+    ).fetchone()[0]:
+        failures.append("missing USAGE on schema public")
     if connection.execute(
         "SELECT has_schema_privilege(current_user, 'public', 'CREATE')"
     ).fetchone()[0]:
@@ -157,21 +162,66 @@ def _schema_checks(connection, versions: list[str]) -> list[str]:
     return failures
 
 
+def _policy_checks(connection, versions: list[str]) -> list[str]:
+    """Exact RLS policy set: name, PERMISSIVE/RESTRICTIVE, roles, command, USING, WITH CHECK."""
+    failures: list[str] = []
+    expected = expected_policies(versions)
+    live = {
+        (row[0], row[1]): row[2:]
+        for row in connection.execute(
+            "SELECT tablename, policyname, permissive, roles::text[], cmd, qual, with_check"
+            " FROM pg_policies WHERE schemaname = 'public' ORDER BY 1, 2"
+        )
+    }
+    for key in sorted(set(live) - set(expected)):
+        failures.append(f"unexpected policy {key[1]} on {key[0]}")
+    for key, definition in sorted(expected.items()):
+        if key not in live:
+            failures.append(f"missing policy {key[1]} on {key[0]}")
+            continue
+        permissive, roles, command, using, with_check = live[key]
+        for field, actual, wanted in (
+            ("permissive", permissive, definition.permissive),
+            ("roles", tuple(roles or ()), definition.roles),
+            ("command", command, definition.command),
+            ("USING", using, definition.using),
+            ("WITH CHECK", with_check, definition.with_check),
+        ):
+            if actual != wanted:
+                failures.append(f"policy {key[1]} on {key[0]} has {field} {actual!r}, expected {wanted!r}")
+    return failures
+
+
 def _privilege_checks(connection, versions: list[str]) -> list[str]:
+    """Required and forbidden privileges are checked separately.
+
+    Required: each privilege in RUNTIME_GRANTS must be held at TABLE level
+    (has_table_privilege); a grant on some columns does not satisfy it.
+    Forbidden: any other privilege, at table level or on any single column,
+    held directly or through PUBLIC, is excess.
+    """
     failures: list[str] = []
     for table in sorted(expected_tables(versions)):
         if connection.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None:
             continue  # reported by the schema check
+        relation = f"public.{table}"
         wanted = RUNTIME_GRANTS.get(table, frozenset())
         for privilege in TABLE_PRIVILEGES:
-            function = "has_any_column_privilege" if privilege in COLUMN_CAPABLE else "has_table_privilege"
-            held = connection.execute(
-                f"SELECT {function}(current_user, %s, %s)", (f"public.{table}", privilege)
+            table_level = connection.execute(
+                "SELECT has_table_privilege(current_user, %s, %s)", (relation, privilege)
             ).fetchone()[0]
-            if held and privilege not in wanted:
-                failures.append(f"excess privilege {privilege} on {table}")
-            elif not held and privilege in wanted:
-                failures.append(f"missing privilege {privilege} on {table}")
+            any_level = table_level
+            if privilege in COLUMN_CAPABLE:
+                any_level = connection.execute(
+                    "SELECT has_any_column_privilege(current_user, %s, %s)", (relation, privilege)
+                ).fetchone()[0]
+            if privilege in wanted:
+                if not table_level:
+                    detail = " (only column-level grants present)" if any_level else ""
+                    failures.append(f"missing table-level privilege {privilege} on {table}{detail}")
+            elif any_level:
+                scope = "table-level" if table_level else "column-level"
+                failures.append(f"excess {scope} privilege {privilege} on {table}")
     return failures
 
 
@@ -199,6 +249,7 @@ def run_preflight(
                 failures.append(f"schema is at {versions[-1]}, at least {minimum_version} is required")
             if versions:
                 failures.extend(_schema_checks(connection, versions))
+                failures.extend(_policy_checks(connection, versions))
                 failures.extend(_privilege_checks(connection, versions))
     except psycopg.OperationalError:
         return PreflightReport(role="", versions=[], server_version_num=0,
