@@ -174,7 +174,7 @@ def test_valid_runtime_role_wires_all_four_sharing_one_study_bank(cloud_db, medi
 
 @pytest.mark.parametrize("mutation, reason", [
     ("ALTER ROLE {role} BYPASSRLS", "runtime role has BYPASSRLS"),
-    ("GRANT TRUNCATE ON cloud_users TO {role}", "excess privilege TRUNCATE on cloud_users"),
+    ("GRANT TRUNCATE ON cloud_users TO {role}", "excess table-level privilege TRUNCATE on cloud_users"),
     ("CREATE TABLE cloud_media_generations (id UUID)", "unexpected tables: cloud_media_generations"),
 ])
 def test_preflight_failure_wires_nothing(cloud_db, media_root, mutation, reason):
