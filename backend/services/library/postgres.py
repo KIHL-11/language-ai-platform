@@ -285,8 +285,6 @@ class PostgresOwnerScopedLibraryRepository:
     def delete_for_owner(self, owner_user_id: str, item_id: str) -> None:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
-        object_keys: list[str] = []
-        cleanup_ids: dict[str, str] = {}
         try:
             with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
@@ -302,28 +300,9 @@ class PostgresOwnerScopedLibraryRepository:
                     ).fetchall()
                 ]
                 for object_key in object_keys:
-                    cleanup_id = str(uuid.uuid4())
-                    cleanup = connection.execute(
-                        """
-                        INSERT INTO cloud_media_cleanup_outbox (
-                            cleanup_id, owner_user_id, library_item_id,
-                            object_key, status, attempt_count, created_at,
-                            updated_at
-                        ) VALUES (%s, %s, %s, %s, 'pending', 0, %s, %s)
-                        ON CONFLICT (object_key) DO UPDATE SET
-                            updated_at = EXCLUDED.updated_at
-                        RETURNING cleanup_id
-                        """,
-                        (
-                            cleanup_id,
-                            owner_user_id,
-                            item_id,
-                            object_key,
-                            self._now(),
-                            self._now(),
-                        ),
-                    ).fetchone()
-                    cleanup_ids[object_key] = str(cleanup["cleanup_id"])
+                    self._queue_object_cleanup(
+                        connection, owner_user_id, item_id, object_key
+                    )
                 deleted = connection.execute(
                     """
                     DELETE FROM cloud_library_items
@@ -338,16 +317,11 @@ class PostgresOwnerScopedLibraryRepository:
             raise
         except psycopg.Error as exc:
             raise CloudLibraryUnavailableError("Cloud Library is unavailable") from exc
-        # Metadata is already inaccessible. The transaction retained a durable
-        # cleanup record before deleting it, so object-store failures are
-        # recoverable without keeping the Library item visible.
-        for object_key in object_keys:
-            try:
-                self.media_objects.delete(object_key, owner_user_id, item_id)
-            except LibraryStoreError:
-                self._record_cleanup_failure(owner_user_id, cleanup_ids[object_key])
-            else:
-                self._complete_cleanup(owner_user_id, cleanup_ids[object_key])
+        # Metadata is now inaccessible and every retired object has a durable
+        # 'pending' cleanup row committed in the same transaction. The request
+        # path deliberately does not unlink the bytes: physical removal is left
+        # to a separately approved cleanup procedure (the B1 worker is frozen),
+        # so the pending row stays as the audit record until then.
 
     def audio_for_owner(self, owner_user_id: str, item_id: str) -> OwnerScopedAudio:
         self._validate_owner(owner_user_id)
@@ -414,6 +388,12 @@ class PostgresOwnerScopedLibraryRepository:
                     (owner_user_id, item_id),
                 ).fetchone()
                 previous_key = previous["object_key"] if previous else None
+                if previous_key and previous_key != object_key:
+                    # Retire the replaced object through the outbox in the same
+                    # transaction instead of unlinking it after commit.
+                    self._queue_object_cleanup(
+                        connection, owner_user_id, item_id, previous_key
+                    )
                 connection.execute(
                     """
                     INSERT INTO cloud_library_media_assets (
@@ -448,13 +428,11 @@ class PostgresOwnerScopedLibraryRepository:
                     ),
                 )
         except Exception:
+            # Compensation only: object_key is the fresh, uniquely named object
+            # this call wrote, and the transaction that would have referenced it
+            # rolled back, so no metadata, owner or outbox row points at it.
             self.media_objects.delete(object_key, owner_user_id, item_id)
             raise
-        if previous_key and previous_key != object_key:
-            try:
-                self.media_objects.delete(previous_key, owner_user_id, item_id)
-            except LibraryStoreError:
-                pass
         return self.get_for_owner(owner_user_id, item_id)
 
     @staticmethod
@@ -539,34 +517,29 @@ class PostgresOwnerScopedLibraryRepository:
             )
             yield connection
 
-    def _record_cleanup_failure(self, owner_user_id: str, cleanup_id: str) -> None:
-        try:
-            with self._owner_transaction(owner_user_id) as connection:
-                connection.execute(
-                    """
-                    UPDATE cloud_media_cleanup_outbox
-                    SET attempt_count = attempt_count + 1, updated_at = %s
-                    WHERE owner_user_id = %s AND cleanup_id = %s
-                    """,
-                    (self._now(), owner_user_id, cleanup_id),
-                )
-        except psycopg.Error:
-            # The original outbox row was committed with the Library deletion.
-            # Losing this best-effort counter update cannot erase that evidence.
-            return
-
-    def _complete_cleanup(self, owner_user_id: str, cleanup_id: str) -> None:
-        try:
-            with self._owner_transaction(owner_user_id) as connection:
-                connection.execute(
-                    "DELETE FROM cloud_media_cleanup_outbox"
-                    " WHERE owner_user_id = %s AND cleanup_id = %s",
-                    (owner_user_id, cleanup_id),
-                )
-        except psycopg.Error:
-            # A stale pending row is safe and retryable; never recreate access
-            # metadata merely because acknowledgement failed.
-            return
+    def _queue_object_cleanup(
+        self, connection, owner_user_id: str, item_id: str, object_key: str
+    ) -> None:
+        """Record a retired object as 'pending' inside the caller's transaction."""
+        connection.execute(
+            """
+            INSERT INTO cloud_media_cleanup_outbox (
+                cleanup_id, owner_user_id, library_item_id,
+                object_key, status, attempt_count, created_at,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, 'pending', 0, %s, %s)
+            ON CONFLICT (object_key) DO UPDATE SET
+                updated_at = EXCLUDED.updated_at
+            """,
+            (
+                str(uuid.uuid4()),
+                owner_user_id,
+                item_id,
+                object_key,
+                self._now(),
+                self._now(),
+            ),
+        )
 
     @staticmethod
     def _assert_owner_provisioned(connection, owner_user_id: str) -> None:
