@@ -80,16 +80,29 @@ class AtomicPublishUnsupported(BackupRefused):
 
 
 _RENAME_NOREPLACE = 1      # Linux renameat2 flag
-_RENAME_EXCL = 0x00000004  # macOS renamex_np flag
-_AT_FDCWD = -100
+_RENAME_EXCL = 0x00000004  # macOS renamex_np / renameatx_np flag
+_AT_FDCWD_LINUX = -100
+_AT_FDCWD_DARWIN = -2
+
+
+def _at_fdcwd() -> int:
+    import sys
+
+    return _AT_FDCWD_DARWIN if sys.platform == "darwin" else _AT_FDCWD_LINUX
 
 
 def _rename_noreplace(source: Path, target: Path) -> None:
-    """Atomically rename ``source`` to ``target``; never replace an existing target.
+    """Atomically rename ``source`` to ``target``; never replace an existing target."""
+    _rename_noreplace_at(None, source, None, target)
+
+
+def _rename_noreplace_at(src_dir_fd: int | None, source, dst_dir_fd: int | None, target) -> None:
+    """Atomic no-replace rename, optionally relative to directory descriptors.
 
     A plain ``os.rename`` silently replaces an existing empty directory, and an
     ``exists()`` check before it is a race. Only kernel-level no-replace renames
-    are used; anything else fails closed.
+    are used (Linux ``renameat2(RENAME_NOREPLACE)``, macOS
+    ``renameatx_np(RENAME_EXCL)``); anything else fails closed.
     """
     import ctypes
     import errno
@@ -100,10 +113,13 @@ def _rename_noreplace(source: Path, target: Path) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
     except OSError as exc:
         raise AtomicPublishUnsupported("Cannot load libc for an atomic no-replace rename") from exc
+    cwd = _at_fdcwd()
+    from_fd = cwd if src_dir_fd is None else src_dir_fd
+    to_fd = cwd if dst_dir_fd is None else dst_dir_fd
     if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
-        result = libc.renameat2(_AT_FDCWD, src, _AT_FDCWD, dst, _RENAME_NOREPLACE)
-    elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
-        result = libc.renamex_np(src, dst, _RENAME_EXCL)
+        result = libc.renameat2(from_fd, src, to_fd, dst, _RENAME_NOREPLACE)
+    elif sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        result = libc.renameatx_np(from_fd, src, to_fd, dst, _RENAME_EXCL)
     else:
         raise AtomicPublishUnsupported(
             f"No atomic no-replace rename on {sys.platform}; refusing to publish")
@@ -111,7 +127,7 @@ def _rename_noreplace(source: Path, target: Path) -> None:
         return
     code = ctypes.get_errno()
     if code in (errno.EEXIST, errno.ENOTEMPTY):
-        raise BackupRefused(f"{target.name} already exists; refusing to overwrite")
+        raise BackupRefused(f"{os.path.basename(str(target))} already exists; refusing to overwrite")
     if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)):
         raise AtomicPublishUnsupported(
             f"The filesystem does not support atomic no-replace rename (errno {code})")
@@ -517,38 +533,323 @@ def verify_backup(backup: Path) -> dict:
     return _verify_backup_trusted(backup).metadata
 
 
-def _verify_tree_against_manifest(root: Path, expected: dict[str, str]) -> None:
-    """``expected`` maps paths relative to ``root`` to SHA-256; sets must be equal."""
-    actual = {}
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise BackupInvalid("Restored tree contains a symbolic link")
-        if path.is_file():
-            actual[path.relative_to(root).as_posix()] = _sha256(path)
-    missing, extra = sorted(set(expected) - set(actual)), sorted(set(actual) - set(expected))
-    if missing:
-        raise BackupInvalid("Restored files missing: " + ", ".join(missing))
-    if extra:
-        raise BackupInvalid("Unexpected restored files: " + ", ".join(extra))
-    for relative, digest in sorted(expected.items()):
-        if actual[relative] != digest:
-            raise BackupInvalid(f"Restored file does not match the manifest: {relative}")
+class ContainmentUnsupported(BackupRefused):
+    """This platform cannot do descriptor-relative restore writes; nothing was written."""
+
+
+class ContainmentViolation(BackupInvalid):
+    """The staging tree was moved, replaced or changed by someone else during the restore."""
+
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+def _dir_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC
+
+
+def _require_descriptor_ops() -> None:
+    """Fail closed unless every directory-descriptor-relative primitive exists."""
+    needed_dir_fd = (os.open, os.mkdir, os.unlink, os.rmdir, os.stat)
+    if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+            or not all(function in os.supports_dir_fd for function in needed_dir_fd)
+            or os.stat not in os.supports_follow_symlinks
+            or os.listdir not in os.supports_fd):
+        raise ContainmentUnsupported(
+            "This platform lacks directory-descriptor-relative file operations; refusing to restore")
+
+
+def _ident(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _create_file_at(dir_fd: int, name: str) -> int:
+    """Create a new file in an already-open directory; never follows or reuses a name."""
+    return os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600,
+                   dir_fd=dir_fd)
+
+
+def _copy_into(source_fd: int, target_fd: int) -> str:
+    """Stream source to target through descriptors; returns the SHA-256 of the bytes read."""
+    digest = hashlib.sha256()
+    while True:
+        block = os.read(source_fd, CHUNK)
+        if not block:
+            break
+        digest.update(block)
+        view = memoryview(block)
+        while view:
+            view = view[os.write(target_fd, view):]
+    return digest.hexdigest()
+
+
+def _hash_fd(fd: int) -> str:
+    """SHA-256 of an open file from offset 0, without reopening it by name."""
+    digest, offset = hashlib.sha256(), 0
+    while True:
+        block = os.pread(fd, CHUNK, offset)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+        offset += len(block)
+
+
+class _SourceTree:
+    """Read-only access to a verified backup's ``storage/`` through directory descriptors."""
+
+    def __init__(self, root: Path):
+        self.fds: dict[tuple[str, ...], int] = {}
+        top = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
+        try:
+            self.fds[()] = os.open("storage", _dir_flags(), dir_fd=top)
+        finally:
+            os.close(top)
+
+    def open_file(self, parts: tuple[str, ...]) -> int:
+        for depth in range(1, len(parts)):
+            key = parts[:depth]
+            if key not in self.fds:
+                try:
+                    self.fds[key] = os.open(key[-1], _dir_flags(), dir_fd=self.fds[key[:-1]])
+                except OSError as exc:
+                    raise BackupInvalid(f"Backup contains a symbolic link or bad directory: {'/'.join(key)}") from exc
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=self.fds[parts[:-1]])
+        except OSError as exc:
+            raise BackupInvalid(f"Backup contains a symbolic link or missing file: {'/'.join(parts)}") from exc
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise BackupInvalid(f"Not a regular file in backup: {'/'.join(parts)}")
+        return fd
+
+    def close(self) -> None:
+        for fd in self.fds.values():
+            os.close(fd)
+        self.fds.clear()
+
+
+class _StagingTree:
+    """Private restore staging tree, addressed only through directory descriptors.
+
+    Every directory is opened with O_DIRECTORY|O_NOFOLLOW relative to its
+    already-open parent, and every file is created with O_CREAT|O_EXCL|
+    O_NOFOLLOW relative to its already-open directory, so a symlink or a
+    replaced *name* can never redirect a write. O_NOFOLLOW does NOT stop a
+    same-UID process from renaming an already-open directory elsewhere; that
+    relocation is detected by re-checking the inode chain from the parent
+    descriptor down to the directory before and after every create and again
+    before publication, and it fails closed. Cleanup removes only inodes this
+    run created. See docs/PERSONAL-BACKUP.md for the threat model and the
+    remaining same-UID limitation.
+    """
+
+    def __init__(self, parent: Path, prefix: str):
+        import secrets
+
+        self.parent = parent
+        self.parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
+        self.name = prefix + secrets.token_hex(8)
+        # key -> (parent key or None for the root, name, fd, (dev, ino))
+        self.dirs: dict[tuple[str, ...], tuple] = {}
+        # key -> (directory key, name, (dev, ino))
+        self.files: dict[tuple[str, ...], tuple] = {}
+        self.created_root = False
+        self.published = False
+
+    @property
+    def path(self) -> Path:
+        return self.parent / self.name
+
+    def open_root(self) -> None:
+        os.mkdir(self.name, 0o700, dir_fd=self.parent_fd)
+        self.created_root = True
+        fd = self._open_dir(self.parent_fd, self.name, ())
+        info = os.fstat(fd)
+        self.dirs[()] = (None, self.name, fd, _ident(info))
+        if os.listdir(fd) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ContainmentViolation("The staging directory was replaced before use")
+        self.check_chain(())
+
+    @staticmethod
+    def _open_dir(parent_fd: int, name: str, key: tuple[str, ...]) -> int:
+        try:
+            return os.open(name, _dir_flags(), dir_fd=parent_fd)
+        except OSError as exc:  # ELOOP / ENOTDIR: a symlink or non-directory was swapped in
+            raise ContainmentViolation(
+                f"Staging directory {'/'.join(key) or '.'} is a symbolic link or was replaced") from exc
+
+    def _parent_fd_of(self, key: tuple[str, ...]) -> int:
+        parent_key = self.dirs[key][0]
+        return self.parent_fd if parent_key is None else self.dirs[parent_key][2]
+
+    def _check_link(self, key: tuple[str, ...]) -> None:
+        _, name, fd, ident = self.dirs[key]
+        try:
+            info = os.stat(name, dir_fd=self._parent_fd_of(key), follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is None or not stat.S_ISDIR(info.st_mode) or _ident(info) != ident or _ident(os.fstat(fd)) != ident:
+            raise ContainmentViolation(
+                f"Staging directory {'/'.join(key) or '.'} was moved or replaced during the restore")
+
+    def check_chain(self, key: tuple[str, ...]) -> None:
+        """Every directory from the staging root down to ``key`` is still where we put it."""
+        for depth in range(len(key) + 1):
+            self._check_link(key[:depth])
+
+    def ensure_dir(self, parts: tuple[str, ...]) -> tuple[str, ...]:
+        for depth in range(1, len(parts) + 1):
+            key = parts[:depth]
+            if key in self.dirs:
+                continue
+            parent_fd = self.dirs[key[:-1]][2]
+            self.check_chain(key[:-1])
+            try:
+                os.mkdir(key[-1], 0o700, dir_fd=parent_fd)
+            except FileExistsError as exc:
+                raise ContainmentViolation(f"Unexpected entry in the staging directory: {'/'.join(key)}") from exc
+            fd = self._open_dir(parent_fd, key[-1], key)
+            self.dirs[key] = (key[:-1], key[-1], fd, _ident(os.fstat(fd)))
+            if os.listdir(fd):
+                raise ContainmentViolation(f"Staging directory {'/'.join(key)} was replaced before use")
+            self.check_chain(key)
+        return parts
+
+    def _check_file(self, key: tuple[str, ...]) -> None:
+        dir_key, name, ident = self.files[key]
+        try:
+            info = os.stat(name, dir_fd=self.dirs[dir_key][2], follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is None or not stat.S_ISREG(info.st_mode) or _ident(info) != ident:
+            raise ContainmentViolation(f"Restored file {'/'.join(key)} was moved or replaced")
+
+    def create_file(self, dir_key: tuple[str, ...], name: str) -> int:
+        self.check_chain(dir_key)
+        fd = _create_file_at(self.dirs[dir_key][2], name)
+        key = dir_key + (name,)
+        self.files[key] = (dir_key, name, _ident(os.fstat(fd)))
+        try:
+            self.check_chain(dir_key)  # was the directory relocated just before the create?
+            self._check_file(key)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def verify(self, expected: dict[str, str]) -> None:
+        """The tree reachable from the staging root is exactly our files, with the manifest digests."""
+        for key in self.dirs:
+            self.check_chain(key)
+        extra: list[str] = []
+
+        def walk(key: tuple[str, ...]) -> None:
+            fd = self.dirs[key][2]
+            for name in sorted(os.listdir(fd)):
+                child = key + (name,)
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise BackupInvalid("Restored tree contains a symbolic link")
+                if stat.S_ISDIR(info.st_mode) and child in self.dirs and self.dirs[child][3] == _ident(info):
+                    walk(child)
+                elif stat.S_ISREG(info.st_mode) and child in self.files and self.files[child][2] == _ident(info):
+                    continue
+                else:
+                    extra.append("/".join(child))
+
+        walk(())
+        if extra:
+            raise BackupInvalid("Unexpected restored files: " + ", ".join(sorted(extra)))
+        missing = sorted(r for r in expected if tuple(r.split("/")) not in self.files)
+        if missing:
+            raise BackupInvalid("Restored files missing: " + ", ".join(missing))
+        for relative, digest in sorted(expected.items()):
+            key = tuple(relative.split("/"))
+            self._check_file(key)
+            dir_key, name, ident = self.files[key]
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=self.dirs[dir_key][2])
+            try:
+                if _ident(os.fstat(fd)) != ident:
+                    raise ContainmentViolation(f"Restored file {relative} was replaced")
+                if _hash_fd(fd) != digest:
+                    raise BackupInvalid(f"Restored file does not match the manifest: {relative}")
+            finally:
+                os.close(fd)
+
+    def fsync_dirs(self) -> None:
+        for _, _, fd, _ in self.dirs.values():
+            os.fsync(fd)
+
+    def publish(self, target_name: str) -> None:
+        import secrets
+
+        self.check_chain(())
+        _rename_noreplace_at(self.parent_fd, self.name, self.parent_fd, target_name)
+        info = os.stat(target_name, dir_fd=self.parent_fd, follow_symlinks=False)
+        if _ident(info) != self.dirs[()][3]:
+            # The staging name was swapped between the check and the rename, so
+            # what was renamed is not our tree. Take it down again and fail.
+            quarantine = f".{target_name}.rejected-{secrets.token_hex(4)}"
+            try:
+                _rename_noreplace_at(self.parent_fd, target_name, self.parent_fd, quarantine)
+                where = f"moved aside to {quarantine}"
+            except OSError:
+                where = "could not be moved aside"
+            raise ContainmentViolation(
+                f"The staging directory was replaced at publication; the published directory {where}")
+        self.name = target_name
+        self.published = True
+        os.fsync(self.parent_fd)
+
+    def cleanup(self) -> list[str]:
+        """Remove only the inodes this run created; report anything left behind."""
+        left: list[str] = []
+        for key in sorted(self.files, key=len, reverse=True):
+            dir_key, name, ident = self.files[key]
+            try:
+                fd = self.dirs[dir_key][2]
+                if _ident(os.stat(name, dir_fd=fd, follow_symlinks=False)) == ident:
+                    os.unlink(name, dir_fd=fd)
+            except OSError:
+                left.append("/".join(key))
+        for key in sorted(self.dirs, key=len, reverse=True):
+            _, name, _, ident = self.dirs[key]
+            label = "/".join(key) or self.name
+            try:
+                parent_fd = self._parent_fd_of(key)
+                if _ident(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) == ident:
+                    os.rmdir(name, dir_fd=parent_fd)
+                else:
+                    left.append(f"{label} (moved away by another process)")
+            except FileNotFoundError:
+                left.append(f"{label} (moved away by another process)")
+            except OSError:
+                left.append(label)
+        if () not in self.dirs and self.created_root:
+            left.append(f"{self.name} (created but never opened)")
+        return left
+
+    def close(self) -> None:
+        for _, _, fd, _ in self.dirs.values():
+            os.close(fd)
+        self.dirs.clear()
+        os.close(self.parent_fd)
 
 
 def restore_backup(backup: Path, target: Path, *, live_storage: Path | None = None) -> dict:
     """Restore into a new directory, publishing it only if every check passes.
 
-    The data is copied into a private staging directory next to ``target``.
-    Every restored file is re-hashed and must equal the backup MANIFEST (same
-    file set, same SHA-256), the datasets must reload through the app's stores
-    with the backup-time summary (records, SRS state, SQLite integrity and
-    logical digest), and the files are re-hashed once more afterwards. Only
-    then is the staging directory renamed to ``target``. On any error the
-    staging directory is removed and ``target`` is never created. Never writes
-    into ``live_storage`` (default: the app's storage directory).
+    The data is copied into a private (0700) staging directory next to
+    ``target``, using only directory-descriptor-relative operations. Every
+    restored file is hashed through its own descriptor and the tree reachable
+    from the staging root must equal the backup MANIFEST (same file set, same
+    SHA-256), the datasets must reload through the app's stores with the
+    backup-time summary (records, SRS state, SQLite integrity and logical
+    digest), and the tree is verified once more afterwards. Only then is the
+    staging directory renamed to ``target`` with an atomic no-replace rename.
+    On any error only the files and directories this run created are removed
+    and ``target`` is never published. Never writes into ``live_storage``.
     """
-    import tempfile
-
     backup, target = Path(backup), Path(target)
     live = Path(live_storage) if live_storage is not None else default_storage_dir()
     if target.exists():
@@ -557,35 +858,53 @@ def restore_backup(backup: Path, target: Path, *, live_storage: Path | None = No
         raise BackupRefused("Restore target must be outside the live storage directory")
     if _is_inside(target, backup):
         raise BackupRefused("Restore target must be outside the backup")
+    _require_descriptor_ops()
     verified = _verify_backup_trusted(backup)
     metadata = verified.metadata
     prefix = "storage/"
     # Only the entries from the single verified read are used from here on.
     expected = {k[len(prefix):]: v for k, v in verified.entries.items() if k.startswith(prefix)}
     target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-staging-", dir=target.parent))
-    staging_real = staging.resolve(strict=True)
+    tree = _StagingTree(target.parent, f".{target.name}.restore-staging-")
+    source: _SourceTree | None = None
     try:
-        source_root = verified.root / "storage"
+        tree.open_root()
+        source = _SourceTree(verified.root)
         for relative, digest in sorted(expected.items()):
             parts = tuple(relative.split("/"))
-            source = _no_symlink_components(source_root, parts)
-            destination = staging_real.joinpath(*parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if not _is_inside(destination.parent, staging_real) or destination.parent.is_symlink():
-                raise BackupInvalid(f"Restore write would leave the staging directory: {relative}")
-            _copy_file_verified(source, destination, expected=digest)
-        _verify_tree_against_manifest(staging_real, expected)
-        restored = summarize(staging_real)
+            dir_key = tree.ensure_dir(parts[:-1])
+            source_fd = source.open_file(parts)
+            try:
+                target_fd = tree.create_file(dir_key, parts[-1])
+                try:
+                    if _copy_into(source_fd, target_fd) != digest:
+                        raise BackupInvalid(f"Source changed or was corrupt while copying {parts[-1]}")
+                    os.fsync(target_fd)
+                    if _hash_fd(target_fd) != digest:
+                        raise BackupInvalid(f"Copy verification failed for {parts[-1]}")
+                finally:
+                    os.close(target_fd)
+            finally:
+                os.close(source_fd)
+        tree.verify(expected)
+        restored = summarize(tree.path)
         if restored != metadata["summary"]:
             differing = sorted(k for k in set(restored) | set(metadata["summary"])
                                if restored.get(k) != metadata["summary"].get(k))
             raise BackupInvalid("Restored data differs from the backup summary: " + ", ".join(differing))
-        _verify_tree_against_manifest(staging_real, expected)  # loading must not have changed anything
-        _fsync_tree(staging_real)
-        _rename_noreplace(staging_real, target)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        tree.verify(expected)  # loading must not have changed anything
+        tree.fsync_dirs()
+        tree.publish(target.name)
+    except BaseException as exc:
+        if not tree.published:
+            left = tree.cleanup()
+            if left:
+                exc.add_note("Left in place (not created by this restore, or moved by another process): "
+                             + ", ".join(left))
         raise
+    finally:
+        if source is not None:
+            source.close()
+        tree.close()
     return {"target": str(target), "datasets": sorted(restored), "summary": restored,
             "files_verified": len(expected), "matches_backup": True}

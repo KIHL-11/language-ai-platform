@@ -399,7 +399,17 @@ def test_prp_r5_backup_midway_failure_keeps_nothing(storage, tmp_path, monkeypat
 def test_prp_r6_restore_media_corruption_is_never_published(storage, tmp_path, monkeypatch):
     result = _backup(storage, tmp_path)
     before = _tree_state(storage)
-    _corrupting_copy(monkeypatch, when=lambda source: source.suffix == ".mp3")
+    real_copy = personal._copy_into
+
+    def copy_then_corrupt(source_fd, target_fd):  # restore copies through descriptors
+        digest = real_copy(source_fd, target_fd)
+        if os.fstat(source_fd).st_size == len(b"ID3" + bytes(range(256)) * 4):  # the .mp3
+            size = os.fstat(target_fd).st_size
+            byte = os.pread(target_fd, 1, size // 2)
+            os.pwrite(target_fd, bytes([byte[0] ^ 0x01]), size // 2)
+        return digest
+
+    monkeypatch.setattr(personal, "_copy_into", copy_then_corrupt)
     target = tmp_path / "restore"
     with pytest.raises(BackupInvalid, match="Copy verification failed for synthetic.mp3"):
         personal.restore_backup(result.path, target, live_storage=storage)
@@ -435,16 +445,16 @@ def test_prp_r7_restore_sqlite_corruption_is_never_published(storage, tmp_path, 
 # PRP-R8: a failure halfway through the restore publishes nothing.
 def test_prp_r8_restore_midway_failure_is_never_published(storage, tmp_path, monkeypatch):
     result = _backup(storage, tmp_path)
-    real_copy = personal._copy_bytes
+    real_copy = personal._copy_into  # restore copies through descriptors
     calls = []
 
-    def failing(source, target):
-        calls.append(source)
+    def failing(source_fd, target_fd):
+        calls.append(source_fd)
         if len(calls) == 2:
             raise OSError("synthetic disk failure")
-        return real_copy(source, target)
+        return real_copy(source_fd, target_fd)
 
-    monkeypatch.setattr(personal, "_copy_bytes", failing)
+    monkeypatch.setattr(personal, "_copy_into", failing)
     target = tmp_path / "restore"
     with pytest.raises(OSError, match="synthetic disk failure"):
         personal.restore_backup(result.path, target, live_storage=storage)
@@ -474,10 +484,15 @@ def test_prp_r9_restored_tree_equals_manifest_before_and_after_loading(storage, 
         return summary
 
     monkeypatch.setattr(personal, "summarize", summarize_with_side_effect)
-    with pytest.raises(BackupInvalid, match="Unexpected restored files: side-effect.json"):
+    with pytest.raises(BackupInvalid, match="Unexpected restored files: side-effect.json") as caught:
         personal.restore_backup(result.path, tmp_path / "bad", live_storage=storage)
     assert not (tmp_path / "bad").exists()
-    assert _no_restore_staging_left(tmp_path, "bad")
+    # Batch 2.2: cleanup removes only inodes the restore itself created. The
+    # foreign side-effect file is left in place and reported; every restored file is gone.
+    leftovers = list(tmp_path.glob(".bad.restore-staging-*"))
+    assert len(leftovers) == 1
+    assert [p.relative_to(leftovers[0]).as_posix() for p in leftovers[0].rglob("*")] == ["side-effect.json"]
+    assert any("Left in place" in note for note in getattr(caught.value, "__notes__", []))
 
 
 # PRP-R10: a backup file changed between verify_backup and the copy is caught
@@ -672,3 +687,208 @@ def test_prp_r17_unsupported_platform_fails_closed(storage, tmp_path, monkeypatc
         personal.create_backup(storage, tmp_path / "other-backups", port=None, confirm_app_stopped=True,
                                now=STAMP)
     assert list((tmp_path / "other-backups").iterdir()) == []
+
+
+# ----------------------------------------------------------------------------
+# Batch 2.2 (independent re-review CHANGES_REQUIRED, Medium): directory
+# containment during restore. Test IDs PRP-R18..R25. Every attack is injected
+# after the backup was verified; R18-R20 immediately before a file is created.
+# ----------------------------------------------------------------------------
+
+def _staging_dir(tmp_path: Path, target_name: str = "restore") -> Path:
+    found = list(tmp_path.glob(f".{target_name}.restore-staging-*"))
+    assert len(found) == 1, found
+    return found[0]
+
+
+def _inject_before_create(monkeypatch, filename: str, action) -> None:
+    real = personal._create_file_at
+
+    def create(dir_fd, name):
+        if name == filename:
+            action()
+        return real(dir_fd, name)
+
+    monkeypatch.setattr(personal, "_create_file_at", create)
+
+
+def _all_files(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() or p.is_symlink())
+
+
+# PRP-R18 (Codex counterexample): after validation and immediately before the
+# file is created, the staging directory component is replaced by a symlink to
+# a directory outside the staging tree.
+def test_prp_r18_directory_replaced_by_symlink_before_create_writes_nothing_outside(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    live_before = _tree_state(storage)
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("pre-existing")
+    holding = tmp_path / "attacker-holding"
+
+    def replace_with_symlink():
+        media = _staging_dir(tmp_path) / "library_media"
+        media.rename(holding)
+        media.symlink_to(outside, target_is_directory=True)
+
+    before_outside = _files_outside(tmp_path, result.path)
+    _inject_before_create(monkeypatch, "synthetic.mp3", replace_with_symlink)
+    with pytest.raises(personal.ContainmentViolation, match="moved or replaced"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _all_files(outside) == ["keep.txt"] and (outside / "keep.txt").read_text() == "pre-existing"
+    assert _all_files(holding) == []  # the transient write into the relocated directory was removed
+    staging = _staging_dir(tmp_path)  # only the attacker's symlink is left, nothing of ours
+    assert _all_files(staging) == ["library_media"] and (staging / "library_media").is_symlink()
+    after_outside = _files_outside(tmp_path, result.path, staging)
+    assert after_outside == before_outside
+    assert _tree_state(storage) == live_before
+
+
+# PRP-R19: a directory is relocated out of the staging tree after its
+# descriptor was opened (O_NOFOLLOW cannot stop this). Files already written
+# into it and the file being created are both removed; nothing is published.
+def test_prp_r19_directory_relocated_after_its_descriptor_was_opened(storage, tmp_path, monkeypatch):
+    (storage / "library_media" / "a-first.bin").write_bytes(b"first media file")
+    result = _backup(storage, tmp_path)
+    relocated = tmp_path / "relocated-outside"
+
+    def relocate():
+        (_staging_dir(tmp_path) / "library_media").rename(relocated)
+        assert (relocated / "a-first.bin").exists()  # ours, now outside the staging tree
+
+    before_outside = _files_outside(tmp_path, result.path)
+    _inject_before_create(monkeypatch, "synthetic.mp3", relocate)
+    with pytest.raises(personal.ContainmentViolation, match="library_media was moved or replaced") as caught:
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert relocated.is_dir() and _all_files(relocated) == []
+    assert any("moved away by another process" in n for n in caught.value.__notes__)
+    assert _files_outside(tmp_path, result.path) == before_outside
+
+
+# PRP-R20: a symlink planted at a directory level or a file name before the
+# restore reaches it is never followed.
+@pytest.mark.parametrize("level", ["directory", "file"])
+def test_prp_r20_symlinks_planted_in_staging_are_never_followed(storage, tmp_path, monkeypatch, level):
+    result = _backup(storage, tmp_path)
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    (outside / "study_bank.json").write_text("victim")
+
+    def plant():
+        staging = _staging_dir(tmp_path)
+        if level == "directory":
+            (staging / "library_media").symlink_to(outside, target_is_directory=True)
+        else:
+            (staging / "study_bank.json").symlink_to(outside / "study_bank.json")
+
+    _inject_before_create(monkeypatch, "learning_library.json", plant)
+    with pytest.raises((personal.ContainmentViolation, FileExistsError)):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _all_files(outside) == ["study_bank.json"] and (outside / "study_bank.json").read_text() == "victim"
+
+
+# PRP-R21: the trusted staging root is replaced by another directory while the
+# data is being checked. The replacement is never deleted or published.
+def test_prp_r21_staging_root_replaced_during_checks(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    stolen = tmp_path / "stolen-root"
+    real_summarize = personal.summarize
+
+    def summarize_then_swap_root(directory):
+        summary = real_summarize(directory)
+        staging = _staging_dir(tmp_path)
+        staging.rename(stolen)
+        staging.mkdir()
+        (staging / "sentinel.txt").write_text("unrelated directory")
+        return summary
+
+    monkeypatch.setattr(personal, "summarize", summarize_then_swap_root)
+    with pytest.raises(personal.ContainmentViolation, match="was moved or replaced"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert (_staging_dir(tmp_path) / "sentinel.txt").read_text() == "unrelated directory"
+    assert _all_files(stolen) == []  # our restored files were removed through their descriptors
+
+
+# PRP-R22: the staging name is swapped in the instant before publication. The
+# wrongly published directory is taken down again and nothing is published.
+def test_prp_r22_staging_root_swapped_at_publication_is_never_left_published(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    stolen = tmp_path / "stolen-root"
+    real_rename = personal._rename_noreplace_at
+    swapped = []
+
+    def swap_then_rename(src_fd, source, dst_fd, target):
+        if not swapped and str(source).startswith(".restore.restore-staging-"):
+            swapped.append(True)
+            staging = tmp_path / str(source)
+            staging.rename(stolen)
+            staging.mkdir()
+            (staging / "sentinel.txt").write_text("unrelated directory")
+        return real_rename(src_fd, source, dst_fd, target)
+
+    monkeypatch.setattr(personal, "_rename_noreplace_at", swap_then_rename)
+    with pytest.raises(personal.ContainmentViolation, match="replaced at publication; .* moved aside"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    rejected = list(tmp_path.glob(".restore.rejected-*"))
+    assert len(rejected) == 1 and (rejected[0] / "sentinel.txt").read_text() == "unrelated directory"
+    assert _all_files(stolen) == []
+
+
+# PRP-R23: an unrelated directory moved into the staging tree is reported and
+# never deleted by cleanup.
+def test_prp_r23_cleanup_never_deletes_an_unrelated_directory(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    unrelated = tmp_path / "unrelated"
+    (unrelated / "deep").mkdir(parents=True)
+    (unrelated / "deep" / "sentinel.txt").write_text("must survive")
+    real_summarize = personal.summarize
+
+    def summarize_then_move_in(directory):
+        summary = real_summarize(directory)
+        unrelated.rename(_staging_dir(tmp_path) / "library_media" / "unrelated")
+        return summary
+
+    monkeypatch.setattr(personal, "summarize", summarize_then_move_in)
+    with pytest.raises(BackupInvalid, match="Unexpected restored files: library_media/unrelated"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    staging = _staging_dir(tmp_path)
+    assert (staging / "library_media" / "unrelated" / "deep" / "sentinel.txt").read_text() == "must survive"
+    assert _all_files(staging) == ["library_media/unrelated/deep/sentinel.txt"]  # nothing of ours left
+
+
+# PRP-R24: normal restore still succeeds, every existing file next to the
+# target is unchanged, and the published tree is exactly the manifest.
+def test_prp_r24_normal_restore_succeeds_and_leaves_existing_files_unchanged(storage, tmp_path):
+    result = _backup(storage, tmp_path)
+    (tmp_path / "existing-sibling").mkdir()
+    (tmp_path / "existing-sibling" / "data.json").write_text('{"keep": true}')
+    (tmp_path / "note.txt").write_text("keep me")
+    before = _files_outside(tmp_path, result.path)
+    report = personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert report["matches_backup"] is True and report["files_verified"] == 6
+    assert _files_outside(tmp_path, result.path, tmp_path / "restore") == before
+    assert _no_restore_staging_left(tmp_path, "restore")
+    manifest = {line.split("  ", 1)[1][len("storage/"):]: line.split("  ", 1)[0]
+                for line in (result.path / "MANIFEST.sha256").read_text().splitlines()
+                if line.startswith(tuple("0123456789abcdef")) and "  storage/" in line}
+    restored = {p.relative_to(tmp_path / "restore").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (tmp_path / "restore").rglob("*") if p.is_file()}
+    assert restored == manifest
+
+
+# PRP-R25: without directory-descriptor-relative primitives the restore fails
+# closed before anything is written.
+def test_prp_r25_platform_without_descriptor_relative_ops_fails_closed(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    with pytest.raises(personal.ContainmentUnsupported, match="refusing to restore"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
