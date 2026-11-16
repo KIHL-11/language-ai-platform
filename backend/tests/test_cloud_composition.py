@@ -282,3 +282,38 @@ def test_personal_mode_never_bootstraps_cloud_storage(media_root, clean_app, mon
     assert client.get("/api/deployment").json() == {"mode": "personal"}
     assert not hasattr(clean_app.state, "cloud_storage_status")
     assert not any(hasattr(clean_app.state, key) for key in STATE_KEYS)
+
+
+def test_media_provenance_save_works_with_least_privilege_runtime_role(
+    cloud_db, media_root, clean_app, monkeypatch
+):
+    """The runtime role has INSERT only on cloud_study_media_provenance (PR-R
+    manifest). An ON CONFLICT clause naming a conflict target would also need
+    SELECT, so saving a Library-backed Study Bank item failed with 503."""
+    import test_owner_scoped_study_bank as study_tests
+
+    dsn = cloud_db.runtime()
+    cloud_db.execute("INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s)", (OWNER_A, NOW))
+    monkeypatch.setenv("LANGUAGE_AI_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("CLOUD_STORAGE_DATABASE_URL", dsn)
+    monkeypatch.setenv("CLOUD_MEDIA_ROOT", str(media_root))
+    sessions = BrowserSessionRepository(dsn)
+    configure_browser_sessions(clean_app, sessions, SessionPolicy(ORIGIN))
+    client, headers = _browser(sessions, OWNER_A)
+    lesson = study_tests._lesson().model_dump(mode="json")
+    item_id = client.post("/api/library/items", json={"lesson": lesson}, headers=headers).json()["id"]
+    body = {"items": [study_tests._media(OWNER_A, item_id).model_dump(mode="json")]}
+
+    first = client.post("/api/study-bank/items/bulk", json=body, headers=headers)
+    again = client.post("/api/study-bank/items/bulk", json=body, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] == 1
+    assert again.status_code == 200, again.text
+    assert again.json()["created"] == 0
+    assert again.json()["items"][0]["id"] == first.json()["items"][0]["id"]
+    with psycopg.connect(cloud_db.admin_dsn) as connection:
+        rows = connection.execute(
+            "SELECT owner_user_id, provenance_index, library_item_id::text"
+            " FROM cloud_study_media_provenance").fetchall()
+    assert rows == [(OWNER_A, 0, item_id)]
