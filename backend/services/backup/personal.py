@@ -75,6 +75,49 @@ def _is_inside(child: Path, parent: Path) -> bool:
         return False
 
 
+class AtomicPublishUnsupported(BackupRefused):
+    """This platform or filesystem cannot publish without risking an overwrite."""
+
+
+_RENAME_NOREPLACE = 1      # Linux renameat2 flag
+_RENAME_EXCL = 0x00000004  # macOS renamex_np flag
+_AT_FDCWD = -100
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Atomically rename ``source`` to ``target``; never replace an existing target.
+
+    A plain ``os.rename`` silently replaces an existing empty directory, and an
+    ``exists()`` check before it is a race. Only kernel-level no-replace renames
+    are used; anything else fails closed.
+    """
+    import ctypes
+    import errno
+    import sys
+
+    src, dst = os.fsencode(str(source)), os.fsencode(str(target))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError as exc:
+        raise AtomicPublishUnsupported("Cannot load libc for an atomic no-replace rename") from exc
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        result = libc.renameat2(_AT_FDCWD, src, _AT_FDCWD, dst, _RENAME_NOREPLACE)
+    elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        result = libc.renamex_np(src, dst, _RENAME_EXCL)
+    else:
+        raise AtomicPublishUnsupported(
+            f"No atomic no-replace rename on {sys.platform}; refusing to publish")
+    if result == 0:
+        return
+    code = ctypes.get_errno()
+    if code in (errno.EEXIST, errno.ENOTEMPTY):
+        raise BackupRefused(f"{target.name} already exists; refusing to overwrite")
+    if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)):
+        raise AtomicPublishUnsupported(
+            f"The filesystem does not support atomic no-replace rename (errno {code})")
+    raise OSError(code, os.strerror(code), str(target))
+
+
 def service_is_listening(port: int) -> bool:
     """Best-effort refusal only: is anything accepting on loopback IPv4 or IPv6?
 
@@ -361,9 +404,7 @@ def create_backup(
         (partial / METADATA).write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
         files, total = _write_manifest(partial)
         _fsync_tree(partial)
-        if final.exists():
-            raise BackupRefused(f"{final.name} appeared during the backup; refusing to overwrite")
-        os.rename(partial, final)
+        _rename_noreplace(partial, final)
         descriptor = os.open(destination, os.O_RDONLY)
         try:
             os.fsync(descriptor)
@@ -376,47 +417,104 @@ def create_backup(
     return BackupResult(path=final, files=files, bytes=total, summary=summary)
 
 
-def verify_backup(backup: Path) -> dict:
-    """Check every file against MANIFEST.sha256 and that nothing is missing or extra."""
-    backup = Path(backup)
-    manifest = backup / MANIFEST
-    if not manifest.is_file():
+_FORBIDDEN_NAME_CHARS = frozenset("\\\x00") | frozenset(chr(c) for c in range(0x20)) | {"\x7f"}
+
+
+def _safe_relative(name: str) -> tuple[str, ...]:
+    """Validate a manifest path: relative POSIX, no traversal, no odd separators."""
+    if not name or name.startswith("/") or any(ch in _FORBIDDEN_NAME_CHARS for ch in name):
+        raise BackupInvalid(f"Unsafe path in manifest: {name!r}")
+    parts = tuple(name.split("/"))
+    if any(part in ("", ".", "..") for part in parts):
+        raise BackupInvalid(f"Unsafe path in manifest: {name!r}")
+    if name != METADATA and parts[0] != "storage":
+        raise BackupInvalid(f"Unexpected path in manifest: {name!r}")
+    if parts[0] == "storage" and len(parts) < 2:
+        raise BackupInvalid(f"Unsafe path in manifest: {name!r}")
+    return parts
+
+
+def _no_symlink_components(root: Path, parts: tuple[str, ...]) -> Path:
+    """Return root/parts after checking that no component (including the leaf) is a symlink."""
+    current = root
+    for part in parts:
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise BackupInvalid(f"Files missing from backup: {'/'.join(parts)}") from exc
+        if stat.S_ISLNK(mode):
+            raise BackupInvalid(f"Backup contains a symbolic link: {'/'.join(parts)}")
+    if not stat.S_ISREG(current.lstat().st_mode):
+        raise BackupInvalid(f"Not a regular file in backup: {'/'.join(parts)}")
+    return current
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedBackup:
+    root: Path
+    metadata: dict
+    entries: dict[str, str]  # manifest path -> SHA-256, from the single verified read
+
+
+def _verify_backup_trusted(backup: Path) -> VerifiedBackup:
+    """One pass: read MANIFEST once, validate every path, hash every file once.
+
+    ``backup.json`` is parsed from the same bytes that were hashed, so nothing
+    is read again after verification. Callers must use the returned entries
+    and never re-read the manifest.
+    """
+    root = Path(backup).resolve(strict=True)
+    manifest_path = root / MANIFEST
+    if manifest_path.is_symlink() or not manifest_path.is_file():
         raise BackupInvalid("MANIFEST.sha256 is missing")
-    expected: dict[str, str] = {}
-    for line in manifest.read_text(encoding="utf-8").splitlines():
+    entries: dict[str, str] = {}
+    for line in manifest_path.read_bytes().decode("utf-8").splitlines():
         if not line.strip():
             continue
         digest, separator, relative = line.partition("  ")
-        if not separator or len(digest) != 64 or relative.startswith("/") or ".." in Path(relative).parts:
+        if not separator or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise BackupInvalid("Malformed manifest line")
-        expected[relative] = digest
-    actual = {
-        p.relative_to(backup).as_posix() for p in backup.rglob("*")
-        if p.is_file() or p.is_symlink()
-    } - {MANIFEST}
-    if any((backup / name).is_symlink() for name in actual):
-        raise BackupInvalid("Backup contains a symbolic link")
-    missing, extra = sorted(set(expected) - actual), sorted(actual - set(expected))
+        _safe_relative(relative)
+        if relative in entries:
+            raise BackupInvalid(f"Duplicate manifest entry: {relative}")
+        entries[relative] = digest
+    if METADATA not in entries:
+        raise BackupInvalid("backup.json is not in the manifest")
+    actual = set()
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise BackupInvalid(f"Backup contains a symbolic link: {path.relative_to(root).as_posix()}")
+        if path.is_file():
+            actual.add(path.relative_to(root).as_posix())
+    actual.discard(MANIFEST)
+    missing, extra = sorted(set(entries) - actual), sorted(actual - set(entries))
     if missing:
         raise BackupInvalid("Files missing from backup: " + ", ".join(missing))
     if extra:
         raise BackupInvalid("Files not in manifest: " + ", ".join(extra))
-    for relative, digest in expected.items():
-        if _sha256(backup / relative) != digest:
+    metadata_bytes = b""
+    for relative, digest in entries.items():
+        path = _no_symlink_components(root, _safe_relative(relative))
+        if relative == METADATA:
+            metadata_bytes = path.read_bytes()
+            actual_digest = hashlib.sha256(metadata_bytes).hexdigest()
+        else:
+            actual_digest = _sha256(path)
+        if actual_digest != digest:
             raise BackupInvalid(f"Checksum mismatch: {relative}")
-    metadata = json.loads((backup / METADATA).read_text(encoding="utf-8"))
-    if metadata.get("format") != FORMAT:
+    try:
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BackupInvalid("backup.json is not valid JSON") from exc
+    if not isinstance(metadata, dict) or metadata.get("format") != FORMAT:
         raise BackupInvalid("Unsupported backup format")
-    return metadata
+    return VerifiedBackup(root=root, metadata=metadata, entries=dict(entries))
 
 
-def _manifest_entries(backup: Path) -> dict[str, str]:
-    entries = {}
-    for line in (backup / MANIFEST).read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            digest, _, relative = line.partition("  ")
-            entries[relative] = digest
-    return entries
+def verify_backup(backup: Path) -> dict:
+    """Check every file against MANIFEST.sha256 and that nothing is missing or extra."""
+    return _verify_backup_trusted(backup).metadata
 
 
 def _verify_tree_against_manifest(root: Path, expected: dict[str, str]) -> None:
@@ -459,28 +557,33 @@ def restore_backup(backup: Path, target: Path, *, live_storage: Path | None = No
         raise BackupRefused("Restore target must be outside the live storage directory")
     if _is_inside(target, backup):
         raise BackupRefused("Restore target must be outside the backup")
-    metadata = verify_backup(backup)
+    verified = _verify_backup_trusted(backup)
+    metadata = verified.metadata
     prefix = "storage/"
-    expected = {k[len(prefix):]: v for k, v in _manifest_entries(backup).items() if k.startswith(prefix)}
+    # Only the entries from the single verified read are used from here on.
+    expected = {k[len(prefix):]: v for k, v in verified.entries.items() if k.startswith(prefix)}
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-staging-", dir=target.parent))
+    staging_real = staging.resolve(strict=True)
     try:
-        source_root = backup / "storage"
+        source_root = verified.root / "storage"
         for relative, digest in sorted(expected.items()):
-            destination = staging / relative
+            parts = tuple(relative.split("/"))
+            source = _no_symlink_components(source_root, parts)
+            destination = staging_real.joinpath(*parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            _copy_file_verified(source_root / relative, destination, expected=digest)
-        _verify_tree_against_manifest(staging, expected)
-        restored = summarize(staging)
+            if not _is_inside(destination.parent, staging_real) or destination.parent.is_symlink():
+                raise BackupInvalid(f"Restore write would leave the staging directory: {relative}")
+            _copy_file_verified(source, destination, expected=digest)
+        _verify_tree_against_manifest(staging_real, expected)
+        restored = summarize(staging_real)
         if restored != metadata["summary"]:
             differing = sorted(k for k in set(restored) | set(metadata["summary"])
                                if restored.get(k) != metadata["summary"].get(k))
             raise BackupInvalid("Restored data differs from the backup summary: " + ", ".join(differing))
-        _verify_tree_against_manifest(staging, expected)  # loading must not have changed anything
-        _fsync_tree(staging)
-        if target.exists():
-            raise BackupRefused("Restore target appeared during the restore; refusing to overwrite")
-        os.rename(staging, target)
+        _verify_tree_against_manifest(staging_real, expected)  # loading must not have changed anything
+        _fsync_tree(staging_real)
+        _rename_noreplace(staging_real, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise

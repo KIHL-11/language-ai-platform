@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -483,15 +484,191 @@ def test_prp_r9_restored_tree_equals_manifest_before_and_after_loading(storage, 
 # by comparing the bytes read to the manifest digest.
 def test_prp_r10_restore_detects_source_changed_after_verification(storage, tmp_path, monkeypatch):
     result = _backup(storage, tmp_path)
-    real_verify = personal.verify_backup
+    real_verify = personal._verify_backup_trusted
 
     def verify_then_tamper(backup):
-        metadata = real_verify(backup)
-        _flip_middle_byte(backup / "storage" / "chunk_bank.json")
-        return metadata
+        verified = real_verify(backup)
+        _flip_middle_byte(verified.root / "storage" / "chunk_bank.json")
+        return verified
 
-    monkeypatch.setattr(personal, "verify_backup", verify_then_tamper)
+    monkeypatch.setattr(personal, "_verify_backup_trusted", verify_then_tamper)
     with pytest.raises(BackupInvalid, match="Source changed or was corrupt while copying chunk_bank.json"):
         personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
     assert not (tmp_path / "restore").exists()
     assert _no_restore_staging_left(tmp_path, "restore")
+
+
+# ----------------------------------------------------------------------------
+# Batch 2.1 (independent re-review CHANGES_REQUIRED). Test IDs PRP-R11..R17.
+# ----------------------------------------------------------------------------
+
+def _files_outside(root: Path, *excluded: Path) -> dict[str, str]:
+    """sha256 of every file under root, except under the excluded directories."""
+    result = {}
+    for path in root.rglob("*"):
+        if path.is_file() and not any(path == e or e in path.parents for e in excluded):
+            result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+# PRP-R11 (Medium, Manifest TOCTOU): the manifest is replaced after it was
+# verified. Restore must keep using the verified entries only.
+def test_prp_r11_manifest_replaced_after_verification_has_no_effect(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    attacker = tmp_path / "attacker-payload.json"
+    attacker.write_text('{"injected": true}')
+    real_verify = personal._verify_backup_trusted
+
+    def verify_then_replace_manifest(backup):
+        verified = real_verify(backup)
+        digest = hashlib.sha256(attacker.read_bytes()).hexdigest()
+        lines = (verified.root / "MANIFEST.sha256").read_text().splitlines()
+        lines = [line for line in lines if not line.endswith("  storage/chunk_bank.json")]
+        lines.append(f"{digest}  storage/../../attacker-escape.json")
+        lines.append(f"{digest}  storage/extra.json")
+        (verified.root / "MANIFEST.sha256").write_text("\n".join(lines) + "\n")
+        (verified.root / "storage" / "extra.json").write_bytes(attacker.read_bytes())
+        return verified
+
+    before_outside = _files_outside(tmp_path, tmp_path / "restore", result.path)
+    monkeypatch.setattr(personal, "_verify_backup_trusted", verify_then_replace_manifest)
+    report = personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert report["matches_backup"] is True
+    restored = {p.relative_to(tmp_path / "restore").as_posix() for p in (tmp_path / "restore").rglob("*") if p.is_file()}
+    assert "extra.json" not in restored and "chunk_bank.json" in restored
+    assert not (tmp_path.parent / "attacker-escape.json").exists()
+    assert not (tmp_path / "attacker-escape.json").exists()
+    assert _files_outside(tmp_path, tmp_path / "restore", result.path) == before_outside
+
+
+UNSAFE_NAMES = {
+    "absolute": "/tmp/lap-absolute-escape.json",
+    "parent_traversal": "storage/../../lap-escape.json",
+    "nested_traversal": "storage/library_media/../../../lap-escape.json",
+    "dot_component": "storage/./study_bank.json",
+    "empty_component": "storage//study_bank.json",
+    "backslash": "storage\\..\\lap-escape.json",
+    "nul": "storage/study\x00bank.json",
+    "control_char": "storage/study\nbank.json",
+    "outside_storage": "elsewhere/study_bank.json",
+}
+
+
+# PRP-R12: unsafe manifest paths are rejected before anything is written.
+@pytest.mark.parametrize("case", sorted(UNSAFE_NAMES))
+def test_prp_r12_unsafe_manifest_paths_are_rejected(storage, tmp_path, case):
+    result = _backup(storage, tmp_path)
+    manifest = result.path / "MANIFEST.sha256"
+    manifest.write_text(manifest.read_text() + "0" * 64 + "  " + UNSAFE_NAMES[case] + "\n")
+    before_outside = _files_outside(tmp_path, result.path)
+    with pytest.raises(BackupInvalid):
+        personal.verify_backup(result.path)
+    with pytest.raises(BackupInvalid):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
+    assert _files_outside(tmp_path, result.path) == before_outside
+    assert not Path("/tmp/lap-absolute-escape.json").exists()
+
+
+# PRP-R13: symbolic links inside the backup (file or directory component) are rejected,
+# even when the manifest digest matches the link target's content.
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_prp_r13_symlinks_in_the_backup_are_rejected(storage, tmp_path, kind):
+    result = _backup(storage, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if kind == "file":
+        real = result.path / "storage" / "chunk_bank.json"
+        (outside / "chunk_bank.json").write_bytes(real.read_bytes())
+        real.unlink()
+        real.symlink_to(outside / "chunk_bank.json")
+    else:
+        media = result.path / "storage" / "library_media"
+        shutil.copytree(media, outside / "library_media")
+        shutil.rmtree(media)
+        media.symlink_to(outside / "library_media", target_is_directory=True)
+    with pytest.raises(BackupInvalid, match="symbolic link"):
+        personal.verify_backup(result.path)
+    with pytest.raises(BackupInvalid, match="symbolic link"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+
+
+# PRP-R14: a successful restore creates files only inside the published target.
+def test_prp_r14_restore_writes_nothing_outside_staging(storage, tmp_path):
+    result = _backup(storage, tmp_path)
+    before = _files_outside(tmp_path, result.path)
+    personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    after = _files_outside(tmp_path, result.path, tmp_path / "restore")
+    assert after == before
+    assert _no_restore_staging_left(tmp_path, "restore")
+
+
+# PRP-R15 (Low, atomic publication): a competitor creates an empty target
+# directory while the restore runs. The old exists()+os.rename replaced it.
+def test_prp_r15_competing_empty_target_is_never_replaced(storage, tmp_path, monkeypatch):
+    result = _backup(storage, tmp_path)
+    target = tmp_path / "restore"
+    real_summarize = personal.summarize
+
+    def summarize_while_competitor_creates_target(directory):
+        summary = real_summarize(directory)
+        target.mkdir()  # the race window
+        return summary
+
+    monkeypatch.setattr(personal, "summarize", summarize_while_competitor_creates_target)
+    with pytest.raises(BackupRefused, match="already exists; refusing to overwrite"):
+        personal.restore_backup(result.path, target, live_storage=storage)
+    assert target.is_dir() and list(target.iterdir()) == []  # competitor's directory untouched
+    assert _no_restore_staging_left(tmp_path, "restore")
+
+
+def test_prp_r15b_competing_empty_backup_directory_is_never_replaced(storage, tmp_path, monkeypatch):
+    final = tmp_path / "backups" / "personal-backup-20261114T120000Z"
+    real_summarize = personal.summarize
+
+    def summarize_while_competitor_creates_final(directory):
+        summary = real_summarize(directory)
+        final.mkdir()
+        return summary
+
+    monkeypatch.setattr(personal, "summarize", summarize_while_competitor_creates_final)
+    with pytest.raises(BackupRefused, match="already exists; refusing to overwrite"):
+        _backup(storage, tmp_path)
+    assert final.is_dir() and list(final.iterdir()) == []
+    assert not (tmp_path / "backups" / "personal-backup-20261114T120000Z.partial").exists()
+
+
+# PRP-R16: the hazard itself (counterexample) and the primitive that closes it.
+def test_prp_r16_plain_rename_replaces_an_empty_directory_but_noreplace_does_not(tmp_path):
+    source, victim = tmp_path / "src", tmp_path / "dst"
+    source.mkdir()
+    (source / "f").write_text("x")
+    victim.mkdir()
+    probe_src, probe_dst = tmp_path / "probe-src", tmp_path / "probe-dst"
+    probe_src.mkdir()
+    probe_dst.mkdir()
+    os.rename(probe_src, probe_dst)  # counterexample: silently replaces the empty directory
+    assert (probe_dst.exists() and not probe_src.exists())
+    with pytest.raises(BackupRefused, match="already exists"):
+        personal._rename_noreplace(source, victim)
+    assert (source / "f").exists() and list(victim.iterdir()) == []
+    fresh = tmp_path / "fresh"
+    personal._rename_noreplace(source, fresh)
+    assert (fresh / "f").read_text() == "x" and not source.exists()
+
+
+# PRP-R17: platforms without a verified atomic no-replace rename fail closed.
+@pytest.mark.parametrize("platform", ["win32", "sunos5", "freebsd14"])
+def test_prp_r17_unsupported_platform_fails_closed(storage, tmp_path, monkeypatch, platform):
+    result = _backup(storage, tmp_path)
+    monkeypatch.setattr(sys, "platform", platform)
+    with pytest.raises(personal.AtomicPublishUnsupported, match="refusing to publish"):
+        personal.restore_backup(result.path, tmp_path / "restore", live_storage=storage)
+    assert not (tmp_path / "restore").exists()
+    assert _no_restore_staging_left(tmp_path, "restore")
+    with pytest.raises(personal.AtomicPublishUnsupported):
+        personal.create_backup(storage, tmp_path / "other-backups", port=None, confirm_app_stopped=True,
+                               now=STAMP)
+    assert list((tmp_path / "other-backups").iterdir()) == []
