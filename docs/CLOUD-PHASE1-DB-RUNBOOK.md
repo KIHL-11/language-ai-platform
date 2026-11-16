@@ -40,6 +40,7 @@ Preflight 会拒绝下面任何一种情况：
 | 多出禁止的权限（包括列级授权和授予 PUBLIC 的授权） | 不在权限表中的任何权限，无论是表级授权（`has_table_privilege`）还是任意一列上的授权（`has_any_column_privilege`），都算作越权 |
 | 缺少 schema 的 USAGE 权限 | `has_schema_privilege(..., 'USAGE')` |
 | RLS policy 漂移 | `pg_policies` 中 public schema 的 policy 集合，必须**完全等于**固定的定义。每张强制 RLS 的表只能有一个 policy，并且要求：PERMISSIVE；roles 为 `{public}`；命令为 ALL；USING 和 WITH CHECK 都是 owner 条件。下面任何一种情况都会被拒绝：`USING (true)` 或 `WITH CHECK (true)`、其他条件表达式、RESTRICTIVE、只对 SELECT 生效、roles 被改动、多出 policy（包括在没有开启 RLS 的表上）、缺少 policy |
+| policy 绑定的函数和操作符被同名对象替换（例如 `public.current_setting`，或者 `public` 中一个永远为真的 `=`） | preflight 在固定的 `search_path`（`pg_catalog, pg_temp`）下运行，不受运行时角色自身 search_path 设置的影响。每个 policy 的 USING 和 WITH CHECK，都要在 `pg_policy` 中存储的表达式树上，按 OID 核对实际绑定的对象：`pg_catalog.=(text,text)`、本表的 `owner_user_id` 列，以及 `pg_catalog.current_setting(text,boolean)`，常量的类型也必须一致。另外，`public` schema 中不允许存在任何用户自定义的函数或操作符 |
 | 多出了表、视图、序列或 schema（例如 0010 建立的对象） | 当前的表集合必须**等于**已执行版本建立的表集合，再加上版本记录表 |
 | RLS 被关闭，或者没有 FORCE | `relrowsecurity` 和 `relforcerowsecurity` |
 | 版本记录被篡改，或者为空 | 版本记录必须是清单的连续前缀，并且 SHA-256 一致。记录为空时，preflight 和授权都会失败关闭。执行器只在数据库中除了版本记录表之外没有任何表时才继续执行（例如第一个版本执行失败之后），否则拒绝 |

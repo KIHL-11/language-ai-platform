@@ -692,3 +692,135 @@ def test_prr_r7_missing_schema_usage_is_refused(cloud_db):
     cloud_db.execute(sql.SQL("REVOKE USAGE ON SCHEMA public FROM {}").format(sql.Identifier(cloud_db.runtime_role)))
     cloud_db.execute("REVOKE USAGE ON SCHEMA public FROM PUBLIC")
     assert "missing USAGE on schema public" in preflight.run_preflight(dsn).failures
+
+
+# ----------------------------------------------------------------------------
+# Batch 2.1 (independent re-review CHANGES_REQUIRED, High). Test IDs PRR-R8..R11.
+# ----------------------------------------------------------------------------
+
+def _hostile_search_path(db, role):
+    db.execute(sql.SQL("ALTER ROLE {} SET search_path TO public, pg_catalog").format(sql.Identifier(role)))
+
+
+def _runtime_view_of_policy(dsn, table, policy):
+    """What the old text-only check saw: pg_policies under the role's own search_path."""
+    with psycopg.connect(dsn) as connection:
+        return connection.execute(
+            "SELECT qual, with_check FROM pg_policies WHERE tablename = %s AND policyname = %s",
+            (table, policy)).fetchone()
+
+
+# PRR-R8: Codex counterexample — a same-named public.current_setting(text, boolean)
+# makes the deparsed text identical while the policy binds a different function.
+def test_prr_r8_public_current_setting_shadow_is_refused(cloud_db):
+    dsn = cloud_db.runtime()
+    _hostile_search_path(cloud_db, cloud_db.runtime_role)
+    cloud_db.execute("CREATE FUNCTION public.current_setting(text, boolean) RETURNS text"
+                     " LANGUAGE sql IMMUTABLE AS $$ SELECT 'cloud-p1-owner-a'::text $$")
+    cloud_db.execute("ALTER POLICY cloud_study_owner_policy ON cloud_study_items"
+                     " USING (owner_user_id = public.current_setting('app.current_owner', true))"
+                     " WITH CHECK (owner_user_id = public.current_setting('app.current_owner', true))")
+    # The counterexample: the text the previous check compared is indistinguishable.
+    assert _runtime_view_of_policy(dsn, "cloud_study_items", "cloud_study_owner_policy") == (
+        schema.OWNER_POLICY_EXPRESSION, schema.OWNER_POLICY_EXPRESSION)
+    failures = preflight.run_preflight(dsn).failures
+    assert any("cloud_study_owner_policy on cloud_study_items USING does not bind" in f for f in failures), failures
+    assert any("cloud_study_owner_policy on cloud_study_items WITH CHECK does not bind" in f for f in failures)
+    assert any("unexpected functions/operators in schema public: function current_setting(text,boolean)" in f
+               or "function public.current_setting(text,boolean)" in f for f in failures), failures
+    with pytest.raises(preflight.CloudPreflightFailed):
+        preflight.require_preflight(dsn)
+
+
+# PRR-R8b: the shadowing function alone (policies untouched) already fails closed.
+def test_prr_r8b_shadowing_function_without_policy_change_is_refused(cloud_db):
+    dsn = cloud_db.runtime()
+    cloud_db.execute("CREATE FUNCTION public.current_setting(text, boolean) RETURNS text"
+                     " LANGUAGE sql IMMUTABLE AS $$ SELECT ''::text $$")
+    failures = preflight.run_preflight(dsn).failures
+    assert any(f.startswith("unexpected functions/operators in schema public") for f in failures), failures
+    assert not any("does not bind" in f for f in failures)  # the 11 real policies still bind correctly
+
+
+# PRR-R9: operator shadow — a public "=" that is always true. The deparsed text
+# under the role's search_path is identical, and isolation is really broken.
+def test_prr_r9_public_equality_operator_shadow_breaks_isolation_and_is_refused(cloud_db):
+    dsn = cloud_db.runtime()
+    _hostile_search_path(cloud_db, cloud_db.runtime_role)
+    cloud_db.execute("CREATE FUNCTION public.lap_always_true(text, text) RETURNS boolean"
+                     " LANGUAGE sql IMMUTABLE AS $$ SELECT true $$")
+    cloud_db.execute("CREATE OPERATOR public.= (LEFTARG = text, RIGHTARG = text,"
+                     " FUNCTION = public.lap_always_true)")
+    cloud_db.execute("ALTER POLICY cloud_study_owner_policy ON cloud_study_items"
+                     " USING (owner_user_id::text OPERATOR(public.=) current_setting('app.current_owner', true))"
+                     " WITH CHECK (owner_user_id::text OPERATOR(public.=) current_setting('app.current_owner', true))")
+    assert _runtime_view_of_policy(dsn, "cloud_study_items", "cloud_study_owner_policy") == (
+        schema.OWNER_POLICY_EXPRESSION, schema.OWNER_POLICY_EXPRESSION)
+    cloud_db.execute("INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s), (%s, %s)",
+                     (OWNER_A, NOW, OWNER_B, NOW))
+    cloud_db.execute(
+        "INSERT INTO cloud_study_items (owner_user_id, item_id, kind, source_language, target_language,"
+        " text, normalized_text, provenance_json, created_at, updated_at, due_at)"
+        " VALUES (%s, %s, 'word', 'en', 'zh-CN', 'x', 'x', %s, %s, %s, %s)",
+        (OWNER_A, str(uuid.uuid4()), PROVENANCE, NOW, NOW, NOW))
+    with psycopg.connect(dsn) as connection:
+        connection.execute("SELECT set_config('app.current_owner', %s, true)", (OWNER_B,))
+        assert connection.execute("SELECT count(*) FROM cloud_study_items").fetchone()[0] == 1  # leak
+    failures = preflight.run_preflight(dsn).failures
+    assert any("cloud_study_owner_policy on cloud_study_items USING does not bind" in f for f in failures), failures
+    assert any("operator public.=(text,text)" in f for f in failures), failures
+
+
+# PRR-R10: the 11 legitimate policies pass structurally, even when the runtime
+# role carries a hostile search_path, because preflight pins its own.
+def test_prr_r10_eleven_legitimate_policies_pass_with_hostile_role_search_path(cloud_db):
+    dsn = cloud_db.runtime()
+    _hostile_search_path(cloud_db, cloud_db.runtime_role)
+    report = preflight.run_preflight(dsn)
+    assert report.ok, report.failures
+    with psycopg.connect(dsn) as connection:
+        connection.execute(preflight.TRUSTED_SEARCH_PATH)
+        rows = connection.execute(
+            "SELECT c.relname, p.polrelid::oid, p.polqual::text, p.polwithcheck::text FROM pg_policy p"
+            " JOIN pg_class c ON c.oid = p.polrelid").fetchall()
+        assert len(rows) == 11
+        for relname, relid, using_tree, check_tree in rows:
+            accepted = preflight._expected_owner_signature(connection, relid)
+            assert preflight._tree_signature(using_tree) in accepted, relname
+            assert preflight._tree_signature(check_tree) in accepted, relname
+
+
+# PRR-R11: the preflight session itself uses the trusted search_path.
+def test_prr_r11_preflight_pins_a_trusted_search_path(cloud_db, monkeypatch):
+    dsn = cloud_db.runtime()
+    _hostile_search_path(cloud_db, cloud_db.runtime_role)
+    seen = []
+    real = preflight._role_checks
+
+    def spy(connection):
+        seen.append(connection.execute("SHOW search_path").fetchone()[0])
+        return real(connection)
+
+    monkeypatch.setattr(preflight, "_role_checks", spy)
+    assert preflight.run_preflight(dsn).ok
+    assert seen == ["pg_catalog, pg_temp"]
+
+
+# PRR-R9b: worst case — every one of the 11 policies binds the always-true
+# public "=". The previous text-only check accepted this (full RLS bypass).
+def test_prr_r9b_all_eleven_policies_shadowed_is_refused(cloud_db):
+    dsn = cloud_db.runtime()
+    _hostile_search_path(cloud_db, cloud_db.runtime_role)
+    cloud_db.execute("CREATE FUNCTION public.lap_always_true(text, text) RETURNS boolean"
+                     " LANGUAGE sql IMMUTABLE AS $$ SELECT true $$")
+    cloud_db.execute("CREATE OPERATOR public.= (LEFTARG = text, RIGHTARG = text,"
+                     " FUNCTION = public.lap_always_true)")
+    predicate = "owner_user_id::text OPERATOR(public.=) current_setting('app.current_owner', true)"
+    for table, policy in schema.POLICY_NAMES.items():
+        cloud_db.execute(f"ALTER POLICY {policy} ON {table} USING ({predicate}) WITH CHECK ({predicate})")
+    with psycopg.connect(dsn) as connection:  # what the role-search_path text check saw
+        texts = {row[0] for row in connection.execute("SELECT qual FROM pg_policies WHERE schemaname='public'")}
+    assert texts == {schema.OWNER_POLICY_EXPRESSION}
+    failures = preflight.run_preflight(dsn).failures
+    unbound = [f for f in failures if "USING does not bind" in f]
+    assert len(unbound) == 11, failures

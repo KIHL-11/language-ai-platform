@@ -9,6 +9,7 @@ direction. Messages never contain the DSN or credentials.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,15 @@ from services.cloud.schema import (
 )
 
 COLUMN_CAPABLE = frozenset({"SELECT", "INSERT", "UPDATE", "REFERENCES"})
+
+# Every check runs with this search_path: pg_catalog first, pg_temp last, and
+# nothing user-writable, so neither deparsed text nor any function the checks
+# call can be shadowed by objects in public (e.g. a public.current_setting).
+TRUSTED_SEARCH_PATH = "SET search_path TO pg_catalog, pg_temp"
+
+_TREE_TOKEN = re.compile(
+    r"\{([A-Z_]+)|:(opno|opfuncid|opresulttype|funcid|funcresulttype|varno|varattno|varlevelsup"
+    r"|resulttype|consttype|constisnull) (\S+)")
 
 
 class CloudPreflightFailed(RuntimeError):
@@ -129,6 +139,14 @@ def _schema_checks(connection, versions: list[str]) -> list[str]:
     ).fetchall()
     if other:
         failures.append("unexpected views/sequences/foreign tables: " + ", ".join(r[0] for r in other))
+    shadowing = connection.execute(
+        "SELECT 'function ' || p.oid::pg_catalog.regprocedure::pg_catalog.text FROM pg_catalog.pg_proc p"
+        " WHERE p.pronamespace = 'public'::pg_catalog.regnamespace"
+        " UNION ALL SELECT 'operator ' || o.oid::pg_catalog.regoperator::pg_catalog.text"
+        " FROM pg_catalog.pg_operator o WHERE o.oprnamespace = 'public'::pg_catalog.regnamespace ORDER BY 1"
+    ).fetchall()
+    if shadowing:
+        failures.append("unexpected functions/operators in schema public: " + ", ".join(r[0] for r in shadowing))
     schemas = connection.execute(
         "SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('public', 'information_schema')"
         " AND nspname NOT LIKE 'pg\\_%' ORDER BY 1"
@@ -162,25 +180,77 @@ def _schema_checks(connection, versions: list[str]) -> list[str]:
     return failures
 
 
+def _tree_signature(tree: str | None) -> list[tuple[str, str]]:
+    """Node types and identity fields of a stored expression, in tree order."""
+    if tree is None:
+        return []
+    return [("node", node) if node else (key, value) for node, key, value in _TREE_TOKEN.findall(tree)]
+
+
+def _expected_owner_signature(connection, relation_oid: int) -> list[list[tuple[str, str]]]:
+    """Accepted signatures of ``owner_user_id::text = pg_catalog.current_setting(text, true)``.
+
+    Identities come from explicitly schema-qualified catalog lookups, so a
+    same-named function or operator in another schema can never match.
+    """
+    row = connection.execute(
+        "SELECT 'pg_catalog.=(text,text)'::pg_catalog.regoperator::pg_catalog.oid,"
+        " 'pg_catalog.texteq(text,text)'::pg_catalog.regprocedure::pg_catalog.oid,"
+        " 'pg_catalog.current_setting(text,boolean)'::pg_catalog.regprocedure::pg_catalog.oid,"
+        " (SELECT a.attnum FROM pg_catalog.pg_attribute a"
+        "   WHERE a.attrelid = %s AND a.attname = 'owner_user_id' AND NOT a.attisdropped)",
+        (relation_oid,),
+    ).fetchone()
+    eq_operator, texteq, current_setting, owner_attnum = (str(value) for value in row)
+    signatures = []
+    for opfuncid in (texteq, "0"):  # stored trees may leave opfuncid unresolved
+        signatures.append([
+            ("node", "OPEXPR"), ("opno", eq_operator), ("opfuncid", opfuncid), ("opresulttype", "16"),
+            ("node", "RELABELTYPE"),
+            ("node", "VAR"), ("varno", "1"), ("varattno", owner_attnum), ("varlevelsup", "0"),
+            ("resulttype", "25"),
+            ("node", "FUNCEXPR"), ("funcid", current_setting), ("funcresulttype", "25"),
+            ("node", "CONST"), ("consttype", "25"), ("constisnull", "false"),
+            ("node", "CONST"), ("consttype", "16"), ("constisnull", "false"),
+        ])
+    return signatures
+
+
 def _policy_checks(connection, versions: list[str]) -> list[str]:
-    """Exact RLS policy set: name, PERMISSIVE/RESTRICTIVE, roles, command, USING, WITH CHECK."""
+    """Exact RLS policy set, verified on catalog identity and on deparsed text.
+
+    For every expected policy: name, PERMISSIVE, roles, command, and both the
+    USING and WITH CHECK expressions. The expressions are checked twice: the
+    stored node tree must bind exactly pg_catalog.= (text,text), the table's
+    owner_user_id column and pg_catalog.current_setting(text,boolean) with the
+    expected constants, and the text deparsed under the trusted search_path
+    must equal the pinned definition.
+    """
     failures: list[str] = []
     expected = expected_policies(versions)
-    live = {
-        (row[0], row[1]): row[2:]
-        for row in connection.execute(
-            "SELECT tablename, policyname, permissive, roles::text[], cmd, qual, with_check"
-            " FROM pg_policies WHERE schemaname = 'public' ORDER BY 1, 2"
-        )
-    }
+    live = {}
+    for row in connection.execute(
+        "SELECT c.relname, p.polname, p.polrelid::pg_catalog.oid,"
+        " CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,"
+        " CASE WHEN p.polroles = '{0}'::pg_catalog.oid[] THEN ARRAY['public']"
+        "      ELSE ARRAY(SELECT r.rolname::pg_catalog.text FROM pg_catalog.pg_roles r"
+        "                 WHERE r.oid = ANY (p.polroles) ORDER BY 1) END,"
+        " CASE p.polcmd WHEN '*' THEN 'ALL' WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT'"
+        "      WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' ELSE p.polcmd::pg_catalog.text END,"
+        " pg_catalog.pg_get_expr(p.polqual, p.polrelid), pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid),"
+        " p.polqual::pg_catalog.text, p.polwithcheck::pg_catalog.text"
+        " FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid"
+        " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'"
+    ):
+        live[(row[0], row[1])] = row[2:]
     for key in sorted(set(live) - set(expected)):
         failures.append(f"unexpected policy {key[1]} on {key[0]}")
     for key, definition in sorted(expected.items()):
         if key not in live:
             failures.append(f"missing policy {key[1]} on {key[0]}")
             continue
-        permissive, roles, command, using, with_check = live[key]
-        for field, actual, wanted in (
+        relation_oid, permissive, roles, command, using, with_check, using_tree, check_tree = live[key]
+        for field_name, actual, wanted in (
             ("permissive", permissive, definition.permissive),
             ("roles", tuple(roles or ()), definition.roles),
             ("command", command, definition.command),
@@ -188,7 +258,13 @@ def _policy_checks(connection, versions: list[str]) -> list[str]:
             ("WITH CHECK", with_check, definition.with_check),
         ):
             if actual != wanted:
-                failures.append(f"policy {key[1]} on {key[0]} has {field} {actual!r}, expected {wanted!r}")
+                failures.append(f"policy {key[1]} on {key[0]} has {field_name} {actual!r}, expected {wanted!r}")
+        accepted = _expected_owner_signature(connection, relation_oid)
+        for field_name, tree in (("USING", using_tree), ("WITH CHECK", check_tree)):
+            if _tree_signature(tree) not in accepted:
+                failures.append(
+                    f"policy {key[1]} on {key[0]} {field_name} does not bind pg_catalog.= (text,text),"
+                    f" owner_user_id and pg_catalog.current_setting(text,boolean)")
     return failures
 
 
@@ -234,6 +310,7 @@ def run_preflight(
     failures: list[str] = []
     try:
         with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as connection:
+            connection.execute(TRUSTED_SEARCH_PATH)
             role, role_failures = _role_checks(connection)
             failures.extend(role_failures)
             server_version = int(connection.execute("SHOW server_version_num").fetchone()[0])

@@ -82,7 +82,7 @@ def _ledger_rows(connection) -> list[dict] | None:
     if not exists[0]:
         return None
     rows = connection.execute(
-        f"SELECT version, filename, sha256 FROM {LEDGER_TABLE} ORDER BY version"
+        f"SELECT version, filename, sha256 FROM public.{LEDGER_TABLE} ORDER BY version"
     ).fetchall()
     return [{"version": r[0], "filename": r[1], "sha256": r[2]} for r in rows]
 
