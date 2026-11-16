@@ -317,3 +317,22 @@ def test_media_provenance_save_works_with_least_privilege_runtime_role(
             "SELECT owner_user_id, provenance_index, library_item_id::text"
             " FROM cloud_study_media_provenance").fetchall()
     assert rows == [(OWNER_A, 0, item_id)]
+
+
+def test_media_provenance_primary_key_is_its_only_unique_constraint(cloud_db):
+    """The provenance insert uses ON CONFLICT DO NOTHING without a conflict
+    target, which equals the earlier primary-key target only while the primary
+    key is the table's sole unique constraint. A new unique index must revisit it."""
+    cloud_db.runtime()
+    with psycopg.connect(cloud_db.admin_dsn) as connection:
+        unique = connection.execute(
+            """
+            SELECT i.indisprimary, array_agg(a.attname::text ORDER BY k.ord)
+            FROM pg_index AS i
+            CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+            WHERE i.indrelid = 'cloud_study_media_provenance'::regclass AND i.indisunique
+            GROUP BY i.indexrelid, i.indisprimary
+            """
+        ).fetchall()
+    assert unique == [(True, ["owner_user_id", "study_item_id", "provenance_index"])]
