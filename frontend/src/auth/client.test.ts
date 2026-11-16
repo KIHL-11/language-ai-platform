@@ -113,6 +113,26 @@ describe('Cloud authentication client', () => {
     await expect(client.request('/api/items', { method: 'POST' })).rejects.toMatchObject({ status: 401 })
   })
 
+  it('keeps the logout outcome when its own cross-tab invalidate arrives in the same tab', async () => {
+    // The workspace broadcasts 'invalidate' after logout; BroadcastChannel also
+    // delivers it to this tab's own listener, which calls invalidate().
+    const confirmed = await authenticated()
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))
+    await confirmed.logout()
+    confirmed.invalidate()
+    expect(confirmed.getSnapshot().status).toBe('logged-out')
+
+    const unconfirmed = await authenticated()
+    fetchMock.mockRejectedValueOnce(new Error('network unavailable'))
+    await expect(unconfirmed.logout()).rejects.toThrow('network unavailable')
+    unconfirmed.invalidate()
+    expect(unconfirmed.getSnapshot().status).toBe('logout-unconfirmed')
+
+    const otherTab = await authenticated()
+    otherTab.invalidate()
+    expect(otherTab.getSnapshot().status).toBe('expired')
+  })
+
   it('does not let an old logout finalizer clear a newer authenticated identity', async () => {
     const client = await authenticated()
     let resolve!: (response: Response) => void

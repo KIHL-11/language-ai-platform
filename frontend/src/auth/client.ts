@@ -14,7 +14,9 @@ export class CloudAuthClient {
   private controller = new AbortController()
   private listeners = new Set<() => void>()
   private cloud = false
-  invalidate() { this.clear('expired') }
+  // A cross-tab 'invalidate' also reaches the tab that sent it. Keep that tab's
+  // more specific logout outcome, notably the unconfirmed-logout warning.
+  invalidate() { if (this.state.status !== 'logged-out' && this.state.status !== 'logout-unconfirmed') this.clear('expired') }
   getSnapshot = () => this.state
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private publish(state: AuthState) { this.state = state; this.listeners.forEach((listener) => listener()) }
