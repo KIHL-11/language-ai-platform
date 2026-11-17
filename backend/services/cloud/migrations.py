@@ -1,7 +1,10 @@
-"""Forward-only runner for the Cloud Phase 1 migration set (0001-0009).
+"""Forward-only runner for the Cloud Phase 1 / 1.5 migration set.
 
 Safety properties:
-- Only versions listed in the pinned manifest can be applied; 0010+ is refused.
+- Only versions approved in code (``schema.approved_migrations``: 0001-0009 plus
+  any explicitly allowed Phase 1.5 version) and listed in the pinned manifest
+  can be applied, in the approved order without gaps. 0010-0013 are reserved
+  for the frozen B-series and always refused; unknown versions are refused.
 - Every file is checked against its pinned SHA-256 before anything runs.
 - One runner at a time (session advisory lock); a second runner is refused.
 - Each version and its ledger row commit in a single transaction, so a failed
@@ -17,11 +20,11 @@ from pathlib import Path
 import psycopg
 
 from services.cloud.schema import (
-    FIRST_FORBIDDEN_VERSION,
     LEDGER_TABLE,
     MIGRATIONS_DIR,
     Migration,
     SchemaDefinitionError,
+    is_reserved_version,
     load_manifest,
 )
 
@@ -60,8 +63,10 @@ def _resolve_target(manifest: list[Migration], target: str | None) -> str:
     if target is not None:
         if not (isinstance(target, str) and len(target) == 4 and target.isdigit()):
             raise MigrationRefused("Target must be a four-digit version")
-        if int(target) >= FIRST_FORBIDDEN_VERSION:
-            raise MigrationRefused(f"Version {target} is outside the Phase 1 set and is never applied")
+        if is_reserved_version(target):
+            raise MigrationRefused(
+                f"Version {target} is reserved for the frozen B-series, outside the Phase 1 set, "
+                "and is never applied")
         if target not in versions:
             raise MigrationRefused(f"Version {target} is not in the pinned manifest")
         return target
