@@ -1,7 +1,8 @@
 """Static description of the Cloud Phase 1 schema.
 
-Everything here is derived from the migration files 0001-0009 and from the SQL
-the runtime repositories issue. It is data, not a migration: changing it never
+Everything here is derived from the migration files 0001-0009, any explicitly
+approved Phase 1.5 migration (``PHASE15_ALLOWED``), and the SQL the runtime
+repositories issue. It is data, not a migration: changing it never
 changes a database. Preflight compares a live database against it.
 """
 from __future__ import annotations
@@ -15,8 +16,29 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "postgresq
 MANIFEST_NAME = "PHASE1-MANIFEST.sha256"
 LEDGER_TABLE = "cloud_schema_migrations"
 
-# Versions that may exist in the tree but must never be applied by Phase 1.
-FIRST_FORBIDDEN_VERSION = 10
+# The migration gate. Every applicable version is pinned twice: in the manifest
+# file next to the SQL and here in code, by file name and SHA-256. A manifest or
+# file edit alone therefore can neither change nor add a migration; adding one
+# needs a reviewed code change.
+#
+# Phase 1 core, applied first and in this order.
+PHASE1_PINNED: dict[str, tuple[str, str]] = {
+    "0001": ("0001_owner_scoped_library.up.sql", "ca0a24da0ee69bac99f003f8630c02d314fb9cedacba6dd7c1536645d6ebd4c0"),
+    "0002": ("0002_owner_scoped_study_bank.up.sql", "9aaf9eefd466b97ff51ff70536cbc221d746fed2d6a31aee84713eb5403543ef"),
+    "0003": ("0003_owner_scoped_ai_chunk_candidates.up.sql", "25b7f0bf97862c61dbb77cec918f8496ad5829ebf94e6224e602aea2131a7773"),
+    "0004": ("0004_owner_scoped_speaking.up.sql", "c7a51a86bf8cc626ae9d3b85992e803b1be5a00514b6963903727301ab000d35"),
+    "0005": ("0005_browser_sessions.up.sql", "ecc46fb4103ab80fcf3814b302386baa60748d2fd0f2610903580723c0e48553"),
+    "0006": ("0006_topic_session_json_integrity.up.sql", "feb1d43132198a8a9e18e0d62478f43b97514878ebb249e3c59d0436f446578d"),
+    "0007": ("0007_email_login.up.sql", "3a99987962efe95f4e052381c4fa089e4f5d7953ab006b9592a39f3963999f11"),
+    "0008": ("0008_account_identity.up.sql", "6d335603a84f7780bee3f00fd040858b7906f9a6519ac26495555554c026847f"),
+    "0009": ("0009_email_management.up.sql", "f8c57b989f4f9b02319d276cf12b95ee32fc77fb74bfe8bd2db4713e43020ca4"),
+}
+# Reserved for the frozen B-series. Never applied, whatever the manifest says.
+RESERVED_FROZEN_VERSIONS = frozenset({"0010", "0011", "0012", "0013"})
+# Phase 1.5 migrations approved for this code, in apply order (each above 0013).
+# Empty in the gate itself: a migration is added here together with its schema
+# description, in the change that introduces it.
+PHASE15_ALLOWED: dict[str, tuple[str, str]] = {}
 
 _MANIFEST_LINE = re.compile(r"^([0-9a-f]{64})  ((\d{4})_[a-z0-9_]+\.up\.sql)$")
 
@@ -191,16 +213,40 @@ def load_manifest(directory: Path = MIGRATIONS_DIR) -> list[Migration]:
         if match is None:
             raise SchemaDefinitionError(f"Malformed manifest line: {line!r}")
         digest, filename, version = match.groups()
-        if int(version) >= FIRST_FORBIDDEN_VERSION:
-            raise SchemaDefinitionError(f"Version {version} is outside the Phase 1 set")
+        if is_reserved_version(version):
+            raise SchemaDefinitionError(
+                f"Version {version} is reserved for the frozen B-series, outside the Phase 1 set, "
+                "and is never applied")
+        pinned = approved_migrations().get(version)
+        if pinned is None:
+            raise SchemaDefinitionError(f"Version {version} is not an approved migration")
+        if (filename, digest) != pinned:
+            raise SchemaDefinitionError(
+                f"Manifest entry for {version} does not match the pinned file name and digest")
         if version not in TABLES_BY_VERSION:
             raise SchemaDefinitionError(f"Version {version} has no schema description")
         migrations.append(Migration(version, filename, digest, directory / filename))
     versions = [migration.version for migration in migrations]
-    expected = [f"{index:04d}" for index in range(1, len(versions) + 1)]
-    if versions != expected:
-        raise SchemaDefinitionError("Manifest versions must be contiguous from 0001")
+    if versions != list(approved_migrations())[:len(versions)]:
+        raise SchemaDefinitionError(
+            "Manifest versions must follow the approved order from 0001 without gaps")
     return migrations
+
+
+def is_reserved_version(version: str) -> bool:
+    return version in RESERVED_FROZEN_VERSIONS
+
+
+def approved_migrations() -> dict[str, tuple[str, str]]:
+    """Pinned (file name, digest) per version, in apply order: Phase 1 then Phase 1.5."""
+    previous = max(PHASE1_PINNED)
+    for version in PHASE15_ALLOWED:
+        if not (len(version) == 4 and version.isdigit()) or is_reserved_version(version) \
+                or version <= max(RESERVED_FROZEN_VERSIONS) or version <= previous:
+            raise SchemaDefinitionError(
+                f"Approved Phase 1.5 version {version} must be above 0013 and strictly increasing")
+        previous = version
+    return {**PHASE1_PINNED, **PHASE15_ALLOWED}
 
 
 def expected_tables(versions: list[str]) -> set[str]:
@@ -217,8 +263,10 @@ def forced_rls_tables(versions: list[str]) -> set[str]:
 def validate_version(version: str) -> str:
     if not (isinstance(version, str) and len(version) == 4 and version.isdigit()):
         raise ValueError("Versions are four digits")
-    if not 1 <= int(version) < FIRST_FORBIDDEN_VERSION:
-        raise ValueError("Version is outside the Phase 1 set")
+    if is_reserved_version(version):
+        raise ValueError("Version is reserved for the frozen B-series, outside the Phase 1 set")
+    if version not in approved_migrations():
+        raise ValueError("Version is not an approved migration")
     return version
 
 
