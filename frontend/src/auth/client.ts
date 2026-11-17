@@ -1,5 +1,5 @@
 export type AuthState =
-  | { status: 'loading' | 'unavailable' | 'expired' | 'csrf-invalid' | 'logged-out' | 'logout-unconfirmed'; generation: number }
+  | { status: 'loading' | 'unavailable' | 'expired' | 'csrf-invalid' | 'logged-out' | 'logout-unconfirmed' | 'logout-unconfirmed-elsewhere'; generation: number }
   | { status: 'personal'; generation: number }
   | { status: 'authenticated'; userId: string; email: string | null; generation: number }
 
@@ -17,10 +17,37 @@ export class CloudAuthClient {
   // A cross-tab 'invalidate' also reaches the tab that sent it. Keep that tab's
   // more specific logout outcome, notably the unconfirmed-logout warning.
   invalidate() { if (this.state.status !== 'logged-out' && this.state.status !== 'logout-unconfirmed') this.clear('expired') }
+  // Cross-tab auth messages; a tab also receives the messages it sent itself.
+  // logout-confirmed: the server ended the session, so other tabs are invalidated
+  // (and a tab still showing an unconfirmed logout learns it is now done).
+  // logout-unconfirmed: the session may still be live, so an authenticated tab
+  // closes its workspace and waits for a session check or a retried logout.
+  // 'invalidate' is what tabs on the previous build send; it never overrides a
+  // logout outcome.
+  receive(kind: unknown) {
+    const status = this.state.status
+    if (kind === 'logout-unconfirmed') { if (status === 'authenticated') this.clear('logout-unconfirmed-elsewhere') }
+    else if (kind === 'logout-confirmed') { if (status === 'logout-unconfirmed') this.clear('logged-out'); else this.invalidate() }
+    else if (kind === 'invalidate') this.invalidate()
+  }
+  // From the unconfirmed-elsewhere state: re-read the session. 200 resumes it, 401
+  // shows it as ended; an unreachable server keeps the warning in place.
+  async checkSession() {
+    await this.refresh()
+    if (this.state.status === 'unavailable') this.clear('logout-unconfirmed-elsewhere')
+  }
+  // Re-read the session for a fresh CSRF token, then sign out again. A session the
+  // server already ended counts as signed out.
+  async retryLogout() {
+    await this.refresh()
+    if (this.state.status === 'expired') { this.clear('logged-out'); return }
+    if (this.state.status !== 'authenticated') { this.clear('logout-unconfirmed-elsewhere'); throw new CloudAuthError(503, 'Session check failed') }
+    await this.logout()
+  }
   getSnapshot = () => this.state
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private publish(state: AuthState) { this.state = state; this.listeners.forEach((listener) => listener()) }
-  private clear(status: 'loading' | 'unavailable' | 'expired' | 'csrf-invalid' | 'logged-out' | 'logout-unconfirmed') {
+  private clear(status: 'loading' | 'unavailable' | 'expired' | 'csrf-invalid' | 'logged-out' | 'logout-unconfirmed' | 'logout-unconfirmed-elsewhere') {
     this.controller.abort(); this.controller = new AbortController(); this.csrf = null
     this.publish({ status, generation: this.state.generation + 1 })
   }
@@ -164,7 +191,7 @@ export async function verifyEmailLogin(challengeId: string, code: string): Promi
 
 export const AUTH_CHANNEL = 'language-ai-auth-invalidation'
 // Other tabs re-check the account on 'signed-in' and drop private views on 'invalidate'.
-export function broadcastAuth(kind: 'invalidate' | 'signed-in') {
+export function broadcastAuth(kind: 'signed-in' | 'logout-confirmed' | 'logout-unconfirmed') {
   if (typeof BroadcastChannel === 'undefined') return
   const channel = new BroadcastChannel(AUTH_CHANNEL)
   channel.postMessage(kind)

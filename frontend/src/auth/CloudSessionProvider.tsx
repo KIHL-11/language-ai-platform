@@ -53,11 +53,12 @@ export function CloudSessionProvider({ children }: { children: ReactNode }) {
     const refresh = () => { if (cloudAuth.getSnapshot().status === 'authenticated') void cloudAuth.refresh() }
     window.addEventListener('focus', refresh)
     const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(AUTH_CHANNEL)
-    if (channel) channel.onmessage = (event: MessageEvent) => { if (event.data === 'signed-in') void cloudAuth.refresh(); else cloudAuth.invalidate() }
+    if (channel) channel.onmessage = (event: MessageEvent) => { if (event.data === 'signed-in') void cloudAuth.refresh(); else cloudAuth.receive(event.data) }
     return () => { active = false; window.removeEventListener('focus', refresh); channel?.close() }
   }, [])
   if (!bootstrapped) return <main><p role="status">Checking server deployment…</p></main>
   if (state.status === 'personal') return children
+  if (state.status === 'logout-unconfirmed-elsewhere') return <LogoutUnconfirmedElsewhere />
   if (state.status === 'authenticated') {
     const view = viewFor?.userId === state.userId ? viewFor.view : weChat && weChat.purpose !== 'login' ? 'account' : 'study'
     return <CloudWorkspace key={`${state.userId}:${state.generation}`} userId={state.userId} email={state.email} weChat={weChat} view={view} setView={(next) => setViewFor({ userId: state.userId, view: next })} />
@@ -67,9 +68,10 @@ export function CloudSessionProvider({ children }: { children: ReactNode }) {
 
 function CloudWorkspace({ userId, email, weChat, view, setView }: { userId: string; email: string | null; weChat: WeChatResult | null; view: View; setView: (view: View) => void }) {
   async function logout(everywhere = false) {
-    try { await (everywhere ? cloudAuth.revokeAll() : cloudAuth.logout()) }
+    let confirmed = false
+    try { await (everywhere ? cloudAuth.revokeAll() : cloudAuth.logout()); confirmed = true }
     catch { /* The auth gate displays an unconfirmed logout state. */ }
-    finally { broadcastAuth('invalidate') }
+    finally { broadcastAuth(confirmed ? 'logout-confirmed' : 'logout-unconfirmed') }
   }
   return <div><header className="p-5"><h1>Language AI — Cloud</h1>{email && <p>Signed in as {email}</p>}<nav aria-label="Cloud learning"><button onClick={() => setView('library')}>My Library</button><button onClick={() => setView('study')}>Words & Chunks</button><button onClick={() => setView('review')}>Daily Review</button><button onClick={() => setView('topics')}>Topic Speaking</button><button onClick={() => setView('account')}>Sign-in methods</button><button onClick={() => void logout()}>Sign out</button><button onClick={() => void logout(true)}>Sign out everywhere</button></nav></header>{view === 'library' ? <CloudLibrary /> : view === 'study' ? <StudyBankPage /> : view === 'review' ? <DailyReviewPage /> : view === 'account' ? <AccountSecurity userId={userId} notice={weChat?.message} /> : <TopicSpeakingCurriculum learnerId={userId} onBack={() => setView('study')} />}</div>
 }
@@ -84,4 +86,23 @@ function CloudLibrary() {
     return () => { active = false }
   }, [])
   return <main className="p-8"><h2>My Library</h2><p>Cloud Library read-only preview. Local training and media workflows remain unavailable.</p>{error && <p role="alert">Library unavailable.</p>}<ul>{items.map((item) => <li key={item.id}><button onClick={() => void getLibraryItem(item.id).then(setSelected).catch(() => setError(true))}>{item.title}</button></li>)}</ul>{selected && <article><h3>{selected.lesson.title}</h3>{selected.lesson.sentences.map((sentence) => <p key={sentence.id}>{sentence.text}</p>)}</article>}</main>
+}
+
+// Another tab tried to sign out and the server did not confirm it. This tab's
+// session may still be live, so its workspace (and every request) stays closed
+// until the learner rechecks the session or retries the sign-out.
+function LogoutUnconfirmedElsewhere() {
+  const [busy, setBusy] = useState(false)
+  async function check() {
+    setBusy(true)
+    try { await cloudAuth.checkSession() } finally { setBusy(false) }
+  }
+  async function retry() {
+    setBusy(true)
+    let confirmed = false
+    try { await cloudAuth.retryLogout(); confirmed = cloudAuth.getSnapshot().status === 'logged-out' }
+    catch { /* The gate shows the unconfirmed outcome. */ }
+    finally { broadcastAuth(confirmed ? 'logout-confirmed' : 'logout-unconfirmed'); setBusy(false) }
+  }
+  return <main className="mx-auto max-w-3xl p-8"><h1>Language AI — Cloud session</h1><p role="status">另一个标签页尝试退出，但服务器未确认。当前会话可能仍然有效。</p><button type="button" disabled={busy} onClick={() => void check()}>检查会话</button><button type="button" disabled={busy} onClick={() => void retry()}>重试退出</button></main>
 }
