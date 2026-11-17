@@ -282,3 +282,88 @@ def test_personal_mode_never_bootstraps_cloud_storage(media_root, clean_app, mon
     assert client.get("/api/deployment").json() == {"mode": "personal"}
     assert not hasattr(clean_app.state, "cloud_storage_status")
     assert not any(hasattr(clean_app.state, key) for key in STATE_KEYS)
+
+
+def test_media_provenance_save_works_with_least_privilege_runtime_role(
+    cloud_db, media_root, clean_app, monkeypatch
+):
+    """The runtime role has INSERT only on cloud_study_media_provenance (PR-R
+    manifest). An ON CONFLICT clause naming a conflict target would also need
+    SELECT, so saving a Library-backed Study Bank item failed with 503."""
+    import test_owner_scoped_study_bank as study_tests
+
+    dsn = cloud_db.runtime()
+    cloud_db.execute("INSERT INTO cloud_users (user_id, created_at) VALUES (%s, %s)", (OWNER_A, NOW))
+    monkeypatch.setenv("LANGUAGE_AI_DEPLOYMENT_MODE", "cloud")
+    monkeypatch.setenv("CLOUD_STORAGE_DATABASE_URL", dsn)
+    monkeypatch.setenv("CLOUD_MEDIA_ROOT", str(media_root))
+    sessions = BrowserSessionRepository(dsn)
+    configure_browser_sessions(clean_app, sessions, SessionPolicy(ORIGIN))
+    client, headers = _browser(sessions, OWNER_A)
+    lesson = study_tests._lesson().model_dump(mode="json")
+    item_id = client.post("/api/library/items", json={"lesson": lesson}, headers=headers).json()["id"]
+    body = {"items": [study_tests._media(OWNER_A, item_id).model_dump(mode="json")]}
+
+    first = client.post("/api/study-bank/items/bulk", json=body, headers=headers)
+    again = client.post("/api/study-bank/items/bulk", json=body, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] == 1
+    assert again.status_code == 200, again.text
+    assert again.json()["created"] == 0
+    assert again.json()["items"][0]["id"] == first.json()["items"][0]["id"]
+    with psycopg.connect(cloud_db.admin_dsn) as connection:
+        rows = connection.execute(
+            "SELECT owner_user_id, provenance_index, library_item_id::text"
+            " FROM cloud_study_media_provenance").fetchall()
+    assert rows == [(OWNER_A, 0, item_id)]
+
+
+_PROVENANCE_PK = (
+    True,
+    "CREATE UNIQUE INDEX cloud_study_media_provenance_pkey ON public.cloud_study_media_provenance"
+    " USING btree (owner_user_id, study_item_id, provenance_index)",
+)
+
+
+def _provenance_unique_indexes(admin_dsn):
+    """Every unique index on the table, expression and partial ones included.
+
+    Reads pg_index directly; pg_get_indexdef renders expression keys and WHERE
+    clauses, which a join on indkey/pg_attribute would silently drop.
+    """
+    with psycopg.connect(admin_dsn) as connection:
+        return connection.execute(
+            """
+            SELECT i.indisprimary, pg_get_indexdef(i.indexrelid)
+            FROM pg_index AS i
+            WHERE i.indrelid = 'public.cloud_study_media_provenance'::regclass AND i.indisunique
+            ORDER BY pg_get_indexdef(i.indexrelid)
+            """
+        ).fetchall()
+
+
+def test_media_provenance_primary_key_is_its_only_unique_constraint(cloud_db):
+    """The provenance insert uses ON CONFLICT DO NOTHING without a conflict
+    target, which equals the earlier primary-key target only while the primary
+    key is the table's sole unique constraint. A new unique index must revisit it."""
+    cloud_db.runtime()
+    assert _provenance_unique_indexes(cloud_db.admin_dsn) == [_PROVENANCE_PK]
+
+
+@pytest.mark.parametrize("extra_index", [
+    "CREATE UNIQUE INDEX provenance_expression_unique ON cloud_study_media_provenance"
+    " (lower(owner_user_id), study_item_id)",
+    "CREATE UNIQUE INDEX provenance_partial_unique ON cloud_study_media_provenance"
+    " (library_item_id) WHERE library_item_id IS NOT NULL",
+    "CREATE UNIQUE INDEX provenance_column_unique ON cloud_study_media_provenance (library_item_id)",
+])
+def test_media_provenance_unique_guard_detects_any_extra_unique_index(cloud_db, extra_index):
+    """Negative check for the guard above: an expression, partial or plain unique
+    index is reported, so the guard cannot pass while such an index exists."""
+    cloud_db.runtime()
+    cloud_db.execute(extra_index)
+    found = _provenance_unique_indexes(cloud_db.admin_dsn)
+    assert _PROVENANCE_PK in found
+    assert len(found) == 2
+    assert found != [_PROVENANCE_PK]
