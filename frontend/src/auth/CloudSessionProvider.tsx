@@ -99,10 +99,16 @@ function LogoutUnconfirmedElsewhere() {
   }
   async function retry() {
     setBusy(true)
-    let confirmed = false
-    try { await cloudAuth.retryLogout(); confirmed = cloudAuth.getSnapshot().status === 'logged-out' }
-    catch { /* The gate shows the unconfirmed outcome. */ }
-    finally { broadcastAuth(confirmed ? 'logout-confirmed' : 'logout-unconfirmed'); setBusy(false) }
+    try { await cloudAuth.retryLogout() }
+    catch { /* The gate shows the outcome. */ }
+    finally {
+      // Broadcast only an outcome this retry produced; a retry superseded by
+      // another tab's message or a new sign-in announces nothing.
+      const status = cloudAuth.getSnapshot().status
+      if (status === 'logged-out') broadcastAuth('logout-confirmed')
+      else if (status === 'logout-unconfirmed') broadcastAuth('logout-unconfirmed')
+      setBusy(false)
+    }
   }
   return <main className="mx-auto max-w-3xl p-8"><h1>Language AI — Cloud session</h1><p role="status">另一个标签页尝试退出，但服务器未确认。当前会话可能仍然有效。</p><button type="button" disabled={busy} onClick={() => void check()}>检查会话</button><button type="button" disabled={busy} onClick={() => void retry()}>重试退出</button></main>
 }

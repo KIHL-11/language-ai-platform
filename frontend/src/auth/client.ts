@@ -20,13 +20,15 @@ export class CloudAuthClient {
   // Cross-tab auth messages; a tab also receives the messages it sent itself.
   // logout-confirmed: the server ended the session, so other tabs are invalidated
   // (and a tab still showing an unconfirmed logout learns it is now done).
-  // logout-unconfirmed: the session may still be live, so an authenticated tab
-  // closes its workspace and waits for a session check or a retried logout.
+  // logout-unconfirmed: the session may still be live, so an authenticated tab, or
+  // one in the middle of a session refresh, closes its workspace and waits for a
+  // session check or a retried logout. clear() aborts the in-flight /me and moves
+  // the generation on, so a late answer (or error) cannot reopen the workspace.
   // 'invalidate' is what tabs on the previous build send; it never overrides a
   // logout outcome.
   receive(kind: unknown) {
     const status = this.state.status
-    if (kind === 'logout-unconfirmed') { if (status === 'authenticated') this.clear('logout-unconfirmed-elsewhere') }
+    if (kind === 'logout-unconfirmed') { if (status === 'authenticated' || status === 'loading') this.clear('logout-unconfirmed-elsewhere') }
     else if (kind === 'logout-confirmed') { if (status === 'logout-unconfirmed') this.clear('logged-out'); else this.invalidate() }
     else if (kind === 'invalidate') this.invalidate()
   }
@@ -36,13 +38,35 @@ export class CloudAuthClient {
     await this.refresh()
     if (this.state.status === 'unavailable') this.clear('logout-unconfirmed-elsewhere')
   }
-  // Re-read the session for a fresh CSRF token, then sign out again. A session the
-  // server already ended counts as signed out.
+  // Re-read the session for a fresh CSRF token, then sign out again. The token is
+  // kept internal: the tab stays in its gated state (no learning request can run)
+  // until the logout outcome is known. A session the server already ended (401)
+  // counts as signed out. Anything that moves the generation meanwhile (another
+  // tab's message, a new sign-in) wins, and this retry's outcome is dropped.
   async retryLogout() {
-    await this.refresh()
-    if (this.state.status === 'expired') { this.clear('logged-out'); return }
-    if (this.state.status !== 'authenticated') { this.clear('logout-unconfirmed-elsewhere'); throw new CloudAuthError(503, 'Session check failed') }
-    await this.logout()
+    const generation = this.state.generation
+    const signal = this.controller.signal
+    const current = () => generation === this.state.generation
+    let token: string
+    try {
+      const me = await fetch('/api/account/me', { credentials: 'same-origin', redirect: 'error', cache: 'no-store', signal })
+      if (!current()) throw new CloudAuthError(409, 'Superseded')
+      if (me.status === 401) { this.clear('logged-out'); return }
+      if (!me.ok) throw new CloudAuthError(me.status, 'Session check failed')
+      const value = await me.json() as { csrf_token?: unknown }
+      if (!current()) throw new CloudAuthError(409, 'Superseded')
+      if (typeof value.csrf_token !== 'string' || !/^[a-f0-9]{64}$/.test(value.csrf_token)) throw new CloudAuthError(503, 'Session check failed')
+      token = value.csrf_token
+    } catch (error) {
+      if (current()) this.clear('logout-unconfirmed-elsewhere')
+      throw error instanceof CloudAuthError ? error : new CloudAuthError(503, 'Session check failed')
+    }
+    let outcome: 'logged-out' | 'logout-unconfirmed' = 'logout-unconfirmed'
+    try {
+      const response = await fetch('/api/account/logout', { method: 'POST', headers: new Headers({ 'X-CSRF-Token': token }), credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal })
+      if (response.ok || response.status === 401) outcome = 'logged-out'
+      else throw new CloudAuthError(response.status, 'Logout not confirmed')
+    } finally { if (current()) this.clear(outcome) }
   }
   getSnapshot = () => this.state
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener) }
