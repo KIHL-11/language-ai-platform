@@ -319,20 +319,51 @@ def test_media_provenance_save_works_with_least_privilege_runtime_role(
     assert rows == [(OWNER_A, 0, item_id)]
 
 
+_PROVENANCE_PK = (
+    True,
+    "CREATE UNIQUE INDEX cloud_study_media_provenance_pkey ON public.cloud_study_media_provenance"
+    " USING btree (owner_user_id, study_item_id, provenance_index)",
+)
+
+
+def _provenance_unique_indexes(admin_dsn):
+    """Every unique index on the table, expression and partial ones included.
+
+    Reads pg_index directly; pg_get_indexdef renders expression keys and WHERE
+    clauses, which a join on indkey/pg_attribute would silently drop.
+    """
+    with psycopg.connect(admin_dsn) as connection:
+        return connection.execute(
+            """
+            SELECT i.indisprimary, pg_get_indexdef(i.indexrelid)
+            FROM pg_index AS i
+            WHERE i.indrelid = 'public.cloud_study_media_provenance'::regclass AND i.indisunique
+            ORDER BY pg_get_indexdef(i.indexrelid)
+            """
+        ).fetchall()
+
+
 def test_media_provenance_primary_key_is_its_only_unique_constraint(cloud_db):
     """The provenance insert uses ON CONFLICT DO NOTHING without a conflict
     target, which equals the earlier primary-key target only while the primary
     key is the table's sole unique constraint. A new unique index must revisit it."""
     cloud_db.runtime()
-    with psycopg.connect(cloud_db.admin_dsn) as connection:
-        unique = connection.execute(
-            """
-            SELECT i.indisprimary, array_agg(a.attname::text ORDER BY k.ord)
-            FROM pg_index AS i
-            CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-            JOIN pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-            WHERE i.indrelid = 'cloud_study_media_provenance'::regclass AND i.indisunique
-            GROUP BY i.indexrelid, i.indisprimary
-            """
-        ).fetchall()
-    assert unique == [(True, ["owner_user_id", "study_item_id", "provenance_index"])]
+    assert _provenance_unique_indexes(cloud_db.admin_dsn) == [_PROVENANCE_PK]
+
+
+@pytest.mark.parametrize("extra_index", [
+    "CREATE UNIQUE INDEX provenance_expression_unique ON cloud_study_media_provenance"
+    " (lower(owner_user_id), study_item_id)",
+    "CREATE UNIQUE INDEX provenance_partial_unique ON cloud_study_media_provenance"
+    " (library_item_id) WHERE library_item_id IS NOT NULL",
+    "CREATE UNIQUE INDEX provenance_column_unique ON cloud_study_media_provenance (library_item_id)",
+])
+def test_media_provenance_unique_guard_detects_any_extra_unique_index(cloud_db, extra_index):
+    """Negative check for the guard above: an expression, partial or plain unique
+    index is reported, so the guard cannot pass while such an index exists."""
+    cloud_db.runtime()
+    cloud_db.execute(extra_index)
+    found = _provenance_unique_indexes(cloud_db.admin_dsn)
+    assert _PROVENANCE_PK in found
+    assert len(found) == 2
+    assert found != [_PROVENANCE_PK]
