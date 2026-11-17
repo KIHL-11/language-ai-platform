@@ -285,3 +285,31 @@ def test_lrls_11_concurrent_sessions_are_isolated(library):
                     "UPDATE cloud_library_items SET owner_user_id = %s WHERE item_id = %s", (OWNER_B, a.id))
     assert library.repo.get_for_owner(OWNER_A, a.id).id == a.id
     assert library.repo.get_for_owner(OWNER_B, b.id).id == b.id
+
+
+# LRLS-12 (PR-D on RLS): a deleted or replaced audio object leaves a persisted
+# 'pending' outbox row bound to its owner; only that owner's context sees it, and
+# the synthetic file stays on disk (no synchronous unlink, no cleanup worker).
+def test_lrls_12_pending_outbox_rows_are_owner_bound_under_rls(library):
+    item = library.repo.create_for_owner(OWNER_A, lesson(id="lesson-a"))
+    library.repo.put_audio_for_owner(OWNER_A, item.id, filename="first.mp3",
+                                     content_type="audio/mpeg", content=b"synthetic-first")
+    first = library.repo.audio_for_owner(OWNER_A, item.id).path
+    library.repo.put_audio_for_owner(OWNER_A, item.id, filename="second.mp3",
+                                     content_type="audio/mpeg", content=b"synthetic-second")
+    second = library.repo.audio_for_owner(OWNER_A, item.id).path
+    library.repo.delete_for_owner(OWNER_A, item.id)
+
+    root = library.repo.media_objects.root.resolve()
+    expected = sorted([
+        (OWNER_A, item.id, first.relative_to(root).as_posix(), "pending", 0),
+        (OWNER_A, item.id, second.relative_to(root).as_posix(), "pending", 0),
+    ])
+    query = ("SELECT owner_user_id, library_item_id::text, object_key, status, attempt_count"
+             " FROM cloud_media_cleanup_outbox ORDER BY object_key")
+    assert sorted(_as(library.dsn, OWNER_A, query)) == expected
+    assert _as(library.dsn, OWNER_B, query) == []
+    assert _as(library.dsn, None, query) == []
+    assert first.read_bytes() == b"synthetic-first" and second.read_bytes() == b"synthetic-second"
+    with pytest.raises(KeyError):
+        library.repo.audio_for_owner(OWNER_A, item.id)
