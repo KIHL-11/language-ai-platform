@@ -38,7 +38,12 @@ RESERVED_FROZEN_VERSIONS = frozenset({"0010", "0011", "0012", "0013"})
 # Phase 1.5 migrations approved for this code, in apply order (each above 0013).
 # Empty in the gate itself: a migration is added here together with its schema
 # description, in the change that introduces it.
-PHASE15_ALLOWED: dict[str, tuple[str, str]] = {}
+PHASE15_ALLOWED: dict[str, tuple[str, str]] = {
+    # Library row level security (PR-L): ENABLE + FORCE RLS and one owner policy
+    # on the three Library tables of 0001. No tables, columns or grants change.
+    "0014": ("0014_library_row_level_security.up.sql",
+             "a8ece18b59b42f24a530c23a6ccec19299c41678b0aca1903b50230437a56c0c"),
+}
 
 _MANIFEST_LINE = re.compile(r"^([0-9a-f]{64})  ((\d{4})_[a-z0-9_]+\.up\.sql)$")
 
@@ -67,13 +72,23 @@ TABLES_BY_VERSION: dict[str, tuple[str, ...]] = {
     "0007": ("cloud_external_identities", "cloud_email_login_challenges"),
     "0008": ("cloud_oauth_states",),
     "0009": (),
+    "0014": (),
 }
 
 # Tables that the migrations put under ENABLE + FORCE row level security.
+# Library tables put under row level security by 0014. cloud_users stays
+# without RLS: it is keyed by user_id and only used to check provisioning.
+LIBRARY_RLS_TABLES = (
+    "cloud_library_items",
+    "cloud_library_media_assets",
+    "cloud_media_cleanup_outbox",
+)
+
 FORCED_RLS_BY_VERSION: dict[str, tuple[str, ...]] = {
     "0002": TABLES_BY_VERSION["0002"],
     "0003": TABLES_BY_VERSION["0003"],
     "0004": TABLES_BY_VERSION["0004"],
+    "0014": LIBRARY_RLS_TABLES,
 }
 
 # The complete row-level-security policy set. Every forced-RLS table has
@@ -93,6 +108,9 @@ POLICY_NAMES: dict[str, str] = {
     "cloud_topic_sessions": "cloud_topic_sessions_owner",
     "cloud_topic_targets": "cloud_topic_targets_owner",
     "cloud_topic_requests": "cloud_topic_requests_owner",
+    "cloud_library_items": "cloud_library_items_owner_policy",
+    "cloud_library_media_assets": "cloud_library_media_owner_policy",
+    "cloud_media_cleanup_outbox": "cloud_media_cleanup_owner_policy",
 }
 
 

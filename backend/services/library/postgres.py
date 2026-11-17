@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import hashlib
 import mimetypes
 import os
@@ -173,7 +175,7 @@ class PostgresOwnerScopedLibraryRepository:
     def list_for_owner(self, owner_user_id: str) -> list[LibraryItem]:
         self._validate_owner(owner_user_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 rows = connection.execute(
                     self._item_select(
@@ -194,7 +196,7 @@ class PostgresOwnerScopedLibraryRepository:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     self._item_select(
@@ -227,7 +229,7 @@ class PostgresOwnerScopedLibraryRepository:
         )
         item_id = str(uuid.uuid4())
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     """
@@ -286,7 +288,7 @@ class PostgresOwnerScopedLibraryRepository:
         object_keys: list[str] = []
         cleanup_ids: dict[str, str] = {}
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 object_keys = [
                     row["object_key"]
@@ -343,15 +345,15 @@ class PostgresOwnerScopedLibraryRepository:
             try:
                 self.media_objects.delete(object_key, owner_user_id, item_id)
             except LibraryStoreError:
-                self._record_cleanup_failure(cleanup_ids[object_key])
+                self._record_cleanup_failure(owner_user_id, cleanup_ids[object_key])
             else:
-                self._complete_cleanup(cleanup_ids[object_key])
+                self._complete_cleanup(owner_user_id, cleanup_ids[object_key])
 
     def audio_for_owner(self, owner_user_id: str, item_id: str) -> OwnerScopedAudio:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     """
@@ -401,7 +403,7 @@ class PostgresOwnerScopedLibraryRepository:
         media_id = str(uuid.uuid4())
         previous_key: str | None = None
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 previous = connection.execute(
                     """
                     SELECT object_key FROM cloud_library_media_assets
@@ -475,7 +477,7 @@ class PostgresOwnerScopedLibraryRepository:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     self._item_select(
@@ -520,31 +522,46 @@ class PostgresOwnerScopedLibraryRepository:
             raise LibraryStoreError("Cloud Library update could not be read back")
         return self._row_to_item(result)
 
-    def _connect(self):
-        return psycopg.connect(self._dsn, row_factory=dict_row)
+    @contextmanager
+    def _owner_transaction(self, owner_user_id: str):
+        """One transaction bound to the authenticated owner for row level security.
 
-    def _record_cleanup_failure(self, cleanup_id: str) -> None:
+        ``app.current_owner`` is set transaction-locally (``set_config(..., true)``)
+        before any table is touched, so it cannot leak into a later transaction
+        on the same connection. RLS (migration 0014) is a second barrier behind
+        the owner predicates every query already carries; the owner value comes
+        from the authenticated identity, never from request data.
+        """
+        self._validate_owner(owner_user_id)
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            connection.execute(
+                "SELECT set_config('app.current_owner', %s, true)", (owner_user_id,)
+            )
+            yield connection
+
+    def _record_cleanup_failure(self, owner_user_id: str, cleanup_id: str) -> None:
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 connection.execute(
                     """
                     UPDATE cloud_media_cleanup_outbox
                     SET attempt_count = attempt_count + 1, updated_at = %s
-                    WHERE cleanup_id = %s
+                    WHERE owner_user_id = %s AND cleanup_id = %s
                     """,
-                    (self._now(), cleanup_id),
+                    (self._now(), owner_user_id, cleanup_id),
                 )
         except psycopg.Error:
             # The original outbox row was committed with the Library deletion.
             # Losing this best-effort counter update cannot erase that evidence.
             return
 
-    def _complete_cleanup(self, cleanup_id: str) -> None:
+    def _complete_cleanup(self, owner_user_id: str, cleanup_id: str) -> None:
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 connection.execute(
-                    "DELETE FROM cloud_media_cleanup_outbox WHERE cleanup_id = %s",
-                    (cleanup_id,),
+                    "DELETE FROM cloud_media_cleanup_outbox"
+                    " WHERE owner_user_id = %s AND cleanup_id = %s",
+                    (owner_user_id, cleanup_id),
                 )
         except psycopg.Error:
             # A stale pending row is safe and retryable; never recreate access
