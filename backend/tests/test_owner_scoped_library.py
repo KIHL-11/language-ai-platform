@@ -384,7 +384,31 @@ def test_audio_read_rejects_metadata_with_wrong_owner_namespace(
     assert response.content != b"must-not-leak"
 
 
-def test_cloud_delete_removes_only_authorized_metadata_and_object(postgres_repository):
+def _pending_cleanup_rows():
+    with psycopg.connect(_dsn()) as connection:
+        return connection.execute(
+            """
+            SELECT owner_user_id, library_item_id, object_key, status, attempt_count
+            FROM cloud_media_cleanup_outbox
+            ORDER BY created_at, object_key
+            """
+        ).fetchall()
+
+
+def _forbid_physical_delete(monkeypatch, repository):
+    calls = []
+
+    def forbidden(*args):
+        calls.append(args)
+        raise AssertionError("request path must not unlink Library audio")
+
+    monkeypatch.setattr(repository.media_objects, "delete", forbidden)
+    return calls
+
+
+def test_cloud_delete_removes_only_authorized_metadata_and_queues_object(
+    monkeypatch, postgres_repository
+):
     item = postgres_repository.create_for_owner(OWNER_A, lesson())
     postgres_repository.put_audio_for_owner(
         OWNER_A,
@@ -394,19 +418,33 @@ def test_cloud_delete_removes_only_authorized_metadata_and_object(postgres_repos
         content=b"synthetic-wave",
     )
     audio_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    object_key = audio_path.relative_to(
+        postgres_repository.media_objects.root.resolve()
+    ).as_posix()
+    calls = _forbid_physical_delete(monkeypatch, postgres_repository)
 
     with _as_owner(OWNER_B, postgres_repository):
         assert client.delete(f"/api/library/items/{item.id}").status_code == 404
     assert audio_path.exists()
+    assert _pending_cleanup_rows() == []
 
     with _as_owner(OWNER_A, postgres_repository):
+        assert client.get(f"/api/library/items/{item.id}/audio").status_code == 200
         assert client.delete(f"/api/library/items/{item.id}").status_code == 204
-    assert not audio_path.exists()
+        # Metadata is gone, so the bytes are no longer reachable through the API.
+        assert client.get(f"/api/library/items/{item.id}/audio").status_code == 404
     with pytest.raises(KeyError):
         postgres_repository.get_for_owner(OWNER_A, item.id)
+    # Intentional Phase 1.5 behaviour: the request path never unlinks; the object
+    # stays on disk behind an auditable pending row until approved cleanup runs.
+    assert calls == []
+    assert audio_path.exists()
+    assert _pending_cleanup_rows() == [
+        (OWNER_A, uuid.UUID(item.id), object_key, "pending", 0)
+    ]
 
 
-def test_delete_failure_keeps_durable_cleanup_outbox(
+def test_delete_never_touches_object_store_and_keeps_durable_cleanup_outbox(
     monkeypatch, postgres_repository
 ):
     item = postgres_repository.create_for_owner(OWNER_A, lesson())
@@ -418,26 +456,78 @@ def test_delete_failure_keeps_durable_cleanup_outbox(
         content=b"cleanup-evidence",
     )
     audio_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    calls = _forbid_physical_delete(monkeypatch, postgres_repository)
 
-    def fail_delete(*_args):
-        from services.library.store import LibraryStoreError
-
-        raise LibraryStoreError("synthetic object-store failure")
-
-    monkeypatch.setattr(postgres_repository.media_objects, "delete", fail_delete)
     with _as_owner(OWNER_A, postgres_repository):
         response = client.delete(f"/api/library/items/{item.id}")
+        repeat = client.delete(f"/api/library/items/{item.id}")
 
     assert response.status_code == 204
-    assert audio_path.exists()
-    with psycopg.connect(_dsn()) as connection:
-        pending = connection.execute(
-            """
-            SELECT owner_user_id, library_item_id, status, attempt_count
-            FROM cloud_media_cleanup_outbox
-            """
-        ).fetchone()
-    assert pending == (OWNER_A, uuid.UUID(item.id), "pending", 1)
+    assert repeat.status_code == 404
+    assert calls == []
+    assert audio_path.read_bytes() == b"cleanup-evidence"
+    rows = _pending_cleanup_rows()
+    assert [(r[0], r[1], r[3], r[4]) for r in rows] == [
+        (OWNER_A, uuid.UUID(item.id), "pending", 0)
+    ]
+
+
+def test_audio_replace_queues_previous_object_instead_of_unlinking(
+    monkeypatch, postgres_repository
+):
+    item = postgres_repository.create_for_owner(OWNER_A, lesson())
+    postgres_repository.put_audio_for_owner(
+        OWNER_A, item.id, filename="first.mp3", content_type="audio/mpeg",
+        content=b"first-take",
+    )
+    first_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    root = postgres_repository.media_objects.root.resolve()
+    calls = _forbid_physical_delete(monkeypatch, postgres_repository)
+
+    postgres_repository.put_audio_for_owner(
+        OWNER_A, item.id, filename="second.mp3", content_type="audio/mpeg",
+        content=b"second-take",
+    )
+
+    with _as_owner(OWNER_A, postgres_repository):
+        playback = client.get(f"/api/library/items/{item.id}/audio")
+    assert playback.status_code == 200
+    assert playback.content == b"second-take"
+    assert calls == []
+    assert first_path.read_bytes() == b"first-take"
+    assert _pending_cleanup_rows() == [
+        (OWNER_A, uuid.UUID(item.id), first_path.relative_to(root).as_posix(), "pending", 0)
+    ]
+    with _as_owner(OWNER_B, postgres_repository):
+        assert client.get(f"/api/library/items/{item.id}/audio").status_code == 404
+
+
+def test_audio_replace_database_failure_keeps_previous_object_live(
+    monkeypatch, postgres_repository
+):
+    item = postgres_repository.create_for_owner(OWNER_A, lesson())
+    postgres_repository.put_audio_for_owner(
+        OWNER_A, item.id, filename="first.mp3", content_type="audio/mpeg",
+        content=b"first-take",
+    )
+    first_path = postgres_repository.audio_for_owner(OWNER_A, item.id).path
+    media_dir = first_path.parent
+
+    def broken_queue(*_args):
+        raise psycopg.OperationalError("synthetic outbox failure")
+
+    monkeypatch.setattr(postgres_repository, "_queue_object_cleanup", broken_queue)
+    with pytest.raises(psycopg.OperationalError):
+        postgres_repository.put_audio_for_owner(
+            OWNER_A, item.id, filename="second.mp3", content_type="audio/mpeg",
+            content=b"second-take",
+        )
+
+    # The rolled-back attempt leaves the previous audio referenced and playable;
+    # only the never-referenced new object is compensated away.
+    assert sorted(p.name for p in media_dir.iterdir()) == [first_path.name]
+    assert postgres_repository.audio_for_owner(OWNER_A, item.id).path == first_path
+    assert _pending_cleanup_rows() == []
 
 
 def test_database_unavailable_is_a_redacted_controlled_503(tmp_path):
