@@ -313,3 +313,26 @@ def test_lrls_12_pending_outbox_rows_are_owner_bound_under_rls(library):
     assert first.read_bytes() == b"synthetic-first" and second.read_bytes() == b"synthetic-second"
     with pytest.raises(KeyError):
         library.repo.audio_for_owner(OWNER_A, item.id)
+
+
+# LRLS-13 (PR-D remediation, Codex Medium): two concurrent first attaches run as
+# the runtime role under 0014. They serialize on the item's parent row (the
+# FOR UPDATE stays within the existing grants and the owner policy), exactly one
+# object is READY, the replaced one is a pending outbox row visible only to its
+# owner, and both synthetic files stay on disk.
+def test_lrls_13_concurrent_first_attaches_serialize_under_rls(library, monkeypatch):
+    from test_library_audio_attach_safety import (
+        MEDIA_INSERT, PauseFirst, assert_one_ready_and_rest_pending, record_physical_delete,
+        run_concurrent_attaches)
+
+    item = library.repo.create_for_owner(OWNER_A, lesson(id="lesson-a"))
+    deletes = record_physical_delete(monkeypatch, library.repo)
+    workers, observed = run_concurrent_attaches(
+        monkeypatch, library.repo, library.db.admin_dsn, item.id, PauseFirst(MEDIA_INSERT), owner=OWNER_A)
+
+    assert [w.error for w in workers] == [None, None]
+    ready, files = assert_one_ready_and_rest_pending(library.repo, library.db.admin_dsn, item.id, owner=OWNER_A)
+    assert len(files) == 2 and deletes == [] and observed == "lock-wait"
+    query = "SELECT object_key FROM cloud_media_cleanup_outbox"
+    assert [r[0] for r in _as(library.dsn, OWNER_A, query)] == sorted(files - {ready})
+    assert _as(library.dsn, OWNER_B, query) == [] and _as(library.dsn, None, query) == []

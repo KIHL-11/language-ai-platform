@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import hashlib
+import logging
 import mimetypes
 import os
 import re
@@ -42,6 +43,8 @@ SAFE_ITEM_ID = re.compile(
 )
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
+logger = logging.getLogger(__name__)
+
 
 class OwnerNotProvisionedError(LibraryStoreError):
     """The trusted principal has no corresponding server-owned user row."""
@@ -49,6 +52,21 @@ class OwnerNotProvisionedError(LibraryStoreError):
 
 class CloudLibraryUnavailableError(LibraryStoreError):
     """Cloud persistence failed without exposing driver or connection details."""
+
+
+class CloudLibraryCommitOutcomeUnknownError(CloudLibraryUnavailableError):
+    """COMMIT was sent for an audio attach, but its outcome was not confirmed.
+
+    The transaction may have committed, so READY metadata may reference
+    ``object_key``. The object is therefore kept, never compensated; if the
+    commit in fact did not happen the object is an unreferenced orphan that is
+    left for a later, separately approved reconciliation (no automatic cleanup).
+    """
+
+    def __init__(self, item_id: str, object_key: str):
+        super().__init__("Cloud Library audio attach outcome is unknown")
+        self.item_id = item_id
+        self.object_key = object_key
 
 
 class FilesystemMediaObjectStore:
@@ -288,6 +306,11 @@ class PostgresOwnerScopedLibraryRepository:
         try:
             with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
+                # Same lock order as put_audio_for_owner (item, then media), so
+                # a concurrent attach either finishes first and its object is
+                # queued below, or waits and then finds the item gone.
+                if self._lock_item(connection, owner_user_id, item_id) is None:
+                    raise KeyError(item_id)
                 object_keys = [
                     row["object_key"]
                     for row in connection.execute(
@@ -376,8 +399,18 @@ class PostgresOwnerScopedLibraryRepository:
         digest = hashlib.sha256(content).hexdigest()
         media_id = str(uuid.uuid4())
         previous_key: str | None = None
+        # False until the transaction body has finished. Everything raised while
+        # it is False happened before COMMIT was sent, so the server can only
+        # roll the transaction back. Once True, the only remaining step is the
+        # COMMIT itself, whose failure leaves the outcome unknown.
+        commit_sent = False
         try:
             with self._owner_transaction(owner_user_id) as connection:
+                # Serialize every attach and delete for this item on its stable
+                # parent row; the media row may not exist yet on a first attach.
+                # Lock order (item, then media) matches delete_for_owner.
+                if self._lock_item(connection, owner_user_id, item_id) is None:
+                    raise KeyError(item_id)
                 previous = connection.execute(
                     """
                     SELECT object_key FROM cloud_library_media_assets
@@ -427,10 +460,27 @@ class PostgresOwnerScopedLibraryRepository:
                         self._now(),
                     ),
                 )
-        except Exception:
-            # Compensation only: object_key is the fresh, uniquely named object
-            # this call wrote, and the transaction that would have referenced it
-            # rolled back, so no metadata, owner or outbox row points at it.
+                commit_sent = True
+        except Exception as exc:
+            if commit_sent:
+                # The COMMIT may have reached the server and succeeded even
+                # though its acknowledgement was lost, so READY metadata may now
+                # reference object_key. Never compensate here, and do not ask
+                # the (possibly unavailable) database whether it is safe: keep
+                # the object and report the uncertainty for reconciliation.
+                logger.warning(
+                    "Cloud Library audio attach outcome unknown; object kept "
+                    "for reconciliation (item_id=%s object_key=%s)",
+                    item_id,
+                    object_key,
+                )
+                raise CloudLibraryCommitOutcomeUnknownError(
+                    item_id, object_key
+                ) from exc
+            # Confirmed rollback: COMMIT was never sent, so the transaction
+            # that would have referenced object_key cannot have committed, and
+            # no metadata or outbox row points at this fresh, uniquely named
+            # object. Only then is the compensating removal allowed.
             self.media_objects.delete(object_key, owner_user_id, item_id)
             raise
         return self.get_for_owner(owner_user_id, item_id)
@@ -516,6 +566,18 @@ class PostgresOwnerScopedLibraryRepository:
                 "SELECT set_config('app.current_owner', %s, true)", (owner_user_id,)
             )
             yield connection
+
+    @staticmethod
+    def _lock_item(connection, owner_user_id: str, item_id: str):
+        """Row-lock the item's stable parent row for the rest of the transaction."""
+        return connection.execute(
+            """
+            SELECT item_id FROM cloud_library_items
+            WHERE owner_user_id = %s AND item_id = %s
+            FOR UPDATE
+            """,
+            (owner_user_id, item_id),
+        ).fetchone()
 
     def _queue_object_cleanup(
         self, connection, owner_user_id: str, item_id: str, object_key: str
