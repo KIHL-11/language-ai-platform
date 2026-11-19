@@ -458,32 +458,67 @@ def test_concurrent_replaces_of_existing_audio(monkeypatch, postgres_repository)
     assert observed == "lock-wait"
 
 
-# B-3a: an attach holds the item lock when a Library delete starts. The delete
-# waits, then queues the freshly attached object; nothing is unlinked.
-def test_delete_waits_for_inflight_attach_and_queues_its_object(
-    monkeypatch, postgres_repository
-):
-    repo = postgres_repository
+# Where an injected RuntimeError is raised in each B-3a thread (self-check below).
+B3A_INJECT_AT = {"attach": MEDIA_INSERT, "delete": ITEM_DELETE}
+
+
+def run_delete_during_attach(monkeypatch, repo, inject: str | None = None):
+    """B-3a body: an attach holds the item lock when a Library delete starts.
+
+    The delete waits on the item lock, then queues the freshly attached object.
+    It is held again at its DELETE statement until the attach thread has
+    finished, so the attach's post-commit read-back deterministically sees the
+    item (a plain read is not blocked by the delete's row lock). ``inject``
+    raises an unexpected RuntimeError inside that thread to prove the outcome
+    checks reject it.
+    """
     item = repo.create_for_owner(OWNER_A, lesson())
     deletes = record_physical_delete(monkeypatch, repo)
     pause = PauseFirst(MEDIA_INSERT)
-    instrument(monkeypatch, repo, pause)
+    delete_gate = threading.Event()
 
+    def hook(statement):
+        me = threading.current_thread().name
+        pause(statement)
+        if inject == me and statement.startswith(B3A_INJECT_AT[me]):
+            raise RuntimeError(f"injected into {me}")
+        if me == "delete" and statement.startswith(ITEM_DELETE):
+            assert delete_gate.wait(TIMEOUT), "delete was never released"
+
+    instrument(monkeypatch, repo, hook)
     attacher = Worker("attach", lambda: attach(repo, OWNER_A, item.id, b"attach-take"))
-    attacher.start()
-    assert pause.paused.wait(TIMEOUT)
     deleter = Worker("delete", lambda: repo.delete_for_owner(OWNER_A, item.id))
-    deleter.start()
     seen: list[str] = []
-    wait_until(
-        lambda: competitor_blocked_or_through(_dsn(), pause, deleter, seen=seen),
-        "the delete to block on the item lock or finish",
-    )
-    pause.release.set()
-    for worker in (attacher, deleter):
-        worker.join(TIMEOUT)
+    try:
+        attacher.start()
+        assert pause.paused.wait(TIMEOUT)
+        deleter.start()
+        wait_until(
+            lambda: competitor_blocked_or_through(_dsn(), pause, deleter, seen=seen),
+            "the delete to block on the item lock or finish",
+        )
+        pause.release.set()
+        attacher.join(TIMEOUT)
+        assert not attacher.is_alive(), "attach thread did not finish"
+        delete_gate.set()
+        deleter.join(TIMEOUT)
+        assert not deleter.is_alive(), "delete thread did not finish"
+    finally:
+        # Never leave a thread parked on a gate or holding a database lock.
+        pause.release.set()
+        delete_gate.set()
+        for worker in (attacher, deleter):
+            if worker.ident is not None:
+                worker.join(TIMEOUT)
 
-    assert deleter.error is None
+    # Each thread's own outcome: no unexpected exception is accepted.
+    assert attacher.error is None, f"attach raised {attacher.error!r}"
+    assert attacher.result is not None
+    assert attacher.result.id == item.id
+    assert attacher.result.persistent_audio.status == "available"
+    assert deleter.error is None, f"delete raised {deleter.error!r}"
+    assert deleter.result is None
+    # Resulting state: the attached object is queued, never unlinked.
     files = files_for(repo, OWNER_A, item.id)
     assert len(files) == 1 and deletes == []
     assert ready_keys(_dsn(), item.id) == []
@@ -491,6 +526,23 @@ def test_delete_waits_for_inflight_attach_and_queues_its_object(
     with pytest.raises(KeyError):
         repo.get_for_owner(OWNER_A, item.id)
     assert seen[-1] == "lock-wait"
+
+
+# B-3a: an attach holds the item lock when a Library delete starts. Both threads
+# finish, both succeed, the delete waits and then queues the attached object.
+def test_delete_waits_for_inflight_attach_and_queues_its_object(
+    monkeypatch, postgres_repository
+):
+    run_delete_during_attach(monkeypatch, postgres_repository)
+
+
+# B-3a self-check: an unexpected RuntimeError in either thread makes B-3a fail.
+@pytest.mark.parametrize("inject", sorted(B3A_INJECT_AT))
+def test_delete_during_attach_rejects_unexpected_thread_exception(
+    monkeypatch, postgres_repository, inject
+):
+    with pytest.raises(AssertionError, match="RuntimeError"):
+        run_delete_during_attach(monkeypatch, postgres_repository, inject=inject)
 
 
 # B-3b: a Library delete holds the item lock when an attach starts. The attach
