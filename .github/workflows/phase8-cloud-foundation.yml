@@ -14,6 +14,9 @@ on:
       - codex/p8-04b1-owner-scoped-speaking
       - codex/p8-05a-secure-cloud-sessions
       - codex/p8-05a2-cloud-frontend-session
+      # Stacked Cloud Phase 1 / 1.5 review PRs target these branches, not main.
+      - "claude/cloud-p1-**"
+      - "claude/cloud-p15-**"
     paths-ignore:
       - "**/*.md"
   push:
@@ -29,19 +32,94 @@ on:
       - codex/p8-05a2-cloud-frontend-session
       - codex/p8-feature-complete-integration
   workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Candidate head to test (branch name or commit SHA). Empty: the ref this run is started on."
+        required: false
+        default: ""
+      base_ref:
+        description: "Target branch or SHA. When set, the head is also tested merged into it (merge tree)."
+        required: false
+        default: ""
+      simulate_postgres_unavailable:
+        description: "Negative check only: point the precheck at a closed port; the backend job must fail."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: phase8-cloud-${{ github.ref }}
+  group: phase8-cloud-${{ github.ref }}-${{ inputs.head_ref }}-${{ inputs.base_ref }}-${{ inputs.simulate_postgres_unavailable }}
   cancel-in-progress: true
 
 jobs:
+  resolve:
+    name: Resolve head and target commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      trees: ${{ steps.resolve.outputs.trees }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: resolve
+        name: Resolve commits
+        env:
+          EVENT: ${{ github.event_name }}
+          SELF_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          IN_HEAD: ${{ inputs.head_ref }}
+          IN_BASE: ${{ inputs.base_ref }}
+        run: |
+          set -euo pipefail
+          resolve() {
+            git rev-parse --verify --quiet "origin/$1^{commit}" \
+              || git rev-parse --verify --quiet "$1^{commit}" \
+              || { echo "::error::Cannot resolve '$1' to a commit"; exit 2; }
+          }
+          head=""; base=""
+          case "$EVENT" in
+            pull_request)
+              head="$PR_HEAD_SHA"
+              base="$(resolve "$PR_BASE_REF")"
+              echo "GitHub merge ref commit for this PR event: $SELF_SHA"
+              ;;
+            workflow_dispatch)
+              if [[ -n "$IN_HEAD" ]]; then head="$(resolve "$IN_HEAD")"; else head="$SELF_SHA"; fi
+              if [[ -n "$IN_BASE" ]]; then base="$(resolve "$IN_BASE")"; fi
+              ;;
+            *)
+              head="$SELF_SHA"
+              ;;
+          esac
+          if [[ -n "$base" ]]; then trees='["head","merge"]'; else trees='["head"]'; fi
+          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
+          echo "trees=$trees" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Commits under test"
+            echo "- event: \`$EVENT\`"
+            echo "- head: \`$head\`"
+            echo "- base: \`${base:-none}\`"
+            echo "- trees: \`$trees\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "head=$head base=${base:-none} trees=$trees"
+
   backend:
-    name: Backend and tenant isolation
+    name: Backend and tenant isolation (${{ matrix.tree }})
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: ${{ fromJSON(needs.resolve.outputs.trees) }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -58,11 +136,20 @@ jobs:
           --health-retries 10
     env:
       AI_MODE: mock
-      TEST_POSTGRES_DSN: postgresql://language_ai_test:language_ai_test@127.0.0.1:5432/language_ai_test
+      CLOUD_P1_REQUIRE_POSTGRES: "1"
+      TEST_POSTGRES_DSN: ${{ inputs.simulate_postgres_unavailable == true && 'postgresql://language_ai_test:language_ai_test@127.0.0.1:1/language_ai_test' || 'postgresql://language_ai_test:language_ai_test@127.0.0.1:5432/language_ai_test' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+      - name: Keep CI helper scripts outside the tested tree
+        run: cp -r .github/scripts "$RUNNER_TEMP/ci-scripts"
+      - name: Check out the tree under test
+        env:
+          TREE: ${{ matrix.tree }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+        run: bash "$RUNNER_TEMP/ci-scripts/prepare_tree.sh"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -70,30 +157,52 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.txt
-      - name: Run backend regression suite
+      - name: Require PostgreSQL 16 (fails instead of skipping)
+        run: python "$RUNNER_TEMP/ci-scripts/require_postgres.py"
+      - name: Run backend regression suite (skip reasons reported)
         env:
           PYTHONPATH: backend
-        run: python -m pytest -q backend/tests
+        run: python -m pytest -q -rs -p no:cacheprovider backend/tests
       - name: Verify dependency consistency
         run: python -m pip check
       - name: Verify patch whitespace
         run: git show --check --format= --no-renames HEAD
 
   frontend:
-    name: Frontend regression
+    name: Frontend regression (${{ matrix.tree }})
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: ${{ fromJSON(needs.resolve.outputs.trees) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Keep CI helper scripts outside the tested tree
+        run: cp -r .github/scripts "$RUNNER_TEMP/ci-scripts"
+      - name: Check out the tree under test
+        env:
+          TREE: ${{ matrix.tree }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+        run: bash "$RUNNER_TEMP/ci-scripts/prepare_tree.sh"
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm test
-      - run: npm run lint
-      - run: npm run build
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+      - name: npm test
+        working-directory: frontend
+        run: npm test
+      - name: npm run lint
+        working-directory: frontend
+        run: npm run lint
+      - name: npm run build (tsc -b && vite build)
+        working-directory: frontend
+        run: npm run build
