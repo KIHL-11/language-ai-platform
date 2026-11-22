@@ -39,7 +39,12 @@ describe('Cloud session integration', () => {
     await screen.findByRole('heading', { name: 'Words & Chunks' })
     expect(personal).not.toHaveBeenCalled()
     // The owner-scoped request is issued from an effect after an await; wait for it.
-    await waitFor(() => expect(mock.mock.calls.some(([url]) => String(url).includes('user_id=owner-a'))).toBe(true))
+    await waitFor(() => {
+      expect(mock.mock.calls.some(([url]) =>
+        String(url).startsWith('/api/study-bank/items?') &&
+        String(url).includes('user_id=owner-a'),
+      )).toBe(true)
+    })
     await user.click(screen.getByRole('button', { name: 'My Library' }))
     expect(await screen.findByText('owner-a private title')).toBeInTheDocument()
     mock.mockImplementation((url: string) => url === '/api/account/me' ? Promise.resolve(json({ user_id: 'owner-b', csrf_token: 'b'.repeat(64) }, 200, 'owner-b')) : Promise.resolve(json({ items: [] }, 200, 'owner-b')))
