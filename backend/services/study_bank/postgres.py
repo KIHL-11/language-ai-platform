@@ -431,14 +431,16 @@ class PostgresOwnerScopedStudyBankRepository:
         for index, source in enumerate(provenance):
             if not isinstance(source, MediaStudyProvenance):
                 continue
+            # No conflict target: naming one makes PostgreSQL require SELECT,
+            # and the runtime role holds INSERT only on this table. The primary
+            # key is the table's only unique constraint, so the result is the same.
             connection.execute(
                 """
                 INSERT INTO cloud_study_media_provenance (
                     owner_user_id, study_item_id, provenance_index,
                     library_item_id, created_at
                 ) VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (owner_user_id, study_item_id, provenance_index)
-                DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (owner, item_id, index, source.library_item_id, now),
             )
