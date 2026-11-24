@@ -1,6 +1,7 @@
 # Cloud browser E2E — Gate 1 (Draft / NOT RELEASE APPROVAL)
 
-Pinned baseline: `8403a3b76b8cf630109acd2431ff0119929bf30f`.
+Original reproduction baseline: `8403a3b76b8cf630109acd2431ff0119929bf30f`.
+New main baseline after #91: `a965ed06278ae2b4c73412d647d05d553f19e7d3` (must be revalidated at execution).
 This suite is a **new, initially unexecuted** browser regression harness, not proof that the historical 61/61 suite is reproduced.
 
 ## Safety preconditions
@@ -13,9 +14,10 @@ This suite is a **new, initially unexecuted** browser regression harness, not pr
 ## Install / run (once an approved sandbox exists)
 ```sh
 cd e2e
-npm install
+npm install # provisional: a committed npm lockfile and npm ci are still required before reproducible CI
 npx playwright install chromium
 E2E_BASE_URL=https://your-sandbox.example.test \
+E2E_EXPECTED_HOST=your-sandbox.example.test \
 E2E_STORAGE_STATE=/secure/path/synthetic-account.storage-state.json \
 E2E_ISOLATED_SANDBOX=yes npm test
 ```
@@ -25,6 +27,11 @@ Local sandbox targets also require `E2E_ALLOW_LOCAL=yes`. Nonstandard hostnames 
 - True Chromium navigation: authenticated My Library → Words & Chunks.
 - Capture API HTTP status and `detail.code` in an attached JSON evidence file; fail on Study Bank 503.
 - Logout confirmation, including reloading and checking that protected navigation is absent.
+
+## Verification blockers
+- No dependency lockfile has been committed. Do not treat dependency installation as reproducibly verified.
+- The browser harness has not been compiled, collected, or run; there is no E2E PASS yet.
+- Confirm the target is a designated sandbox by independent infrastructure inspection; matching E2E_EXPECTED_HOST alone is not a security authorization.
 
 ## Still pending
 - Execute against approved sandbox; persist trace/screenshots/HTTP evidence.
