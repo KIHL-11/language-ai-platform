@@ -8,10 +8,18 @@ if (!baseURL || !storageState || process.env.E2E_ISOLATED_SANDBOX !== 'yes') {
   throw new Error('E2E requires E2E_BASE_URL, E2E_STORAGE_STATE and E2E_ISOLATED_SANDBOX=yes')
 }
 const url = new URL(baseURL)
-if (!['http:', 'https:'].includes(url.protocol) || url.hostname === 'localhost' || url.hostname === '127.0.0.1' && process.env.E2E_ALLOW_LOCAL !== 'yes') {
-  throw new Error('E2E target must be an explicit isolated sandbox (local targets require E2E_ALLOW_LOCAL=yes)')
+const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || (url.protocol !== 'https:' && !(isLocal && url.protocol === 'http:' && process.env.E2E_ALLOW_LOCAL === 'yes'))) {
+  throw new Error('E2E target requires HTTPS, except explicitly permitted loopback HTTP; no userinfo, path, query or fragment')
 }
-if (!/sandbox|test|127\.0\.0\.1|localhost/.test(url.hostname) && process.env.E2E_ALLOW_NONSTANDARD_HOST !== 'yes') {
+if (isLocal && process.env.E2E_ALLOW_LOCAL !== 'yes') {
+  throw new Error('Local sandbox targets require E2E_ALLOW_LOCAL=yes')
+}
+const expectedHost = process.env.E2E_EXPECTED_HOST
+if (!expectedHost || expectedHost !== url.host) {
+  throw new Error('E2E_EXPECTED_HOST must exactly match the verified sandbox host (including port)')
+}
+if (!isLocal && !/(^|[.-])(sandbox|test)([.-]|$)/i.test(url.hostname) && process.env.E2E_ALLOW_NONSTANDARD_HOST !== 'yes') {
   throw new Error('Sandbox host not recognized; require separate E2E_ALLOW_NONSTANDARD_HOST=yes acknowledgment')
 }
 export default defineConfig({
