@@ -58,7 +58,7 @@ test('Sign out: server confirmation and reload must not restore private view', a
     body: JSON.stringify({ path: '/api/account/logout', status: response.status(), code }, null, 2),
     contentType: 'application/json',
   })
-  expect(response.status(), 'Logout POST must be confirmed by server').toBe(200)
+  expect(response.status(), 'Logout POST must be confirmed by server').toBe(204)
   await expect(page.getByText('Signed out of this browser view.')).toBeVisible()
   await expect(page.getByText('Local view cleared, but server logout was not confirmed.')).toHaveCount(0)
   await page.reload()
