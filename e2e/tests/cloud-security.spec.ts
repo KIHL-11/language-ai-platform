@@ -3,8 +3,9 @@ import { expect, test } from '@playwright/test'
 // Gate 2: fail closed when synthetic fixtures are absent. Never use real accounts.
 const stateB = process.env.E2E_STORAGE_STATE_B
 const itemA = process.env.E2E_ACCOUNT_A_LIBRARY_ITEM_ID
-if (!stateB || !itemA) {
-  throw new Error('Cloud security E2E requires E2E_STORAGE_STATE_B and E2E_ACCOUNT_A_LIBRARY_ITEM_ID (synthetic fixtures only)')
+const replayState = process.env.E2E_STORAGE_STATE_REPLAY
+if (!stateB || !itemA || !replayState) {
+  throw new Error('Cloud security E2E requires E2E_STORAGE_STATE_B, E2E_ACCOUNT_A_LIBRARY_ITEM_ID and E2E_STORAGE_STATE_REPLAY (synthetic fixtures only)')
 }
 
 test('two authenticated accounts are isolated on private endpoints', async ({ page, browser, baseURL }) => {
@@ -40,7 +41,10 @@ test('state-changing operation without CSRF is refused', async ({ page, baseURL 
   expect(body?.detail?.code).toBe('csrf_invalid')
 })
 
-test('replay of revoked session cookie after logout is rejected', async ({ page, browser, baseURL }) => {
+test.describe('dedicated cookie replay session', () => {
+  test.use({ storageState: replayState! })
+
+  test('replay of revoked session cookie after logout is rejected', async ({ page, browser, baseURL }) => {
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
   const oldCookies = await page.context().cookies()
@@ -54,4 +58,5 @@ test('replay of revoked session cookie after logout is rejected', async ({ page,
   } finally {
     await replay.close()
   }
+})
 })
