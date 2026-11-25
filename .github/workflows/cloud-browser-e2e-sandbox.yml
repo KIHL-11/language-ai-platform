@@ -1,0 +1,117 @@
+name: Disposable Cloud Chromium E2E (no deployment)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['e2e/**', '.github/workflows/cloud-browser-e2e-sandbox.yml']
+permissions:
+  contents: read
+jobs:
+  chromium:
+    if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: e2e_admin
+          POSTGRES_PASSWORD: e2e_admin
+          POSTGRES_DB: e2e_disposable
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U e2e_admin -d e2e_disposable"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      E2E_DISPOSABLE_CI: 'yes'
+      E2E_ISOLATED_SANDBOX: 'yes'
+      E2E_BASE_URL: https://localhost:8443
+      E2E_EXPECTED_HOST: localhost:8443
+      E2E_ALLOW_NONSTANDARD_HOST: 'yes'
+      CLOUD_ADMIN_DATABASE_URL: postgresql://e2e_admin:e2e_admin@127.0.0.1:5432/e2e_disposable
+      CLOUD_STORAGE_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
+      CLOUD_SESSION_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
+      CLOUD_SESSION_ORIGIN: https://localhost:8443
+      CLOUD_STORAGE_MINIMUM_VERSION: '0009'
+      LANGUAGE_AI_DEPLOYMENT_MODE: cloud
+      LANGUAGE_AI_STAGING: '1'
+      CLOUD_EMAIL_DELIVERY: sandbox-directory
+      AI_MODE: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f78170388a3c2a91c19d78fc5878efd601cd6395
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Record immutable source trees
+        run: |
+          git -C app rev-parse HEAD
+          git -C harness rev-parse HEAD
+      - name: Install backend and frontend dependencies
+        run: |
+          python -m pip install -r app/backend/requirements.txt
+          npm --prefix app/frontend ci
+          npm --prefix app/frontend run build
+          npm --prefix harness/e2e ci
+      - name: Install Chromium
+        working-directory: harness/e2e
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Prepare disposable paths and ephemeral credentials
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/cloud-media" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-state"
+          key="$(openssl rand -hex 32)"
+          echo "::add-mask::$key"
+          {
+            echo "CLOUD_AUTH_CODE_KEY=$key"
+            echo "CLOUD_MEDIA_ROOT=$RUNNER_TEMP/cloud-media"
+            echo "CLOUD_EMAIL_SANDBOX_DIR=$RUNNER_TEMP/mailbox"
+            echo "E2E_STATE_DIR=$RUNNER_TEMP/e2e-state"
+            echo "E2E_STORAGE_STATE=$RUNNER_TEMP/e2e-state/read.json"
+            echo "E2E_STORAGE_STATE_B=$RUNNER_TEMP/e2e-state/b.json"
+            echo "E2E_STORAGE_STATE_LOGOUT=$RUNNER_TEMP/e2e-state/logout.json"
+            echo "E2E_STORAGE_STATE_REPLAY=$RUNNER_TEMP/e2e-state/replay.json"
+          } >> "$GITHUB_ENV"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$RUNNER_TEMP/localhost.key" -out "$RUNNER_TEMP/localhost.crt" -subj /CN=localhost -addext subjectAltName=DNS:localhost
+      - name: Verify isolated PostgreSQL, migrate 0001–0009, seed synthetic fixtures
+        env:
+          PYTHONPATH: app/backend:app/backend/tests
+        run: python harness/e2e/scripts/prepare_ci_sandbox.py
+      - name: Start real HTTPS application on loopback only
+        working-directory: app/backend
+        run: |
+          python -m uvicorn app:app --host 127.0.0.1 --port 8443 --no-proxy-headers --ssl-keyfile "$RUNNER_TEMP/localhost.key" --ssl-certfile "$RUNNER_TEMP/localhost.crt" > "$RUNNER_TEMP/e2e-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/e2e-server.pid"
+          for i in $(seq 1 60); do
+            if curl -kfsS https://localhost:8443/api/deployment | grep -q '"cloud"'; then exit 0; fi
+            sleep 1
+          done
+          echo 'HTTPS application did not become ready'
+          exit 1
+      - name: Execute real Chromium regression and security checks
+        working-directory: harness/e2e
+        run: npm test
+      - name: Upload sanitized response evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-http-evidence
+          path: |
+            harness/e2e/test-results/**/attachments/*json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Tear down local server and remove ephemeral secrets
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/e2e-server.pid" ]; then kill "$(cat "$RUNNER_TEMP/e2e-server.pid")" || true; fi
+          rm -rf "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/localhost.key" "$RUNNER_TEMP/localhost.crt"
