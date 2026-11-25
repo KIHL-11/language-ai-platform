@@ -19,7 +19,9 @@ npx playwright install chromium
 E2E_BASE_URL=https://your-sandbox.example.test \
 E2E_EXPECTED_HOST=your-sandbox.example.test \
 E2E_STORAGE_STATE=/secure/path/synthetic-account.storage-state.json \
-E2E_ISOLATED_SANDBOX=yes npm test
+E2E_ISOLATED_SANDBOX=yes \
+E2E_STORAGE_STATE_B=/secure/path/synthetic-account-b.storage-state.json \
+E2E_ACCOUNT_A_LIBRARY_ITEM_ID=seeded-synthetic-a-item-id npm test
 ```
 Local sandbox targets also require `E2E_ALLOW_LOCAL=yes`. Nonstandard hostnames require `E2E_ALLOW_NONSTANDARD_HOST=yes` and independent confirmation that the target is isolated. These overrides do NOT authorize production use.
 
@@ -29,9 +31,16 @@ Local sandbox targets also require `E2E_ALLOW_LOCAL=yes`. Nonstandard hostnames 
 - Logout confirmation, including reloading and checking that protected navigation is absent.
 
 ## Verification blockers
-- No dependency lockfile has been committed. Do not treat dependency installation as reproducibly verified.
+- No dependency lockfile has been committed. An attempt to resolve the dependency in the current execution environment timed out. A verified lockfile must be generated with npm and used via npm ci before Gate 1/2 can be called reproducible.
 - The browser harness has not been compiled, collected, or run; there is no E2E PASS yet.
 - Confirm the target is a designated sandbox by independent infrastructure inspection; matching E2E_EXPECTED_HOST alone is not a security authorization.
+
+## Gate 2 synthetic security fixtures
+- Provide two different synthetic authenticated account storageState files (A via E2E_STORAGE_STATE, B via E2E_STORAGE_STATE_B).
+- Seed and provide a Library item owned by A in E2E_ACCOUNT_A_LIBRARY_ITEM_ID. The test expects B to receive 404 when accessing that item.
+- Tests verify B cannot impersonate A through user_id, reject POST without CSRF, and reject a revoked session cookie after logout.
+- Gate 2 tests fail closed when fixture variables are absent. A seeded synthetic sandbox is required; no tests have been executed.
+- A fresh email login, application restart persistence, and an independent security review are still not implemented or verified.
 
 ## Still pending
 - Execute against approved sandbox; persist trace/screenshots/HTTP evidence.
