@@ -28,6 +28,7 @@ export default defineConfig({
   use: {
     baseURL,
     storageState,
+    ignoreHTTPSErrors: process.env.E2E_DISPOSABLE_CI === 'yes' && url.origin === 'https://localhost:8443',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
