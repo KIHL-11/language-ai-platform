@@ -54,6 +54,37 @@ describe('Cloud session integration', () => {
     expect(personal).not.toHaveBeenCalled()
   })
 
+  it('pauses on another tab\'s unconfirmed logout and offers a session check and a retried logout', async () => {
+    const mock = routes()
+    const user = userEvent.setup()
+    cloudAuth.invalidate()
+    render(<CloudSessionProvider><p>Personal data must not mount</p></CloudSessionProvider>)
+    await screen.findByRole('heading', { name: 'Words & Chunks' })
+
+    act(() => cloudAuth.receive('logout-unconfirmed'))
+    expect(await screen.findByText('另一个标签页尝试退出，但服务器未确认。当前会话可能仍然有效。')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: 'Cloud learning' })).not.toBeInTheDocument()
+
+    // 200: the session is still live, so the workspace comes back.
+    await user.click(screen.getByRole('button', { name: '检查会话' }))
+    expect(await screen.findByRole('heading', { name: 'Words & Chunks' })).toBeInTheDocument()
+
+    // Retry: a fresh CSRF token from /me, then the logout is confirmed.
+    act(() => cloudAuth.receive('logout-unconfirmed'))
+    await user.click(await screen.findByRole('button', { name: '重试退出' }))
+    expect(await screen.findByText('Signed out of this browser view.')).toBeInTheDocument()
+    const logout = mock.mock.calls.filter(([url]) => url === '/api/account/logout')
+    expect(logout).toHaveLength(1)
+
+    // 401 on the check: the session has ended.
+    await act(() => cloudAuth.refresh())
+    act(() => cloudAuth.receive('logout-unconfirmed'))
+    mock.mockImplementation((url: string) => Promise.resolve(url === '/api/account/me' ? json({}, 401) : json({})))
+    await user.click(await screen.findByRole('button', { name: '检查会话' }))
+    expect(await screen.findByText('Your session is missing or expired.')).toBeInTheDocument()
+    expect(screen.queryByText('Personal data must not mount')).not.toBeInTheDocument()
+  })
+
   it('keeps missing sessions gated and shows no sign-in form without a configured provider', async () => {
     const mock = routes()
     mock.mockImplementation((url: string) => Promise.resolve(url === '/api/deployment' ? json({ mode: 'cloud' }) : json({}, 401)))
