@@ -50,6 +50,9 @@ test.describe('dedicated logout session', () => {
   test('Sign out: server confirmation and reload must not restore private view', async ({ page }, testInfo) => {
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
+  const otherTab = await page.context().newPage()
+  await otherTab.goto('/')
+  await expect(otherTab.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
   const logoutResponse = page.waitForResponse((response) =>
     new URL(response.url()).pathname === '/api/account/logout' &&
     response.request().method() === 'POST'
@@ -67,6 +70,9 @@ test.describe('dedicated logout session', () => {
   expect(response.status(), 'Logout POST must be confirmed by server').toBe(204)
   await expect(page.getByText('Signed out of this browser view.')).toBeVisible()
   await expect(page.getByText('Local view cleared, but server logout was not confirmed.')).toHaveCount(0)
+  await expect(otherTab.getByText('Your session is missing or expired.')).toBeVisible()
+  await expect(otherTab.getByRole('navigation', { name: 'Cloud learning' })).toHaveCount(0)
+  await otherTab.close()
   await page.reload()
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toHaveCount(0)
   await expect(page.getByRole('status').filter({ hasText: /session is missing or expired|Signed out of this browser view/ })).toBeVisible()

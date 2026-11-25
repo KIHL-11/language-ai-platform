@@ -63,6 +63,8 @@ jobs:
           npm --prefix app/frontend ci
           npm --prefix app/frontend run build
           npm --prefix harness/e2e ci
+      - name: Type-check browser harness against installed dependencies
+        run: app/frontend/node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --typeRoots app/frontend/node_modules/@types harness/e2e/playwright.config.ts harness/e2e/tests/*.spec.ts
       - name: Install Chromium
         working-directory: harness/e2e
         run: npx --no-install playwright install --with-deps chromium
@@ -100,7 +102,25 @@ jobs:
           exit 1
       - name: Execute real Chromium regression and security checks
         working-directory: harness/e2e
-        run: npm test
+        run: npm test -- --grep-invert 'after service restart'
+      - name: Restart the real app against the same isolated database
+        working-directory: app/backend
+        run: |
+          kill "$(cat "$RUNNER_TEMP/e2e-server.pid")"
+          for i in $(seq 1 20); do
+            if ! kill -0 "$(cat "$RUNNER_TEMP/e2e-server.pid")" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          python -m uvicorn app:app --host 127.0.0.1 --port 8443 --no-proxy-headers --ssl-keyfile "$RUNNER_TEMP/localhost.key" --ssl-certfile "$RUNNER_TEMP/localhost.crt" >> "$RUNNER_TEMP/e2e-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/e2e-server.pid"
+          for i in $(seq 1 60); do
+            if curl -kfsS https://localhost:8443/api/deployment | grep -q '"cloud"'; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Verify persistent state after restart
+        working-directory: harness/e2e
+        run: npm test -- --grep 'after service restart' --output=test-results-restart
       - name: Upload sanitized response evidence only
         if: always()
         uses: actions/upload-artifact@v4

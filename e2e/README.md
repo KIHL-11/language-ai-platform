@@ -1,7 +1,7 @@
 # Cloud browser E2E — Gate 1 (Draft / NOT RELEASE APPROVAL)
 
 Original reproduction baseline: `8403a3b76b8cf630109acd2431ff0119929bf30f`.
-New main baseline after #91: `a965ed06278ae2b4c73412d647d05d553f19e7d3` (must be revalidated at execution).
+Current tested target after #92: `f78170388a3c2a91c19d78fc5878efd601cd6395` (must be revalidated at execution).
 This suite is a **new, initially unexecuted** browser regression harness, not proof that the historical 61/61 suite is reproduced.
 
 ## Safety preconditions
@@ -52,3 +52,6 @@ The npm test commands first run a dependency-free preflight that checks the exac
 - Independent security review; never merge or deploy based on Gate 1 alone.
 
 Playwright outputs are local artifacts and must not be committed. Traces can contain private state; only synthetic credentials are allowed, and artifacts must be access-controlled.
+
+## Hosted disposable sandbox
+The branch-only sandbox workflow checks out the fixed app baseline separately from the harness, provisions a fresh loopback PostgreSQL 16 service and exact 0009 runtime role, uses a local HTTPS certificate and private sandbox mailbox, and runs the regression/security cases. The advanced suite covers the actual #91 Library-backed bulk POST, #92 cross-tab outcomes, email re-login and real service restart. It uploads only sanitized HTTP response attachments, not cookies, OTPs, raw traces or mailbox contents. All changes and executions remain test-only; no production approval is implied.

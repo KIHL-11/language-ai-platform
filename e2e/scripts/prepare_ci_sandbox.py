@@ -8,7 +8,7 @@ from services.cloud.roles import create_runtime_role, grant_runtime
 from services.cloud.preflight import require_preflight
 from services.auth.sessions import BrowserSessionRepository, COOKIE_NAME
 from services.library.postgres import PostgresOwnerScopedLibraryRepository, FilesystemMediaObjectStore
-from test_durable_ai_chunk_candidates import _lesson
+from test_owner_scoped_study_bank import _lesson, _media
 
 ADMIN = "postgresql://e2e_admin:e2e_admin@127.0.0.1:5432/e2e_disposable"
 RUNTIME = "postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable"
@@ -49,6 +49,10 @@ for label, owner in (("read", owner_a), ("b", owner_b), ("logout", owner_a), ("r
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
         json.dump(state, handle)
+media_input = state_dir / "media-study-input.json"
+with os.fdopen(os.open(media_input, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+    json.dump({"items": [_media(owner_a, item.id).model_dump(mode="json")]}, handle)
 with open(os.environ["GITHUB_ENV"], "a") as handle:
+    handle.write("E2E_MEDIA_STUDY_INPUT=" + str(media_input) + "\n")
     handle.write("E2E_ACCOUNT_A_LIBRARY_ITEM_ID=" + item.id + "\n")
 print("Seeded two synthetic accounts and four distinct session cookies without logging tokens")
