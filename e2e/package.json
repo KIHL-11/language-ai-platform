@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "pretest": "node scripts/preflight.mjs",
     "test": "playwright test",
+    "pretest:chromium": "node scripts/preflight.mjs",
     "test:chromium": "playwright test --project=chromium"
   },
   "devDependencies": {
