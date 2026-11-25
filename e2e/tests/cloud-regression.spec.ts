@@ -41,7 +41,13 @@ test('Cloud Library → Words & Chunks: Study Bank request and UI succeed', asyn
   }
 })
 
-test('Sign out: server confirmation and reload must not restore private view', async ({ page }, testInfo) => {
+const logoutState = process.env.E2E_STORAGE_STATE_LOGOUT
+if (!logoutState) throw new Error('E2E_STORAGE_STATE_LOGOUT is required: destructive logout must use a dedicated synthetic session')
+
+test.describe('dedicated logout session', () => {
+  test.use({ storageState: logoutState })
+
+  test('Sign out: server confirmation and reload must not restore private view', async ({ page }, testInfo) => {
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
   const logoutResponse = page.waitForResponse((response) =>
@@ -64,4 +70,5 @@ test('Sign out: server confirmation and reload must not restore private view', a
   await page.reload()
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toHaveCount(0)
   await expect(page.getByRole('status').filter({ hasText: /session is missing or expired|Signed out of this browser view/ })).toBeVisible()
+})
 })
