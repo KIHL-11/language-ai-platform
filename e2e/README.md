@@ -25,9 +25,9 @@ E2E_STORAGE_STATE_LOGOUT=/secure/path/synthetic-logout.storage-state.json \
 E2E_STORAGE_STATE_REPLAY=/secure/path/synthetic-replay.storage-state.json \
 E2E_ACCOUNT_A_LIBRARY_ITEM_ID=seeded-synthetic-a-item-id npm test
 ```
-Local sandbox targets also require `E2E_ALLOW_LOCAL=yes`. Nonstandard hostnames require `E2E_ALLOW_NONSTANDARD_HOST=yes` and independent confirmation that the target is isolated. These overrides do NOT authorize production use.
+Cloud authentication requires HTTPS even for local tests. Nonstandard hostnames require `E2E_ALLOW_NONSTANDARD_HOST=yes` and independent confirmation that the target is isolated. These overrides do NOT authorize production use.
 
-## Current coverage
+The npm test commands first run a dependency-free preflight that checks the exact HTTPS sandbox origin, four **distinct** Cloud session cookies, secure cookie attributes, and synthetic fixture presence. This guard does not prove that the infrastructure is isolated or that accounts are truly synthetic.\n\n## Current coverage
 - True Chromium navigation: authenticated My Library → Words & Chunks.
 - Capture API HTTP status and `detail.code` in an attached JSON evidence file; fail on Study Bank 503.
 - Logout confirmation, including reloading and checking that protected navigation is absent.
