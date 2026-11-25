@@ -10,10 +10,13 @@ if (!stateB || !itemA || !replayState) {
 
 test('two authenticated accounts are isolated on private endpoints', async ({ page, browser, baseURL }) => {
   const target = new URL(baseURL!)
+  const ignoreHTTPSErrors = process.env.E2E_DISPOSABLE_CI === 'yes' && target.origin === 'https://localhost:8443'
   const a = await page.request.get('/api/account/me')
   expect(a.status()).toBe(200)
   const idA = (await a.json()).user_id as string
-  const bContext = await browser.newContext({ storageState: stateB, baseURL: target.origin })
+  const own = await page.request.get('/api/library/items/' + encodeURIComponent(itemA))
+  expect(own.status(), 'A must actually own an accessible seeded item').toBe(200)
+  const bContext = await browser.newContext({ storageState: stateB, baseURL: target.origin, ignoreHTTPSErrors })
   try {
     const b = await bContext.request.get('/api/account/me')
     expect(b.status()).toBe(200)
@@ -48,10 +51,12 @@ test.describe('dedicated cookie replay session', () => {
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
   const oldCookies = await page.context().cookies()
+  expect(oldCookies.filter(cookie => cookie.name === '__Host-language_ai_session')).toHaveLength(1)
+  expect((await page.request.get('/api/account/me')).status()).toBe(200)
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(page.getByText('Signed out of this browser view.')).toBeVisible()
 
-  const replay = await browser.newContext({ baseURL, storageState: { cookies: oldCookies, origins: [] } })
+  const replay = await browser.newContext({ baseURL, ignoreHTTPSErrors: process.env.E2E_DISPOSABLE_CI === 'yes' && baseURL === 'https://localhost:8443', storageState: { cookies: oldCookies, origins: [] } })
   try {
     const response = await replay.request.get('/api/account/me')
     expect(response.status(), 'Revoked cookie must not authorize a new context').toBe(401)
