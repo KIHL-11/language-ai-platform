@@ -8,7 +8,8 @@ permissions:
 jobs:
   chromium:
     if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Playwright 1.58.2 cannot install Chromium dependencies on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:
