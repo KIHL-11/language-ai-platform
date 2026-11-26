@@ -1,0 +1,204 @@
+name: Disposable Cloud Chromium E2E (no deployment)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['e2e/**', '.github/workflows/cloud-browser-e2e-sandbox.yml']
+permissions:
+  contents: read
+jobs:
+  chromium:
+    if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
+    # Playwright 1.58.2 cannot install Chromium dependencies on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: e2e_admin
+          POSTGRES_PASSWORD: e2e_admin
+          POSTGRES_DB: e2e_disposable
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U e2e_admin -d e2e_disposable"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The application baseline under test. It must equal the current tip of main; a
+      # stale pin fails the job instead of reporting an old main as passing.
+      E2E_APP_SHA: f78170388a3c2a91c19d78fc5878efd601cd6395
+      E2E_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
+      E2E_DISPOSABLE_CI: 'yes'
+      E2E_ISOLATED_SANDBOX: 'yes'
+      E2E_BASE_URL: https://localhost:8443
+      E2E_EXPECTED_HOST: localhost:8443
+      E2E_ALLOW_NONSTANDARD_HOST: 'yes'
+      CLOUD_ADMIN_DATABASE_URL: postgresql://e2e_admin:e2e_admin@127.0.0.1:5432/e2e_disposable
+      CLOUD_STORAGE_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
+      CLOUD_SESSION_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
+      CLOUD_SESSION_ORIGIN: https://localhost:8443
+      CLOUD_STORAGE_MINIMUM_VERSION: '0009'
+      LANGUAGE_AI_DEPLOYMENT_MODE: cloud
+      LANGUAGE_AI_STAGING: '1'
+      CLOUD_EMAIL_DELIVERY: sandbox-directory
+      AI_MODE: mock
+    steps:
+      - name: Refuse a stale application baseline
+        # The PR's recorded base.sha can lag behind main, so read main's tip directly.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          echo "pinned app baseline: $E2E_APP_SHA"
+          echo "current main:        $CURRENT_MAIN"
+          if [ "$E2E_APP_SHA" != "$CURRENT_MAIN" ]; then
+            echo "::error::E2E_APP_SHA is stale: it is not the current main. Re-pin it and re-run; an old baseline cannot certify the current main."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.E2E_APP_SHA }}
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Record immutable source trees
+        run: |
+          app="$(git -C app rev-parse HEAD)"; harness="$(git -C harness rev-parse HEAD)"
+          echo "app=$app harness=$harness"
+          test "$app" = "$E2E_APP_SHA"
+          test "$harness" = "$E2E_HARNESS_SHA"
+      - name: Install backend and frontend dependencies
+        run: |
+          python -m pip install -r app/backend/requirements.txt
+          npm --prefix app/frontend ci
+          npm --prefix app/frontend run build
+          npm --prefix harness/e2e ci
+      - name: Type-check browser harness against installed dependencies
+        run: app/frontend/node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --typeRoots app/frontend/node_modules/@types harness/e2e/playwright.config.ts harness/e2e/tests/*.spec.ts harness/e2e/probes/*.ts
+      - name: Install Chromium
+        working-directory: harness/e2e
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Prove a failed fill() does not print a masked sign-in code
+        # Expected-failure probe with explicit checks (not continue-on-error): Playwright
+        # must fail, its raw output must contain the exposure path fill("<value>"), and the
+        # ::add-mask:: line must come first, so the runner masks the value in this log.
+        working-directory: harness/e2e
+        run: |
+          value="PROBE""OTP-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 4)"
+          out="$RUNNER_TEMP/mask-probe.out"
+          if E2E_MASK_PROBE_VALUE="$value" npx --no-install playwright test --config probes/playwright.probe.config.ts > "$out" 2>&1; then
+            cat "$out"; rm -f "$out"; echo "::error::The masking probe was expected to fail"; exit 1
+          fi
+          cat "$out"
+          mask_line="$(grep -n -F -x "::add-mask::$value" "$out" | head -1 | cut -d: -f1)"
+          fill_line="$(grep -n -F "fill(\"$value\")" "$out" | head -1 | cut -d: -f1)"
+          rm -f "$out"
+          rm -rf probes/test-results-probe
+          if [ -z "$mask_line" ]; then echo "::error::No ::add-mask:: line reached the runner"; exit 1; fi
+          if [ -z "$fill_line" ]; then echo "::error::Probe did not reproduce the fill() exposure path"; exit 1; fi
+          if [ "$mask_line" -ge "$fill_line" ]; then echo "::error::The mask was registered after the value was printed"; exit 1; fi
+          echo "Mask registered on line $mask_line before the fill() call log on line $fill_line"
+      - name: Prepare disposable paths and ephemeral credentials
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/cloud-media" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/e2e-evidence"
+          key="$(openssl rand -hex 32)"
+          echo "::add-mask::$key"
+          {
+            echo "CLOUD_AUTH_CODE_KEY=$key"
+            echo "CLOUD_MEDIA_ROOT=$RUNNER_TEMP/cloud-media"
+            echo "CLOUD_EMAIL_SANDBOX_DIR=$RUNNER_TEMP/mailbox"
+            echo "E2E_STATE_DIR=$RUNNER_TEMP/e2e-state"
+            echo "E2E_EVIDENCE_DIR=$RUNNER_TEMP/e2e-evidence"
+            echo "E2E_STORAGE_STATE=$RUNNER_TEMP/e2e-state/read.json"
+            echo "E2E_STORAGE_STATE_B=$RUNNER_TEMP/e2e-state/b.json"
+            echo "E2E_STORAGE_STATE_LOGOUT=$RUNNER_TEMP/e2e-state/logout.json"
+            echo "E2E_STORAGE_STATE_REPLAY=$RUNNER_TEMP/e2e-state/replay.json"
+          } >> "$GITHUB_ENV"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$RUNNER_TEMP/localhost.key" -out "$RUNNER_TEMP/localhost.crt" -subj /CN=localhost -addext subjectAltName=DNS:localhost
+      - name: Verify isolated PostgreSQL, migrate 0001–0009, seed synthetic fixtures
+        env:
+          PYTHONPATH: app/backend:app/backend/tests
+        run: python harness/e2e/scripts/prepare_ci_sandbox.py
+      - name: Start real HTTPS application on loopback only
+        working-directory: app/backend
+        run: |
+          python -m uvicorn app:app --host 127.0.0.1 --port 8443 --no-proxy-headers --ssl-keyfile "$RUNNER_TEMP/localhost.key" --ssl-certfile "$RUNNER_TEMP/localhost.crt" > "$RUNNER_TEMP/e2e-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/e2e-server.pid"
+          for i in $(seq 1 60); do
+            if curl -kfsS https://localhost:8443/api/deployment | grep -q '"cloud"'; then exit 0; fi
+            sleep 1
+          done
+          echo 'HTTPS application did not become ready'
+          exit 1
+      - name: Execute real Chromium regression and security checks
+        working-directory: harness/e2e
+        env:
+          E2E_EVIDENCE_PHASE: pre-restart
+        run: npm test -- --grep-invert 'after service restart'
+      - name: Require sanitized pre-restart evidence
+        working-directory: harness/e2e
+        run: node scripts/verify_evidence.mjs pre-restart
+      - name: Restart the real app against the same isolated database
+        working-directory: app/backend
+        run: |
+          kill "$(cat "$RUNNER_TEMP/e2e-server.pid")"
+          for i in $(seq 1 20); do
+            if ! kill -0 "$(cat "$RUNNER_TEMP/e2e-server.pid")" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          python -m uvicorn app:app --host 127.0.0.1 --port 8443 --no-proxy-headers --ssl-keyfile "$RUNNER_TEMP/localhost.key" --ssl-certfile "$RUNNER_TEMP/localhost.crt" >> "$RUNNER_TEMP/e2e-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/e2e-server.pid"
+          for i in $(seq 1 60); do
+            if curl -kfsS https://localhost:8443/api/deployment | grep -q '"cloud"'; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Verify persistent state after restart
+        working-directory: harness/e2e
+        env:
+          E2E_EVIDENCE_PHASE: post-restart
+        run: npm test -- --grep 'after service restart' --output=test-results-restart
+      - name: Require sanitized post-restart evidence
+        working-directory: harness/e2e
+        run: node scripts/verify_evidence.mjs post-restart
+      - name: Scan evidence for secret material before any upload
+        id: evidence_scan
+        if: always()
+        run: node harness/e2e/scripts/verify_evidence.mjs --scan-only
+      - name: Print the verified evidence for log-based review
+        # Runs only when the scan step itself succeeded (same gate as the upload).
+        if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
+        run: |
+          for file in "$E2E_EVIDENCE_DIR"/*/*.json; do
+            echo "::group::${file#"$E2E_EVIDENCE_DIR"/}"
+            cat "$file"
+            echo "::endgroup::"
+          done
+      - name: Upload sanitized response evidence only
+        # Only the scanned evidence directory: never traces, screenshots, videos,
+        # HTML reports or storage state.
+        if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-http-evidence
+          path: ${{ runner.temp }}/e2e-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Tear down local server and remove ephemeral secrets
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/e2e-server.pid" ]; then kill "$(cat "$RUNNER_TEMP/e2e-server.pid")" || true; fi
+          rm -rf "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-evidence" "$RUNNER_TEMP/localhost.key" "$RUNNER_TEMP/localhost.crt" "$RUNNER_TEMP/mask-probe.out"
+          # Local Playwright outputs can hold traces, screenshots and videos with session
+          # data; they are never uploaded and are removed here.
+          rm -rf harness/e2e/test-results harness/e2e/test-results-restart harness/e2e/probes/test-results-probe harness/e2e/playwright-report

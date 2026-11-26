@@ -1,0 +1,46 @@
+name: Browser E2E dependency and collection gate (no sandbox)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['e2e/**', '.github/workflows/cloud-browser-e2e-collection.yml']
+permissions:
+  contents: read
+jobs:
+  collection:
+    if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Require committed lockfile
+        run: test -f package-lock.json
+      - name: Install exactly from lockfile
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test fail-closed evidence scanner
+        run: node --test scripts/verify_evidence.test.mjs scripts/verify_evidence.failclosed.test.mjs
+      - name: Discover tests without launching browsers or connecting to a database
+        env:
+          E2E_BASE_URL: https://e2e.example.test
+          E2E_EXPECTED_HOST: e2e.example.test
+          E2E_ISOLATED_SANDBOX: 'yes'
+          E2E_STORAGE_STATE: unused-read.json
+          E2E_STORAGE_STATE_B: unused-b.json
+          E2E_STORAGE_STATE_LOGOUT: unused-logout.json
+          E2E_STORAGE_STATE_REPLAY: unused-replay.json
+          E2E_ACCOUNT_A_LIBRARY_ITEM_ID: unused-fixture
+        run: npx --no-install playwright test --list
+      - name: Upload lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-lockfile
+          path: e2e/package-lock.json
+          retention-days: 7

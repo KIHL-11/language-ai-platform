@@ -1,0 +1,80 @@
+# Cloud browser E2E — Gate 1 (Draft / NOT RELEASE APPROVAL)
+
+## Current status (2026-11-26)
+- Application baseline under test: `f78170388a3c2a91c19d78fc5878efd601cd6395` (`E2E_APP_SHA` in the sandbox workflow).
+  The job reads main's current tip from the GitHub API and fails if the pin differs, so an old main is never reported as the current one.
+- Executed in the hosted disposable sandbox: 8 browser tests (7 before and 1 after a real service restart),
+  all passing on the `ubuntu-24.04` runner (first full pass: run 45899875803 at harness `e9dca10`).
+- Sanitized HTTP evidence is written to `$E2E_EVIDENCE_DIR/<phase>/*.json`, checked by
+  `scripts/verify_evidence.mjs`, and uploaded as the `browser-e2e-http-evidence` artifact. A missing or unsafe
+  evidence file fails the job.
+- Limitations that still apply: the sandbox migrates only to 0009, not to the production minimum 0014; one runner
+  image; synthetic accounts only; this is **not** the historical 61/61 suite and not a release approval.
+
+## History
+- Original reproduction baseline: `8403a3b76b8cf630109acd2431ff0119929bf30f`.
+- The suite started as a new, unexecuted harness. Runs 1–2 of the sandbox workflow failed before any test, because
+  `ubuntu-latest` (Ubuntu 26.04) is not supported by Playwright 1.58.2; the job is pinned to `ubuntu-24.04`.
+- Run 45899875803 executed all 8 tests but uploaded no artifact: Playwright `attach({ body })` does not write files
+  under `test-results/**/attachments`, and the upload ignored missing files. Evidence is now written explicitly.
+
+## Safety preconditions
+- One-time isolated PostgreSQL 16 instance, synthetic test account, sandbox email provider.
+- Never point `E2E_BASE_URL` at production, reuse production secrets, or use real user records.
+- Owner authorized disposable testing on 2026-11-25. Only the dedicated hosted CI sandbox may migrate its fresh loopback PostgreSQL 16 database to 0009; all other database targets remain forbidden.
+- Provide a Playwright `storageState` JSON captured for a dedicated synthetic **authenticated** account outside the repository. Never commit state or secrets.
+- The sandbox domain heuristic in config is a guardrail, NOT a guarantee of isolation. Operator must independently verify routing and credentials.
+
+## Install / run (once an approved sandbox exists)
+```sh
+cd e2e
+npm ci
+npx playwright install chromium
+E2E_BASE_URL=https://your-sandbox.example.test \
+E2E_EXPECTED_HOST=your-sandbox.example.test \
+E2E_STORAGE_STATE=/secure/path/synthetic-account.storage-state.json \
+E2E_ISOLATED_SANDBOX=yes \
+E2E_STORAGE_STATE_B=/secure/path/synthetic-account-b.storage-state.json \
+E2E_STORAGE_STATE_LOGOUT=/secure/path/synthetic-logout.storage-state.json \
+E2E_STORAGE_STATE_REPLAY=/secure/path/synthetic-replay.storage-state.json \
+E2E_ACCOUNT_A_LIBRARY_ITEM_ID=seeded-synthetic-a-item-id npm test
+```
+Cloud authentication requires HTTPS even for local tests. Nonstandard hostnames require `E2E_ALLOW_NONSTANDARD_HOST=yes` and independent confirmation that the target is isolated. These overrides do NOT authorize production use.
+
+The npm test commands first run a dependency-free preflight that checks the exact HTTPS sandbox origin, four **distinct** Cloud session cookies, secure cookie attributes, and synthetic fixture presence. This guard does not prove that the infrastructure is isolated or that accounts are truly synthetic.
+
+## Current coverage (8 tests)
+- Cloud Library → Words & Chunks: Study Bank GET and UI (fails on Study Bank 503).
+- Sign out with server confirmation; reload and a second tab do not restore the private view.
+- Two synthetic accounts isolated on private endpoints (`user_id` selection 403, cross-owner Library item 404).
+- State-changing request without CSRF refused (`csrf_invalid`).
+- Replay of a revoked session cookie rejected (401).
+- Library-backed Study Bank bulk write permitted and idempotent (#91).
+- Real sandbox email sign-in, sign-out, same-account re-login, unconfirmed cross-tab logout and retried logout (#92).
+- After a real service restart: the persistent synthetic session and Library-backed chunk remain accessible.
+
+## Evidence
+Each test writes one allow-listed JSON file (`path`, `method`, `status`, `detail.code`, `created` only; Library ids are
+replaced by `{id}`). The verifier requires every expected file per phase and rejects cookies, CSRF or key material,
+session-token-shaped values, live session tokens of the run, emails, sign-in codes, owner ids and UUIDs. Before any
+upload, a scan refuses unsafe, malformed, unexpected or non-regular evidence entries. Upload is permitted only if the scan step succeeds, even when a test failed. Sandbox sign-in codes are masked before Playwright fills the code field; before the real tests, an expected-failure probe (`probes/`) fills a masked synthetic value into a disabled input and the job checks that the mask was registered before Playwright printed `fill("<value>")`. In scan mode every verifier failure deletes the evidence, and printing and upload both require the scan step to succeed. Local traces, screenshots, videos, HTML reports and probe output are removed at teardown and never uploaded.
+
+## Verification notes
+- Lockfile generated by hosted run 45628203261 and committed.
+- Confirm the target is a designated sandbox by independent infrastructure inspection; matching E2E_EXPECTED_HOST alone is not a security authorization.
+
+## Gate 2 synthetic security fixtures
+- Provide synthetic authenticated account storageState files for A and B, plus separate valid sessions for the destructive logout and replay tests (E2E_STORAGE_STATE_LOGOUT, E2E_STORAGE_STATE_REPLAY). All four session cookies must be distinct; reuse of one session across tests invalidates subsequent tests.
+- Seed and provide a Library item owned by A in E2E_ACCOUNT_A_LIBRARY_ITEM_ID. The test expects B to receive 404 when accessing that item.
+- Tests verify B cannot impersonate A through user_id, reject POST without CSRF, and reject a revoked session cookie after logout.
+- Gate 2 tests fail closed when fixture variables are absent. In the hosted sandbox the fixtures are seeded by `scripts/prepare_ci_sandbox.py`.
+
+## Still pending
+- Independent code and security review of this harness.
+- Migrations beyond 0009 (production requires 0014) are not exercised here.
+- Never merge or deploy based on Gate 1 alone.
+
+Playwright outputs are local artifacts and must not be committed. Traces can contain private state; only synthetic credentials are allowed, and artifacts must be access-controlled.
+
+## Hosted disposable sandbox
+The branch-only sandbox workflow checks out the fixed app baseline separately from the harness, provisions a fresh loopback PostgreSQL 16 service and exact 0009 runtime role, uses a local HTTPS certificate and private sandbox mailbox, and runs the regression/security cases. The advanced suite covers the actual #91 Library-backed bulk POST, #92 cross-tab outcomes, email re-login and real service restart. It uploads only the verified sanitized HTTP evidence (`browser-e2e-http-evidence`), not cookies, OTPs, raw traces or mailbox contents. All changes and executions remain test-only; no production approval is implied.
