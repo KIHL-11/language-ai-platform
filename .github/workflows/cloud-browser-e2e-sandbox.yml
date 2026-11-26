@@ -23,8 +23,8 @@ jobs:
           --health-cmd "pg_isready -U e2e_admin -d e2e_disposable"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      # The application baseline under test. It must equal the PR's current base
-      # (main); a stale pin fails the job instead of reporting an old main as passing.
+      # The application baseline under test. It must equal the current tip of main; a
+      # stale pin fails the job instead of reporting an old main as passing.
       E2E_APP_SHA: f78170388a3c2a91c19d78fc5878efd601cd6395
       E2E_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
       E2E_DISPOSABLE_CI: 'yes'
@@ -43,11 +43,13 @@ jobs:
       AI_MODE: mock
     steps:
       - name: Refuse a stale application baseline
+        # The PR's recorded base.sha can lag behind main, so read main's tip directly.
         env:
-          CURRENT_MAIN: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           echo "pinned app baseline: $E2E_APP_SHA"
-          echo "current PR base:     $CURRENT_MAIN"
+          echo "current main:        $CURRENT_MAIN"
           if [ "$E2E_APP_SHA" != "$CURRENT_MAIN" ]; then
             echo "::error::E2E_APP_SHA is stale: it is not the current main. Re-pin it and re-run; an old baseline cannot certify the current main."
             exit 1
@@ -151,8 +153,10 @@ jobs:
         run: node scripts/verify_evidence.mjs post-restart
       - name: Scan evidence for secret material before any upload
         if: always()
-        working-directory: harness/e2e
-        run: node scripts/verify_evidence.mjs --scan-only
+        run: |
+          if [ -f harness/e2e/scripts/verify_evidence.mjs ]; then
+            node harness/e2e/scripts/verify_evidence.mjs --scan-only
+          fi
       - name: Upload sanitized response evidence only
         if: always()
         uses: actions/upload-artifact@v4

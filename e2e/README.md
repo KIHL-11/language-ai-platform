@@ -2,7 +2,7 @@
 
 ## Current status (2026-11-26)
 - Application baseline under test: `f78170388a3c2a91c19d78fc5878efd601cd6395` (`E2E_APP_SHA` in the sandbox workflow).
-  The job fails if this pin is not the PR's current base (main), so an old main can never be reported as the current one.
+  The job reads main's current tip from the GitHub API and fails if the pin differs, so an old main is never reported as the current one.
 - Executed in the hosted disposable sandbox: 8 browser tests (7 before and 1 after a real service restart),
   all passing on the `ubuntu-24.04` runner (first full pass: run 45899875803 at harness `e9dca10`).
 - Sanitized HTTP evidence is written to `$E2E_EVIDENCE_DIR/<phase>/*.json`, checked by
