@@ -83,10 +83,30 @@ jobs:
           npm --prefix app/frontend run build
           npm --prefix harness/e2e ci
       - name: Type-check browser harness against installed dependencies
-        run: app/frontend/node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --typeRoots app/frontend/node_modules/@types harness/e2e/playwright.config.ts harness/e2e/tests/*.spec.ts
+        run: app/frontend/node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --typeRoots app/frontend/node_modules/@types harness/e2e/playwright.config.ts harness/e2e/tests/*.spec.ts harness/e2e/probes/*.ts
       - name: Install Chromium
         working-directory: harness/e2e
         run: npx --no-install playwright install --with-deps chromium
+      - name: Prove a failed fill() does not print a masked sign-in code
+        # Expected-failure probe with explicit checks (not continue-on-error): Playwright
+        # must fail, its raw output must contain the exposure path fill("<value>"), and the
+        # ::add-mask:: line must come first, so the runner masks the value in this log.
+        working-directory: harness/e2e
+        run: |
+          value="PROBE""OTP-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 4)"
+          out="$RUNNER_TEMP/mask-probe.out"
+          if E2E_MASK_PROBE_VALUE="$value" npx --no-install playwright test --config probes/playwright.probe.config.ts > "$out" 2>&1; then
+            cat "$out"; rm -f "$out"; echo "::error::The masking probe was expected to fail"; exit 1
+          fi
+          cat "$out"
+          mask_line="$(grep -n -F -x "::add-mask::$value" "$out" | head -1 | cut -d: -f1)"
+          fill_line="$(grep -n -F "fill(\"$value\")" "$out" | head -1 | cut -d: -f1)"
+          rm -f "$out"
+          rm -rf probes/test-results-probe
+          if [ -z "$mask_line" ]; then echo "::error::No ::add-mask:: line reached the runner"; exit 1; fi
+          if [ -z "$fill_line" ]; then echo "::error::Probe did not reproduce the fill() exposure path"; exit 1; fi
+          if [ "$mask_line" -ge "$fill_line" ]; then echo "::error::The mask was registered after the value was printed"; exit 1; fi
+          echo "Mask registered on line $mask_line before the fill() call log on line $fill_line"
       - name: Prepare disposable paths and ephemeral credentials
         run: |
           umask 077
@@ -156,7 +176,8 @@ jobs:
         if: always()
         run: node harness/e2e/scripts/verify_evidence.mjs --scan-only
       - name: Print the verified evidence for log-based review
-        # Runs only after both phases were verified and the scan passed.
+        # Runs only when the scan step itself succeeded (same gate as the upload).
+        if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
         run: |
           for file in "$E2E_EVIDENCE_DIR"/*/*.json; do
             echo "::group::${file#"$E2E_EVIDENCE_DIR"/}"
@@ -164,6 +185,8 @@ jobs:
             echo "::endgroup::"
           done
       - name: Upload sanitized response evidence only
+        # Only the scanned evidence directory: never traces, screenshots, videos,
+        # HTML reports or storage state.
         if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
         uses: actions/upload-artifact@v4
         with:
@@ -175,4 +198,7 @@ jobs:
         if: always()
         run: |
           if [ -f "$RUNNER_TEMP/e2e-server.pid" ]; then kill "$(cat "$RUNNER_TEMP/e2e-server.pid")" || true; fi
-          rm -rf "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-evidence" "$RUNNER_TEMP/localhost.key" "$RUNNER_TEMP/localhost.crt"
+          rm -rf "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-evidence" "$RUNNER_TEMP/localhost.key" "$RUNNER_TEMP/localhost.crt" "$RUNNER_TEMP/mask-probe.out"
+          # Local Playwright outputs can hold traces, screenshots and videos with session
+          # data; they are never uploaded and are removed here.
+          rm -rf harness/e2e/test-results harness/e2e/test-results-restart harness/e2e/probes/test-results-probe harness/e2e/playwright-report

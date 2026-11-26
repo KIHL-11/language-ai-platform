@@ -1,8 +1,11 @@
 // Fails unless every expected sanitized evidence file exists, parses as JSON and
 // contains no secret material.
 //   node scripts/verify_evidence.mjs pre-restart|post-restart   completeness + content
-//   node scripts/verify_evidence.mjs --scan-only                 content of whatever exists;
-//     on any violation the evidence directory is deleted so nothing unsafe is uploaded.
+//   node scripts/verify_evidence.mjs --scan-only                 content of whatever exists.
+//     Fail closed: in scan mode EVERY failure (including errors before the scan itself,
+//     such as an unreadable storage state, and an empty or unconfigured directory) deletes
+//     the evidence directory and exits non-zero; the workflow prints and uploads only
+//     after this step succeeded.
 import { readFileSync, readdirSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -13,12 +16,18 @@ const EXPECTED = {
   ],
   'post-restart': ['restart-persistence'],
 }
-function fail(message) { console.error(`Evidence check failed: ${message}`); process.exit(1) }
-
 const phase = process.argv[2]
 const root = process.env.E2E_EVIDENCE_DIR
 const scanOnly = phase === '--scan-only'
-if (scanOnly && !root) { console.log('Evidence scan: no evidence directory configured (job failed before setup)'); process.exit(0) }
+function fail(message) {
+  console.error(`Evidence check failed: ${message}`)
+  if (scanOnly && root) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { console.error('Evidence directory could not be deleted') }
+  }
+  process.exit(1)
+}
+process.on('uncaughtException', (error) => fail(`scanner error (${error?.code ?? error?.name ?? 'unknown'})`))
+if (scanOnly && !root) fail('no evidence directory is configured, so there is nothing verified to upload')
 if (!root || !(scanOnly || phase in EXPECTED)) fail('usage: E2E_EVIDENCE_DIR=<dir> verify_evidence.mjs pre-restart|post-restart|--scan-only')
 
 // Secrets that exist in this run and must never appear in evidence.
@@ -53,6 +62,7 @@ if (scanOnly) {
   // Scan every uploadable entry, not merely the expected directories. No symlinks,
   // unknown entries or unreadable files can pass. The workflow also gates upload
   // on this step's success, including errors that occur before this block.
+  let scanned = 0
   try {
     if (!lstatSync(root).isDirectory()) throw new Error('invalid evidence root')
     for (const sub of readdirSync(root)) {
@@ -61,6 +71,7 @@ if (scanOnly) {
       if (!lstatSync(directory).isDirectory()) throw new Error('invalid evidence phase directory')
       const allowed = new Set([...EXPECTED[sub].map(name => name + '.json'), 'manifest.json'])
       for (const name of readdirSync(directory)) {
+        scanned += 1
         if (!allowed.has(name)) throw new Error('unexpected evidence file')
         const file = join(directory, name)
         if (!lstatSync(file).isFile()) throw new Error('non-regular evidence file')
@@ -73,7 +84,8 @@ if (scanOnly) {
     rmSync(root, { recursive: true, force: true })
     fail('evidence scan could not safely complete; upload forbidden')
   }
-  console.log('Evidence scan OK: no secret material in any evidence file')
+  if (scanned === 0) fail('no evidence files to upload')
+  console.log(`Evidence scan OK: ${scanned} files, no secret material`)
   process.exit(0)
 }
 

@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { recordEvidence, type EvidenceRecord } from './evidence.js'
+import { maskInActionsLog } from './secrets.js'
 
 function requireDisposableCI(baseURL: string | undefined) {
   if (process.env.E2E_DISPOSABLE_CI !== 'yes' || baseURL !== 'https://localhost:8443') {
@@ -66,11 +67,11 @@ async function login(page: Page, email: string) {
   if (!/^(?:[0-9]{6}|[A-Z0-9]{12}|[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})$/.test(code)) {
     throw new Error('Unexpected sandbox sign-in code format')
   }
-  if (process.env.GITHUB_ACTIONS === 'true') {
-    process.stdout.write('::add-mask::' + code + '\n')
-    const normalized = code.replace(/-/g, '')
-    if (normalized !== code) process.stdout.write('::add-mask::' + normalized + '\n')
-  }
+  // Same helper as the CI masking probe (probes/otp-mask.probe.ts), so the probe
+  // exercises exactly this path.
+  maskInActionsLog(code)
+  const normalized = code.replace(/-/g, '')
+  if (normalized !== code) maskInActionsLog(normalized)
   await page.getByRole('textbox', { name: 'Sign-in code' }).fill(code)
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()

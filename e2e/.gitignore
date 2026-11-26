@@ -3,3 +3,4 @@ playwright-report/
 test-results/
 *.storage-state.json
 .env
+test-results-*/

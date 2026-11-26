@@ -26,7 +26,7 @@ jobs:
       - name: Install exactly from lockfile
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Test fail-closed evidence scanner
-        run: node --test scripts/verify_evidence.test.mjs
+        run: node --test scripts/verify_evidence.test.mjs scripts/verify_evidence.failclosed.test.mjs
       - name: Discover tests without launching browsers or connecting to a database
         env:
           E2E_BASE_URL: https://e2e.example.test
