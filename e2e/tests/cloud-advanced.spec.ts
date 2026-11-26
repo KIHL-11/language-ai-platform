@@ -61,6 +61,16 @@ async function login(page: Page, email: string) {
     }
     return Boolean(code)
   }, { timeout: 10000 }).toBe(true)
+  // Register both displayed and normalized values before Playwright can emit action diagnostics.
+  // The mailbox value is private, synthetic, and restricted to this CI runner.
+  if (!/^(?:[0-9]{6}|[A-Z0-9]{12}|[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})$/.test(code)) {
+    throw new Error('Unexpected sandbox sign-in code format')
+  }
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    process.stdout.write('::add-mask::' + code + '\n')
+    const normalized = code.replace(/-/g, '')
+    if (normalized !== code) process.stdout.write('::add-mask::' + normalized + '\n')
+  }
   await page.getByRole('textbox', { name: 'Sign-in code' }).fill(code)
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()

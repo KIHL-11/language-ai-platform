@@ -3,7 +3,7 @@
 //   node scripts/verify_evidence.mjs pre-restart|post-restart   completeness + content
 //   node scripts/verify_evidence.mjs --scan-only                 content of whatever exists;
 //     on any violation the evidence directory is deleted so nothing unsafe is uploaded.
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 
 const EXPECTED = {
@@ -50,16 +50,29 @@ function violations(text) {
 }
 
 if (scanOnly) {
-  let problems = 0
-  for (const sub of Object.keys(EXPECTED)) {
-    let names = []
-    try { names = readdirSync(join(root, sub)) } catch { continue }
-    for (const name of names) {
-      const found = violations(readFileSync(join(root, sub, name), 'utf8'))
-      if (found.length) { problems += 1; console.error(`Unsafe evidence ${sub}/${name}: ${found.join(', ')}`) }
+  // Scan every uploadable entry, not merely the expected directories. No symlinks,
+  // unknown entries or unreadable files can pass. The workflow also gates upload
+  // on this step's success, including errors that occur before this block.
+  try {
+    if (!lstatSync(root).isDirectory()) throw new Error('invalid evidence root')
+    for (const sub of readdirSync(root)) {
+      if (!Object.hasOwn(EXPECTED, sub)) throw new Error('unexpected evidence directory')
+      const directory = join(root, sub)
+      if (!lstatSync(directory).isDirectory()) throw new Error('invalid evidence phase directory')
+      const allowed = new Set([...EXPECTED[sub].map(name => name + '.json'), 'manifest.json'])
+      for (const name of readdirSync(directory)) {
+        if (!allowed.has(name)) throw new Error('unexpected evidence file')
+        const file = join(directory, name)
+        if (!lstatSync(file).isFile()) throw new Error('non-regular evidence file')
+        const content = readFileSync(file, 'utf8')
+        JSON.parse(content)
+        if (violations(content).length) throw new Error('unsafe evidence content')
+      }
     }
+  } catch {
+    rmSync(root, { recursive: true, force: true })
+    fail('evidence scan could not safely complete; upload forbidden')
   }
-  if (problems) { rmSync(root, { recursive: true, force: true }); fail('unsafe evidence was deleted before upload') }
   console.log('Evidence scan OK: no secret material in any evidence file')
   process.exit(0)
 }

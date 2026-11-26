@@ -152,11 +152,9 @@ jobs:
         working-directory: harness/e2e
         run: node scripts/verify_evidence.mjs post-restart
       - name: Scan evidence for secret material before any upload
+        id: evidence_scan
         if: always()
-        run: |
-          if [ -f harness/e2e/scripts/verify_evidence.mjs ]; then
-            node harness/e2e/scripts/verify_evidence.mjs --scan-only
-          fi
+        run: node harness/e2e/scripts/verify_evidence.mjs --scan-only
       - name: Print the verified evidence for log-based review
         # Runs only after both phases were verified and the scan passed.
         run: |
@@ -166,7 +164,7 @@ jobs:
             echo "::endgroup::"
           done
       - name: Upload sanitized response evidence only
-        if: always()
+        if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-e2e-http-evidence
