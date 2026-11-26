@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { recordEvidence } from './evidence.js'
 
 // Synthetic authenticated sandbox only. No test provisions accounts or runs migrations.
 test('Cloud Library → Words & Chunks: Study Bank request and UI succeed', async ({ page }, testInfo) => {
@@ -34,10 +35,9 @@ test('Cloud Library → Words & Chunks: Study Bank request and UI succeed', asyn
     await expect(page.getByText('No active words yet.').or(page.locator('main ul > li').first())).toBeVisible()
   } finally {
     await Promise.allSettled(pending)
-    await testInfo.attach('cloud-api-responses.json', {
-      body: JSON.stringify(calls, null, 2),
-      contentType: 'application/json',
-    })
+    await recordEvidence(testInfo, 'cloud-api-responses', calls.map((call) => ({
+      path: call.path, status: call.status, code: typeof call.code === 'string' ? call.code : null,
+    })))
   }
 })
 
@@ -63,10 +63,7 @@ test.describe('dedicated logout session', () => {
   if (!response.ok()) {
     try { code = (await response.json())?.detail?.code ?? null } catch { /* non-JSON */ }
   }
-  await testInfo.attach('logout-http.json', {
-    body: JSON.stringify({ path: '/api/account/logout', status: response.status(), code }, null, 2),
-    contentType: 'application/json',
-  })
+  await recordEvidence(testInfo, 'logout-http', [{ path: '/api/account/logout', method: 'POST', status: response.status(), code: code as string | null }])
   expect(response.status(), 'Logout POST must be confirmed by server').toBe(204)
   await expect(page.getByText('Signed out of this browser view.')).toBeVisible()
   await expect(page.getByText('Local view cleared, but server logout was not confirmed.')).toHaveCount(0)

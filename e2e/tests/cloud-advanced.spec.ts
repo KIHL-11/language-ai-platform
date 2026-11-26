@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { recordEvidence, type EvidenceRecord } from './evidence.js'
 
 function requireDisposableCI(baseURL: string | undefined) {
   if (process.env.E2E_DISPOSABLE_CI !== 'yes' || baseURL !== 'https://localhost:8443') {
@@ -27,14 +28,19 @@ test('Library-backed Study Bank write is permitted and idempotent (#91)', async 
     const result = await response.json().catch(() => ({}))
     return { status: response.status, code: result.detail?.code ?? null, created: result.created ?? null }
   }, input)
+  const records: EvidenceRecord[] = []
+  try {
   const first = await submit()
-  await testInfo.attach('media-provenance-first.json', { body: JSON.stringify(first), contentType: 'application/json' })
+  records.push({ path: '/api/study-bank/items/bulk', method: 'POST', status: first.status, code: first.code, created: first.created })
   expect(first.status).toBe(200)
   expect(first.created).toBe(1)
   const again = await submit()
-  await testInfo.attach('media-provenance-repeat.json', { body: JSON.stringify(again), contentType: 'application/json' })
+  records.push({ path: '/api/study-bank/items/bulk', method: 'POST', status: again.status, code: again.code, created: again.created })
   expect(again.status).toBe(200)
   expect(again.created).toBe(0)
+  } finally {
+    await recordEvidence(testInfo, 'media-provenance', records)
+  }
   await page.getByRole('button', { name: 'Chunks', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'figure it out', exact: true })).toBeVisible()
 })
@@ -62,13 +68,16 @@ async function login(page: Page, email: string) {
 
 test.describe('real sandbox email login', () => {
   test.use({ storageState: { cookies: [], origins: [] } })
-  test('email sign-in, sign-out, same-account re-login and unconfirmed cross-tab logout (#92)', async ({ page, baseURL }) => {
+  test('email sign-in, sign-out, same-account re-login and unconfirmed cross-tab logout (#92)', async ({ page, baseURL }, testInfo) => {
     requireDisposableCI(baseURL)
     test.setTimeout(120_000)
+    const records: EvidenceRecord[] = []
+    try {
     const email = 'e2e-fresh-account@example.test'
     await page.goto('/')
     await login(page, email)
     const first = await page.request.get('/api/account/me')
+    records.push({ path: '/api/account/me', method: 'GET', status: first.status(), code: 'after-first-login' })
     expect(first.status()).toBe(200)
     const identity = (await first.json()).user_id
     expect(typeof identity).toBe('string')
@@ -78,6 +87,7 @@ test.describe('real sandbox email login', () => {
     await page.waitForTimeout(61_000)
     await login(page, email)
     const second = await page.request.get('/api/account/me')
+    records.push({ path: '/api/account/me', method: 'GET', status: second.status(), code: 'after-relogin' })
     expect(second.status()).toBe(200)
     expect((await second.json()).user_id).toBe(identity)
 
@@ -89,21 +99,34 @@ test.describe('real sandbox email login', () => {
     await expect(page.getByText('Local view cleared, but server logout was not confirmed.')).toBeVisible()
     await expect(other.getByText('另一个标签页尝试退出，但服务器未确认。当前会话可能仍然有效。')).toBeVisible()
     await expect(other.getByRole('navigation', { name: 'Cloud learning' })).toHaveCount(0)
-    expect((await other.request.get('/api/account/me')).status()).toBe(200)
+    const paused = await other.request.get('/api/account/me')
+    records.push({ path: '/api/account/me', method: 'GET', status: paused.status(), code: 'other-tab-after-unconfirmed-logout' })
+    expect(paused.status()).toBe(200)
     await other.getByRole('button', { name: '重试退出' }).click()
     await expect(other.getByText('Signed out of this browser view.')).toBeVisible()
-    expect((await other.request.get('/api/account/me')).status()).toBe(401)
+    const retried = await other.request.get('/api/account/me')
+    records.push({ path: '/api/account/me', method: 'GET', status: retried.status(), code: 'other-tab-after-retried-logout' })
+    expect(retried.status()).toBe(401)
     await other.close()
+    } finally {
+      await recordEvidence(testInfo, 'email-relogin-cross-tab', records)
+    }
   })
 })
 
-test('after service restart: persistent synthetic session and Library-backed chunk remain accessible', async ({ page, baseURL }) => {
+test('after service restart: persistent synthetic session and Library-backed chunk remain accessible', async ({ page, baseURL }, testInfo) => {
   requireDisposableCI(baseURL)
   const item = process.env.E2E_ACCOUNT_A_LIBRARY_ITEM_ID
   if (!item) throw new Error('Missing seeded item ID')
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: 'Cloud learning' })).toBeVisible()
-  expect((await page.request.get('/api/library/items/' + encodeURIComponent(item))).status()).toBe(200)
+  const me = await page.request.get('/api/account/me')
+  const library = await page.request.get('/api/library/items/' + encodeURIComponent(item))
+  await recordEvidence(testInfo, 'restart-persistence', [
+    { path: '/api/account/me', method: 'GET', status: me.status(), code: 'persistent-session' },
+    { path: '/api/library/items/{id}', method: 'GET', status: library.status(), code: 'persistent-library-item' },
+  ])
+  expect(library.status()).toBe(200)
   await page.getByRole('button', { name: 'Chunks', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'figure it out', exact: true })).toBeVisible()
 })
