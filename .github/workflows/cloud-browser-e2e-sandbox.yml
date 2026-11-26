@@ -157,6 +157,14 @@ jobs:
           if [ -f harness/e2e/scripts/verify_evidence.mjs ]; then
             node harness/e2e/scripts/verify_evidence.mjs --scan-only
           fi
+      - name: Print the verified evidence for log-based review
+        # Runs only after both phases were verified and the scan passed.
+        run: |
+          for file in "$E2E_EVIDENCE_DIR"/*/*.json; do
+            echo "::group::${file#"$E2E_EVIDENCE_DIR"/}"
+            cat "$file"
+            echo "::endgroup::"
+          done
       - name: Upload sanitized response evidence only
         if: always()
         uses: actions/upload-artifact@v4
