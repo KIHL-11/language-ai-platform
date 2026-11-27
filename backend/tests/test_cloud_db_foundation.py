@@ -110,6 +110,12 @@ def cloud_db():
                 connection.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role_name)))
 
 
+def _approve(monkeypatch, version: str, filename: str, body: bytes) -> None:
+    """Approve a synthetic migration in the code-side pin for one test only."""
+    import hashlib
+    monkeypatch.setitem(schema.PHASE1_PINNED, version, (filename, hashlib.sha256(body).hexdigest()))
+
+
 def _copy_migrations(tmp_path: Path) -> Path:
     target = tmp_path / "migrations"
     shutil.copytree(schema.MIGRATIONS_DIR, target)
@@ -136,12 +142,13 @@ def test_manifest_with_0010_is_refused(tmp_path):
         load_manifest(directory)
 
 
-def test_nested_transaction_control_is_refused(tmp_path):
+def test_nested_transaction_control_is_refused(tmp_path, monkeypatch):
     directory = tmp_path / "m"
     directory.mkdir()
     body = b"BEGIN;\nCREATE TABLE cloud_users(user_id text);\nCOMMIT;\nDROP TABLE x;\nCOMMIT;\n"
     import hashlib
     (directory / "0001_x.up.sql").write_bytes(body)
+    _approve(monkeypatch, "0001", "0001_x.up.sql", body)
     (directory / schema.MANIFEST_NAME).write_text(f"{hashlib.sha256(body).hexdigest()}  0001_x.up.sql\n")
     with pytest.raises(schema.SchemaDefinitionError, match="nested transaction control"):
         load_manifest(directory)[0].body()
@@ -193,7 +200,7 @@ def test_tampered_file_is_refused_before_any_change(cloud_db, tmp_path):
     assert cloud_db.tables() == set()
 
 
-def test_failing_version_rolls_back_with_its_ledger_row(cloud_db, tmp_path):
+def test_failing_version_rolls_back_with_its_ledger_row(cloud_db, tmp_path, monkeypatch):
     import hashlib
     directory = tmp_path / "m"
     directory.mkdir()
@@ -201,6 +208,7 @@ def test_failing_version_rolls_back_with_its_ledger_row(cloud_db, tmp_path):
     broken = b"BEGIN;\nCREATE TABLE cloud_study_items (x INTEGER);\nSELECT 1 / 0;\nCOMMIT;\n"
     (directory / "0001_owner_scoped_library.up.sql").write_bytes(first)
     (directory / "0002_broken.up.sql").write_bytes(broken)
+    _approve(monkeypatch, "0002", "0002_broken.up.sql", broken)
     (directory / schema.MANIFEST_NAME).write_text(
         f"{hashlib.sha256(first).hexdigest()}  0001_owner_scoped_library.up.sql\n"
         f"{hashlib.sha256(broken).hexdigest()}  0002_broken.up.sql\n"
@@ -672,15 +680,17 @@ def test_prr_r5_empty_ledger_fails_closed(cloud_db):
 
 
 # PRR-R6: an empty ledger with no other tables (first version failed) can resume.
-def test_prr_r6_empty_ledger_without_tables_resumes_safely(cloud_db, tmp_path):
+def test_prr_r6_empty_ledger_without_tables_resumes_safely(cloud_db, tmp_path, monkeypatch):
     import hashlib
     directory = tmp_path / "m"
     directory.mkdir()
     broken = b"BEGIN;\nSELECT 1 / 0;\nCOMMIT;\n"
     (directory / "0001_broken.up.sql").write_bytes(broken)
     (directory / schema.MANIFEST_NAME).write_text(f"{hashlib.sha256(broken).hexdigest()}  0001_broken.up.sql\n")
-    with pytest.raises(psycopg.errors.DivisionByZero):
-        migrations.apply(cloud_db.admin_dsn, directory=directory)
+    with monkeypatch.context() as approved:
+        _approve(approved, "0001", "0001_broken.up.sql", broken)
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            migrations.apply(cloud_db.admin_dsn, directory=directory)
     assert cloud_db.tables() == {"cloud_schema_migrations"}
     assert cloud_db.scalar("SELECT count(*) FROM cloud_schema_migrations") == 0
     assert migrations.apply(cloud_db.admin_dsn) == _present_versions()
