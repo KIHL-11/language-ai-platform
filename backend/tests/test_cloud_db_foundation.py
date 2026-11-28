@@ -125,8 +125,9 @@ def _copy_migrations(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------- manifest
 
 def test_manifest_pins_exactly_0001_through_0009_and_present_files_match():
+    # Phase 1.5: 0014 (Library RLS) follows 0009; 0010-0013 stay reserved and unlisted.
     manifest = load_manifest()
-    assert [m.version for m in manifest] == [f"{i:04d}" for i in range(1, 10)]
+    assert [m.version for m in manifest] == [f"{i:04d}" for i in range(1, 10)] + ["0014"]
     present = _present_versions()
     assert present[:6] == ["0001", "0002", "0003", "0004", "0005", "0006"]
     for migration in manifest:
@@ -793,7 +794,7 @@ def test_prr_r10_eleven_legitimate_policies_pass_with_hostile_role_search_path(c
         rows = connection.execute(
             "SELECT c.relname, p.polrelid::oid, p.polqual::text, p.polwithcheck::text FROM pg_policy p"
             " JOIN pg_class c ON c.oid = p.polrelid").fetchall()
-        assert len(rows) == 11
+        assert len(rows) == len(schema.POLICY_NAMES) == 14  # incl. the 0014 Library policies
         for relname, relid, using_tree, check_tree in rows:
             accepted = preflight._expected_owner_signature(connection, relid)
             assert preflight._tree_signature(using_tree) in accepted, relname
@@ -833,4 +834,6 @@ def test_prr_r9b_all_eleven_policies_shadowed_is_refused(cloud_db):
     assert texts == {schema.OWNER_POLICY_EXPRESSION}
     failures = preflight.run_preflight(dsn).failures
     unbound = [f for f in failures if "USING does not bind" in f]
-    assert len(unbound) == 11, failures
+    # Phase 1.5: every pinned policy (11 from 0002-0004 plus 3 Library policies from 0014).
+    assert len(schema.POLICY_NAMES) == 14
+    assert len(unbound) == len(schema.POLICY_NAMES), failures

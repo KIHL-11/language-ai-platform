@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import hashlib
+import logging
 import mimetypes
 import os
 import re
@@ -40,6 +43,8 @@ SAFE_ITEM_ID = re.compile(
 )
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
+logger = logging.getLogger(__name__)
+
 
 class OwnerNotProvisionedError(LibraryStoreError):
     """The trusted principal has no corresponding server-owned user row."""
@@ -47,6 +52,21 @@ class OwnerNotProvisionedError(LibraryStoreError):
 
 class CloudLibraryUnavailableError(LibraryStoreError):
     """Cloud persistence failed without exposing driver or connection details."""
+
+
+class CloudLibraryCommitOutcomeUnknownError(CloudLibraryUnavailableError):
+    """COMMIT was sent for an audio attach, but its outcome was not confirmed.
+
+    The transaction may have committed, so READY metadata may reference
+    ``object_key``. The object is therefore kept, never compensated; if the
+    commit in fact did not happen the object is an unreferenced orphan that is
+    left for a later, separately approved reconciliation (no automatic cleanup).
+    """
+
+    def __init__(self, item_id: str, object_key: str):
+        super().__init__("Cloud Library audio attach outcome is unknown")
+        self.item_id = item_id
+        self.object_key = object_key
 
 
 class FilesystemMediaObjectStore:
@@ -173,7 +193,7 @@ class PostgresOwnerScopedLibraryRepository:
     def list_for_owner(self, owner_user_id: str) -> list[LibraryItem]:
         self._validate_owner(owner_user_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 rows = connection.execute(
                     self._item_select(
@@ -194,7 +214,7 @@ class PostgresOwnerScopedLibraryRepository:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     self._item_select(
@@ -227,7 +247,7 @@ class PostgresOwnerScopedLibraryRepository:
         )
         item_id = str(uuid.uuid4())
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     """
@@ -283,11 +303,14 @@ class PostgresOwnerScopedLibraryRepository:
     def delete_for_owner(self, owner_user_id: str, item_id: str) -> None:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
-        object_keys: list[str] = []
-        cleanup_ids: dict[str, str] = {}
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
+                # Same lock order as put_audio_for_owner (item, then media), so
+                # a concurrent attach either finishes first and its object is
+                # queued below, or waits and then finds the item gone.
+                if self._lock_item(connection, owner_user_id, item_id) is None:
+                    raise KeyError(item_id)
                 object_keys = [
                     row["object_key"]
                     for row in connection.execute(
@@ -300,28 +323,9 @@ class PostgresOwnerScopedLibraryRepository:
                     ).fetchall()
                 ]
                 for object_key in object_keys:
-                    cleanup_id = str(uuid.uuid4())
-                    cleanup = connection.execute(
-                        """
-                        INSERT INTO cloud_media_cleanup_outbox (
-                            cleanup_id, owner_user_id, library_item_id,
-                            object_key, status, attempt_count, created_at,
-                            updated_at
-                        ) VALUES (%s, %s, %s, %s, 'pending', 0, %s, %s)
-                        ON CONFLICT (object_key) DO UPDATE SET
-                            updated_at = EXCLUDED.updated_at
-                        RETURNING cleanup_id
-                        """,
-                        (
-                            cleanup_id,
-                            owner_user_id,
-                            item_id,
-                            object_key,
-                            self._now(),
-                            self._now(),
-                        ),
-                    ).fetchone()
-                    cleanup_ids[object_key] = str(cleanup["cleanup_id"])
+                    self._queue_object_cleanup(
+                        connection, owner_user_id, item_id, object_key
+                    )
                 deleted = connection.execute(
                     """
                     DELETE FROM cloud_library_items
@@ -336,22 +340,17 @@ class PostgresOwnerScopedLibraryRepository:
             raise
         except psycopg.Error as exc:
             raise CloudLibraryUnavailableError("Cloud Library is unavailable") from exc
-        # Metadata is already inaccessible. The transaction retained a durable
-        # cleanup record before deleting it, so object-store failures are
-        # recoverable without keeping the Library item visible.
-        for object_key in object_keys:
-            try:
-                self.media_objects.delete(object_key, owner_user_id, item_id)
-            except LibraryStoreError:
-                self._record_cleanup_failure(cleanup_ids[object_key])
-            else:
-                self._complete_cleanup(cleanup_ids[object_key])
+        # Metadata is now inaccessible and every retired object has a durable
+        # 'pending' cleanup row committed in the same transaction. The request
+        # path deliberately does not unlink the bytes: physical removal is left
+        # to a separately approved cleanup procedure (the B1 worker is frozen),
+        # so the pending row stays as the audit record until then.
 
     def audio_for_owner(self, owner_user_id: str, item_id: str) -> OwnerScopedAudio:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     """
@@ -400,8 +399,18 @@ class PostgresOwnerScopedLibraryRepository:
         digest = hashlib.sha256(content).hexdigest()
         media_id = str(uuid.uuid4())
         previous_key: str | None = None
+        # False until the transaction body has finished. Everything raised while
+        # it is False happened before COMMIT was sent, so the server can only
+        # roll the transaction back. Once True, the only remaining step is the
+        # COMMIT itself, whose failure leaves the outcome unknown.
+        commit_sent = False
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
+                # Serialize every attach and delete for this item on its stable
+                # parent row; the media row may not exist yet on a first attach.
+                # Lock order (item, then media) matches delete_for_owner.
+                if self._lock_item(connection, owner_user_id, item_id) is None:
+                    raise KeyError(item_id)
                 previous = connection.execute(
                     """
                     SELECT object_key FROM cloud_library_media_assets
@@ -412,6 +421,12 @@ class PostgresOwnerScopedLibraryRepository:
                     (owner_user_id, item_id),
                 ).fetchone()
                 previous_key = previous["object_key"] if previous else None
+                if previous_key and previous_key != object_key:
+                    # Retire the replaced object through the outbox in the same
+                    # transaction instead of unlinking it after commit.
+                    self._queue_object_cleanup(
+                        connection, owner_user_id, item_id, previous_key
+                    )
                 connection.execute(
                     """
                     INSERT INTO cloud_library_media_assets (
@@ -445,14 +460,29 @@ class PostgresOwnerScopedLibraryRepository:
                         self._now(),
                     ),
                 )
-        except Exception:
+                commit_sent = True
+        except Exception as exc:
+            if commit_sent:
+                # The COMMIT may have reached the server and succeeded even
+                # though its acknowledgement was lost, so READY metadata may now
+                # reference object_key. Never compensate here, and do not ask
+                # the (possibly unavailable) database whether it is safe: keep
+                # the object and report the uncertainty for reconciliation.
+                logger.warning(
+                    "Cloud Library audio attach outcome unknown; object kept "
+                    "for reconciliation (item_id=%s object_key=%s)",
+                    item_id,
+                    object_key,
+                )
+                raise CloudLibraryCommitOutcomeUnknownError(
+                    item_id, object_key
+                ) from exc
+            # Confirmed rollback: COMMIT was never sent, so the transaction
+            # that would have referenced object_key cannot have committed, and
+            # no metadata or outbox row points at this fresh, uniquely named
+            # object. Only then is the compensating removal allowed.
             self.media_objects.delete(object_key, owner_user_id, item_id)
             raise
-        if previous_key and previous_key != object_key:
-            try:
-                self.media_objects.delete(previous_key, owner_user_id, item_id)
-            except LibraryStoreError:
-                pass
         return self.get_for_owner(owner_user_id, item_id)
 
     @staticmethod
@@ -475,7 +505,7 @@ class PostgresOwnerScopedLibraryRepository:
         self._validate_owner(owner_user_id)
         self._validate_item_id(item_id)
         try:
-            with self._connect() as connection:
+            with self._owner_transaction(owner_user_id) as connection:
                 self._assert_owner_provisioned(connection, owner_user_id)
                 row = connection.execute(
                     self._item_select(
@@ -520,36 +550,58 @@ class PostgresOwnerScopedLibraryRepository:
             raise LibraryStoreError("Cloud Library update could not be read back")
         return self._row_to_item(result)
 
-    def _connect(self):
-        return psycopg.connect(self._dsn, row_factory=dict_row)
+    @contextmanager
+    def _owner_transaction(self, owner_user_id: str):
+        """One transaction bound to the authenticated owner for row level security.
 
-    def _record_cleanup_failure(self, cleanup_id: str) -> None:
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    UPDATE cloud_media_cleanup_outbox
-                    SET attempt_count = attempt_count + 1, updated_at = %s
-                    WHERE cleanup_id = %s
-                    """,
-                    (self._now(), cleanup_id),
-                )
-        except psycopg.Error:
-            # The original outbox row was committed with the Library deletion.
-            # Losing this best-effort counter update cannot erase that evidence.
-            return
+        ``app.current_owner`` is set transaction-locally (``set_config(..., true)``)
+        before any table is touched, so it cannot leak into a later transaction
+        on the same connection. RLS (migration 0014) is a second barrier behind
+        the owner predicates every query already carries; the owner value comes
+        from the authenticated identity, never from request data.
+        """
+        self._validate_owner(owner_user_id)
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            connection.execute(
+                "SELECT set_config('app.current_owner', %s, true)", (owner_user_id,)
+            )
+            yield connection
 
-    def _complete_cleanup(self, cleanup_id: str) -> None:
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    "DELETE FROM cloud_media_cleanup_outbox WHERE cleanup_id = %s",
-                    (cleanup_id,),
-                )
-        except psycopg.Error:
-            # A stale pending row is safe and retryable; never recreate access
-            # metadata merely because acknowledgement failed.
-            return
+    @staticmethod
+    def _lock_item(connection, owner_user_id: str, item_id: str):
+        """Row-lock the item's stable parent row for the rest of the transaction."""
+        return connection.execute(
+            """
+            SELECT item_id FROM cloud_library_items
+            WHERE owner_user_id = %s AND item_id = %s
+            FOR UPDATE
+            """,
+            (owner_user_id, item_id),
+        ).fetchone()
+
+    def _queue_object_cleanup(
+        self, connection, owner_user_id: str, item_id: str, object_key: str
+    ) -> None:
+        """Record a retired object as 'pending' inside the caller's transaction."""
+        connection.execute(
+            """
+            INSERT INTO cloud_media_cleanup_outbox (
+                cleanup_id, owner_user_id, library_item_id,
+                object_key, status, attempt_count, created_at,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, 'pending', 0, %s, %s)
+            ON CONFLICT (object_key) DO UPDATE SET
+                updated_at = EXCLUDED.updated_at
+            """,
+            (
+                str(uuid.uuid4()),
+                owner_user_id,
+                item_id,
+                object_key,
+                self._now(),
+                self._now(),
+            ),
+        )
 
     @staticmethod
     def _assert_owner_provisioned(connection, owner_user_id: str) -> None:
