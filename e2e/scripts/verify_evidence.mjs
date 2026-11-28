@@ -15,6 +15,10 @@ const EXPECTED = {
     'cookie-replay', 'media-provenance', 'email-relogin-cross-tab',
   ],
   'post-restart': ['restart-persistence'],
+  // Integration candidate extension (#97 audio/outbox), separate phases so the
+  // original eight checks and their evidence stay exactly as they were.
+  'upgrade': ['audio-outbox', 'outbox-retention'],
+  'upgrade-restart': ['upgrade-restart-audio'],
 }
 const phase = process.argv[2]
 const root = process.env.E2E_EVIDENCE_DIR
@@ -114,6 +118,8 @@ if (extra.length) fail(`unexpected files in ${phase}: ${extra.join(', ')}`)
 writeFileSync(join(directory, 'manifest.json'), JSON.stringify({
   phase,
   app_sha: process.env.E2E_APP_SHA ?? null,
+  app_tree: process.env.E2E_APP_TREE ?? null,
+  db_profile: process.env.E2E_DB_PROFILE ?? null,
   harness_sha: process.env.E2E_HARNESS_SHA ?? null,
   files: summary,
 }, null, 2) + '\n')

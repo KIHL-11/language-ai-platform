@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   collection:
-    if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' || github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate2') && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -26,7 +26,7 @@ jobs:
       - name: Install exactly from lockfile
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Test fail-closed evidence scanner
-        run: node --test scripts/verify_evidence.test.mjs scripts/verify_evidence.failclosed.test.mjs
+        run: node --test scripts/verify_evidence.test.mjs scripts/verify_evidence.failclosed.test.mjs scripts/verify_evidence.upgrade.test.mjs
       - name: Discover tests without launching browsers or connecting to a database
         env:
           E2E_BASE_URL: https://e2e.example.test
