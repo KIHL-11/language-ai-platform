@@ -11,11 +11,11 @@ permissions:
 # be the current main) and the PR heads it must contain. Re-pin all of them
 # together whenever main or any listed head moves.
 env:
-  E2E_APP_SHA: 3773933345d3d61b790d9aaba0ab6a43f3851703
-  E2E_APP_TREE: d63ca60605abd720249dc841538702f4452d992c
+  E2E_APP_SHA: 8b489a840f08baacbee458d1e200ee22a54abe2d
+  E2E_APP_TREE: f35b079e6b65932cf8d368574a5c8d3ed304964e
   E2E_APP_BASE_MAIN: 22cc19c3359043ac928347100ff76ee0cd0a2a11
   # #96 Library RLS, #97 audio outbox, #95 lockfile, #101 backup tooling
-  E2E_REQUIRED_HEADS: ad97afe335401e17a26a495c736c2ab57c853bdd f2b7fee033e66aa26f2b58044b2d2c3a7bae39e8 03f62bd180e0543164c9df820f603c891872b136 a6ce5161c19d55e6ea624f282f1f82b107a3a0f5
+  E2E_REQUIRED_HEADS: ad97afe335401e17a26a495c736c2ab57c853bdd f2b7fee033e66aa26f2b58044b2d2c3a7bae39e8 03f62bd180e0543164c9df820f603c891872b136 3a54818aea0c13250644d4e0ad93d78126ebe74c
 jobs:
   chromium:
     name: chromium (PostgreSQL ${{ matrix.db_profile }})
