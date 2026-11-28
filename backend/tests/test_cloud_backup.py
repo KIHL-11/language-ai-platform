@@ -125,9 +125,22 @@ def test_drill_refuses_non_disposable_targets(monkeypatch):
     with pytest.raises(backup_drill.DrillRefused, match="CLOUD_DRILL_DISPOSABLE"):
         backup_drill.run_drill("postgresql://u@127.0.0.1/db")
     monkeypatch.setenv("CLOUD_DRILL_DISPOSABLE", "yes")
-    for host in ("db.example.com", "10.0.0.5", "127.0.0.1,db.example.com"):
+    for name in backup_drill._INDIRECTION_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for host in ("db.example.com", "10.0.0.5", "127.0.0.1,db.example.com", "localhost"):
         with pytest.raises(backup_drill.DrillRefused, match="loopback"):
             backup_drill.run_drill(f"host={host} user=u dbname=db")
+    for dsn in ("host=127.0.0.1 hostaddr=10.0.0.5 user=u dbname=db", "service=prod user=u",
+                "host=127.0.0.1 servicefile=/tmp/x user=u"):
+        with pytest.raises(backup_drill.DrillRefused, match="refuses the connection parameter"):
+            backup_drill.run_drill(dsn)
+    with pytest.raises(backup_drill.DrillRefused, match="explicit loopback host"):
+        backup_drill.run_drill("user=u dbname=db")
+    for name in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.setenv(name, "10.0.0.5")
+        with pytest.raises(backup_drill.DrillRefused, match=f"Unset {name}"):
+            backup_drill.run_drill("host=127.0.0.1 user=u dbname=db")
+        monkeypatch.delenv(name)
 
 
 # ------------------------------------------------------------- database tests
@@ -139,6 +152,7 @@ def seeded(tmp_path, monkeypatch):
     base = _base_dsn()
     monkeypatch.setenv("CLOUD_DRILL_DISPOSABLE", "yes")
     backup_drill._require_disposable(base)
+    backup_drill._confirm_server_is_local(base)
     cluster = backup_drill._Cluster(base, tmp_path)
     try:
         cluster.exec(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER CREATEROLE").format(
@@ -189,6 +203,42 @@ def test_backup_role_is_separate_from_runtime_and_owner(seeded):
     assert report["table_owners"] == [seeded.owner]
     bad = backup.role_separation(seeded.dsn(database, seeded.owner), seeded.runtime, seeded.runtime)
     assert not bad["ok"] and "runtime and backup roles are the same role" in bad["failures"]
+
+
+def test_backup_role_with_column_level_write_grant_is_refused(seeded):
+    seeded.exec(sql.SQL("GRANT UPDATE (updated_at) ON cloud_library_items TO {}").format(
+        sql.Identifier(seeded.backup)), dbname=seeded.database)
+    with psycopg.connect(seeded.dsn(seeded.database, seeded.backup)) as connection:
+        assert "backup role has column-level UPDATE on cloud_library_items" in backup.backup_role_problems(connection)
+    report = backup.role_separation(seeded.dsn(seeded.database, seeded.owner), seeded.runtime, seeded.backup)
+    assert not report["ok"]
+
+
+def test_backup_role_with_temporary_or_other_schema_create_is_refused(seeded):
+    with psycopg.connect(seeded.dsn(seeded.database, seeded.backup)) as connection:
+        assert backup.backup_role_problems(connection) == []  # provisioning revoked TEMPORARY from PUBLIC
+    seeded.exec(sql.SQL("GRANT TEMPORARY ON DATABASE {} TO PUBLIC").format(sql.Identifier(seeded.database)))
+    seeded.exec("CREATE SCHEMA scratch", dbname=seeded.database)
+    seeded.exec(sql.SQL("GRANT CREATE ON SCHEMA scratch TO {}").format(sql.Identifier(seeded.backup)),
+                dbname=seeded.database)
+    with psycopg.connect(seeded.dsn(seeded.database, seeded.backup)) as connection:
+        problems = backup.backup_role_problems(connection)
+    assert any("TEMPORARY" in p for p in problems)
+    assert "backup role can CREATE in schema scratch" in problems
+
+
+def test_media_listing_refuses_an_unreadable_directory(tmp_path, monkeypatch):
+    root = tmp_path / "media"
+    (root / "owner" / "item").mkdir(parents=True)
+    (root / "owner" / "item" / "obj").write_bytes(b"x")
+
+    def failing_walk(top, onerror=None, followlinks=False):
+        onerror(PermissionError(13, "Permission denied", str(root / "owner")))
+        return iter(())
+
+    monkeypatch.setattr(backup.os, "walk", failing_walk)
+    with pytest.raises(backup.BackupRefused, match="cannot be read"):
+        backup._media_listing(root)
 
 
 def test_backup_role_with_write_privilege_is_refused(seeded):

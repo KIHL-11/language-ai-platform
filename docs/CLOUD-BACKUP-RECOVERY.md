@@ -31,7 +31,7 @@
 |---|---|---|---|
 | 迁移角色（table owner，例如 `lap_owner`） | `cloud_db.py apply`、`grant-runtime` | 拥有全部表；不给应用使用 | `check-roles`：所有表只有这一个 owner |
 | 运行时角色（例如 `lap_app`） | 应用连接 | 不能是 SUPERUSER；不能有 BYPASSRLS、CREATEROLE、CREATEDB、REPLICATION；没有任何成员关系；不拥有任何对象；只有权限表中的权限 | `cloud_db.py preflight`（已有），`check-roles` |
-| **备份角色**（例如 `lap_backup`） | `cloud_backup.py backup` | **BYPASSRLS**；不能是 SUPERUSER；不能有 CREATEROLE、CREATEDB、REPLICATION；INHERIT；成员关系**只允许** `pg_read_all_data`；不拥有任何对象；对所有表都**没有** INSERT、UPDATE、DELETE、TRUNCATE、REFERENCES、TRIGGER 权限；没有 CREATE 权限；能 SELECT 所有表 | 每次备份之前，都用当前连接重新检查。任何一项不满足就拒绝，不会写出任何文件 |
+| **备份角色**（例如 `lap_backup`） | `cloud_backup.py backup` | **BYPASSRLS**；不能是 SUPERUSER；不能有 CREATEROLE、CREATEDB、REPLICATION；INHERIT；成员关系**只允许** `pg_read_all_data`；不拥有任何对象；对所有表都**没有** INSERT、UPDATE、DELETE、TRUNCATE、REFERENCES、TRIGGER 权限，也没有列级的 INSERT、UPDATE、REFERENCES 授权；在任何 schema 中都没有 CREATE 权限，在数据库上也没有 CREATE 和 TEMPORARY 权限；能 SELECT 所有表 | 每次备份之前，都用当前连接重新检查。任何一项不满足就拒绝，不会写出任何文件 |
 | 恢复角色（超级用户，或者托管平台的管理员） | `cloud_backup.py restore`，**只用于新建的空数据库** | 能按原来的 owner 和授权重建对象；能绕过 RLS，否则既无法写入 FORCE RLS 的表，也无法校验 | 不能绕过 RLS 的话，工具拒绝执行 |
 
 **备份角色的凭据**：
@@ -45,12 +45,16 @@
 python scripts/cloud_backup.py create-backup-role --role lap_backup
 ```
 
+这条命令会顺带执行 `REVOKE TEMPORARY ON DATABASE <当前数据库> FROM PUBLIC`。PUBLIC 默认拥有 TEMPORARY 权限，不撤销的话，备份角色就能创建并写入临时表。应用本身不使用临时表。
+
+为备份角色开启 LOGIN 并设置口令，都用交互式的 `psql`。连接参数通过 `PGHOST`、`PGPORT`、`PGUSER`、`PGDATABASE` 这些环境变量指定，口令放在权限为 0600 的 `~/.pgpass` 文件中（或者让 `psql` 提示输入）。**不要**把带口令的 DSN 写在 `psql` 的命令行参数里，否则它会出现在进程列表和命令审计记录中：
+
 ```bash
-psql "$CLOUD_PRIVILEGED_DATABASE_URL" -c 'ALTER ROLE lap_backup LOGIN'
+psql -c 'ALTER ROLE lap_backup LOGIN'
 ```
 
 ```bash
-psql "$CLOUD_PRIVILEGED_DATABASE_URL" -c '\password lap_backup'
+psql -c '\password lap_backup'
 ```
 
 ```bash
@@ -178,7 +182,11 @@ CLOUD_RUNTIME_DATABASE_URL=... python scripts/cloud_db.py preflight --minimum 00
 CLOUD_DRILL_DISPOSABLE=yes CLOUD_DRILL_SUPERUSER_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres python scripts/cloud_backup.py drill
 ```
 
-- **运行前提**：只能在 loopback 地址或本地 socket 上运行，并且必须设置 `CLOUD_DRILL_DISPOSABLE=yes`。
+- **运行前提**：
+  - 必须设置 `CLOUD_DRILL_DISPOSABLE=yes`；
+  - DSN 中必须显式写出 loopback IP（例如 `127.0.0.1`）或者本地 socket 目录。`localhost` 这类主机名会被拒绝，因为它的解析结果无法核实；
+  - 拒绝 `hostaddr`、`service`、`servicefile` 参数，也拒绝 `PGHOST`、`PGHOSTADDR`、`PGSERVICE`、`PGSERVICEFILE`、`PGSYSCONFDIR`、`PGPORT` 环境变量，因为它们都可能把连接引到别处；
+  - 连接之后，还会用 `inet_server_addr()` 再确认一次服务器地址。
 - 演练创建的数据库、角色和目录都使用随机的 `lapdrill_` 名称，**结束后全部删除**。
 
 演练的步骤：

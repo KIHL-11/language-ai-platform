@@ -32,6 +32,7 @@ import hashlib
 import json
 import ipaddress
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -56,20 +57,53 @@ class DrillRefused(RuntimeError):
     """The drill would not run against a disposable local server."""
 
 
+_INDIRECTION_ENV = ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR", "PGPORT")
+
+
 def _require_disposable(dsn: str) -> None:
+    """Refuse anything but an explicit loopback IP or local socket, before any database work.
+
+    Connection indirection that could send libpq elsewhere is refused outright:
+    ``hostaddr``, ``service``/``servicefile`` and the matching PG* environment
+    variables (they apply whenever the DSN leaves a parameter out). Host names,
+    including ``localhost``, are refused because their resolution is not checked.
+    """
     if os.getenv("CLOUD_DRILL_DISPOSABLE") != "yes":
         raise DrillRefused("Set CLOUD_DRILL_DISPOSABLE=yes to confirm the server is disposable")
-    host = (conninfo_to_dict(dsn).get("host") or "").strip()
-    hosts = [h for h in host.split(",") if h] or [""]
+    inherited = [name for name in _INDIRECTION_ENV if os.getenv(name)]
+    if inherited:
+        raise DrillRefused("Unset " + ", ".join(inherited) + ": the drill only uses the explicit DSN")
+    # libpq resolves a service while parsing, so look for it before parsing.
+    match = re.search(r"(?:^|[\s?&])(service|servicefile)\s*=", dsn)
+    if match:
+        raise DrillRefused(f"The drill refuses the connection parameter {match.group(1)!r}")
+    try:
+        params = conninfo_to_dict(dsn)
+    except psycopg.ProgrammingError as exc:
+        raise DrillRefused("The drill DSN cannot be parsed") from exc
+    for key in ("hostaddr", "service", "servicefile"):
+        if params.get(key):
+            raise DrillRefused(f"The drill refuses the connection parameter {key!r}")
+    hosts = [h.strip() for h in str(params.get("host") or "").split(",")]
+    if not hosts or any(not h for h in hosts):
+        raise DrillRefused("The drill needs an explicit loopback host (an IP address or a socket directory)")
     for item in hosts:
-        if item in {"", "localhost"} or item.startswith("/"):
+        if item.startswith("/"):
             continue
         try:
             if ipaddress.ip_address(item).is_loopback:
                 continue
         except ValueError:
             pass
-        raise DrillRefused("The drill only runs against a loopback or local-socket server")
+        raise DrillRefused("The drill only runs against a loopback IP address or a local socket")
+
+
+def _confirm_server_is_local(dsn: str) -> None:
+    """Second check after connecting: the server address seen by the session is loopback or a socket."""
+    with psycopg.connect(dsn, connect_timeout=5) as connection:
+        address = connection.execute("SELECT host(inet_server_addr())").fetchone()[0]
+    if address is not None and not ipaddress.ip_address(address).is_loopback:
+        raise DrillRefused("The connected server address is not loopback")
 
 
 def _lesson(title: str):
@@ -206,6 +240,7 @@ def _trap_check(results, cluster, work: Path, sealed: Path, owner_dsn: str, labe
 
 def run_drill(superuser_dsn: str, work_dir: Path | None = None, *, directory: Path = MIGRATIONS_DIR) -> dict:
     _require_disposable(superuser_dsn)
+    _confirm_server_is_local(superuser_dsn)
     approved = list(approved_migrations())
     phase1_top = max(PHASE1_PINNED)
     top = approved[-1]

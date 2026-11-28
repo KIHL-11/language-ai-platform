@@ -58,6 +58,7 @@ MANIFEST_JSON = "manifest.json"
 MANIFEST_SHA = "MANIFEST.sha256"
 ALLOWED_BACKUP_MEMBERSHIPS = frozenset({"pg_read_all_data"})
 WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+COLUMN_WRITE_PRIVILEGES = ("INSERT", "UPDATE", "REFERENCES")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _SESSION_SETTINGS = (
     "SET TIME ZONE 'UTC'",
@@ -235,12 +236,25 @@ def role_problems_for_backup(connection, role: str) -> list[str]:
         "SELECT datdba = %s FROM pg_database WHERE datname = current_database()", (oid,)
     ).fetchone()[0]:
         problems.append("backup role owns the database")
-    if connection.execute("SELECT has_schema_privilege(%s, 'public', 'CREATE')", (role,)).fetchone()[0]:
-        problems.append("backup role can CREATE in schema public")
+    creatable = [
+        r[0]
+        for r in connection.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')"
+            " AND nspname NOT LIKE 'pg\\_toast%%' AND nspname NOT LIKE 'pg\\_temp\\_%%'"
+            " AND has_schema_privilege(%s, oid, 'CREATE') ORDER BY 1",
+            (role,),
+        )
+    ]
+    for schema in creatable:
+        problems.append(f"backup role can CREATE in schema {schema}")
     if connection.execute(
         "SELECT has_database_privilege(%s, current_database(), 'CREATE')", (role,)
     ).fetchone()[0]:
         problems.append("backup role can CREATE schemas in the database")
+    if connection.execute(
+        "SELECT has_database_privilege(%s, current_database(), 'TEMPORARY')", (role,)
+    ).fetchone()[0]:
+        problems.append("backup role can create TEMPORARY tables (revoke TEMPORARY on the database from PUBLIC)")
     for table in _public_tables(connection):
         qualified = f"public.{table}"
         if not connection.execute(
@@ -254,8 +268,18 @@ def role_problems_for_backup(connection, role: str) -> list[str]:
                 "SELECT has_table_privilege(%s, %s, %s)", (role, qualified, privilege)
             ).fetchone()[0]
         ]
+        # Column-level grants (e.g. GRANT UPDATE (col)) do not show in the table-level check.
+        column_writable = [
+            privilege
+            for privilege in COLUMN_WRITE_PRIVILEGES
+            if privilege not in writable and connection.execute(
+                "SELECT has_any_column_privilege(%s, %s, %s)", (role, qualified, privilege)
+            ).fetchone()[0]
+        ]
         if writable:
             problems.append(f"backup role can {'/'.join(writable)} {table}")
+        if column_writable:
+            problems.append(f"backup role has column-level {'/'.join(column_writable)} on {table}")
     return problems
 
 
@@ -291,6 +315,12 @@ def create_backup_role(privileged_dsn: str, role: str) -> bool:
             database = connection.execute("SELECT current_database()").fetchone()[0]
             connection.execute(
                 sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), ident)
+            )
+            # PUBLIC holds TEMPORARY by default; the application never uses temporary
+            # tables, so take it away from PUBLIC rather than leave the backup role a
+            # writable temporary schema.
+            connection.execute(
+                sql.SQL("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database))
             )
         problems = role_problems_for_backup(connection, role)
         if problems:
@@ -394,7 +424,10 @@ def _sha256_file(path: Path) -> tuple[str, int]:
 def _media_listing(root: Path) -> dict[str, tuple[int, int]]:
     """Relative path -> (size, mtime_ns) for every regular file; refuses links and specials."""
     listing: dict[str, tuple[int, int]] = {}
-    for current, directories, files in os.walk(root, followlinks=False):
+    def refuse(error: OSError) -> None:
+        raise BackupRefused("A media directory cannot be read; the backup would be incomplete") from error
+
+    for current, directories, files in os.walk(root, onerror=refuse, followlinks=False):
         base = Path(current)
         for name in directories:
             if (base / name).is_symlink():
