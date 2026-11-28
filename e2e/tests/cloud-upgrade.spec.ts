@@ -18,6 +18,8 @@ function fixture(baseURL: string | undefined): Fixture {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
+// Digests are compared as a boolean with a fixed message, so a mismatch never prints
+// the expected or received value into the job log.
 const sha256 = (body: Buffer) => createHash('sha256').update(body).digest('hex')
 
 test('Library audio stays referenced; deleting an item queues its audio instead of unlinking it (#97) @upgrade', async ({ page, browser, baseURL }, testInfo) => {
@@ -33,12 +35,12 @@ test('Library audio stays referenced; deleting an item queues its audio instead 
     const keep = await page.request.get(keepPath)
     records.push({ path: keepPath, method: 'GET', status: keep.status(), code: 'owner-audio' })
     expect(keep.status()).toBe(200)
-    expect(sha256(await keep.body())).toBe(data.keep.sha256)
+    expect(sha256(await keep.body()) === data.keep.sha256, 'keep audio bytes match the seeded fixture').toBe(true)
 
     const retireAudio = await page.request.get(retireItem + '/audio')
     records.push({ path: retireItem + '/audio', method: 'GET', status: retireAudio.status(), code: 'before-delete' })
     expect(retireAudio.status()).toBe(200)
-    expect(sha256(await retireAudio.body())).toBe(data.retire.sha256)
+    expect(sha256(await retireAudio.body()) === data.retire.sha256, 'retire audio bytes match the seeded fixture').toBe(true)
 
     const foreign = await other.request.get(keepPath)
     records.push({ path: keepPath, method: 'GET', status: foreign.status(), code: 'other-account' })
@@ -66,7 +68,7 @@ test('Library audio stays referenced; deleting an item queues its audio instead 
     const stillKept = await page.request.get(keepPath)
     records.push({ path: keepPath, method: 'GET', status: stillKept.status(), code: 'kept-after-delete' })
     expect(stillKept.status()).toBe(200)
-    expect(sha256(await stillKept.body())).toBe(data.keep.sha256)
+    expect(sha256(await stillKept.body()) === data.keep.sha256, 'keep audio bytes match the seeded fixture').toBe(true)
   } finally {
     await other.close()
     await recordEvidence(testInfo, 'audio-outbox', records)
@@ -85,7 +87,7 @@ test('upgrade-restart: referenced audio survives the restart and deleted audio s
     const keep = await page.request.get(keepPath)
     records.push({ path: keepPath, method: 'GET', status: keep.status(), code: 'owner-audio-after-restart' })
     expect(keep.status()).toBe(200)
-    expect(sha256(await keep.body())).toBe(data.keep.sha256)
+    expect(sha256(await keep.body()) === data.keep.sha256, 'keep audio bytes match the seeded fixture').toBe(true)
     const retired = await page.request.get(retirePath)
     records.push({ path: retirePath, method: 'GET', status: retired.status(), code: 'deleted-after-restart' })
     expect(retired.status()).toBe(404)
