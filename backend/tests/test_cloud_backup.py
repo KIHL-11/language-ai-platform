@@ -147,12 +147,13 @@ def test_drill_refuses_non_disposable_targets(monkeypatch):
 
 
 @pytest.fixture
-def seeded(tmp_path, monkeypatch):
-    """A 0009 database with owner, runtime and backup roles and one synthetic Library item + audio."""
+def seeded(tmp_path):
+    """A 0009 database with owner, runtime and backup roles and one synthetic Library item + audio.
+
+    Same disposable-server convention as every other database test (TEST_POSTGRES_DSN);
+    the drill's own loopback guard applies to run_drill, not to this fixture.
+    """
     base = _base_dsn()
-    monkeypatch.setenv("CLOUD_DRILL_DISPOSABLE", "yes")
-    backup_drill._require_disposable(base)
-    backup_drill._confirm_server_is_local(base)
     cluster = backup_drill._Cluster(base, tmp_path)
     try:
         cluster.exec(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER CREATEROLE").format(
@@ -303,10 +304,15 @@ def test_restore_rejects_a_backup_whose_rows_differ_from_its_manifest(seeded, tm
         backup.restore_backup(result.path, seeded.superuser(target), tmp_path / "m")
 
 
-def test_full_drill_backup_migrate_restore_remigrate(tmp_path, monkeypatch):
+def test_full_drill_backup_migrate_restore_remigrate(tmp_path):
     base = _base_dsn()
     _require_tools(base)
-    monkeypatch.setenv("CLOUD_DRILL_DISPOSABLE", "yes")
+    if os.getenv("CLOUD_DRILL_DISPOSABLE") != "yes":
+        # The drill's guard needs a loopback server (not a published container port);
+        # the dedicated workflow provides one and makes this a failure, not a skip.
+        if os.getenv("CLOUD_BACKUP_REQUIRE_PG_TOOLS") == "1":
+            pytest.fail("CLOUD_BACKUP_REQUIRE_PG_TOOLS=1 but CLOUD_DRILL_DISPOSABLE is not set")
+        pytest.skip("Set CLOUD_DRILL_DISPOSABLE=yes on a loopback disposable server to run the full drill")
     report = backup_drill.run_drill(base, tmp_path / "drill")
     failed = [entry for entry in report["checks"] if not entry["ok"]]
     assert report["ok"] and not failed, failed
