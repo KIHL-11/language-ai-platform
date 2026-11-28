@@ -1,15 +1,26 @@
-# Cloud browser E2E — Gate 1 (Draft / NOT RELEASE APPROVAL)
+# Cloud browser E2E — Gate 2 (Draft / NOT RELEASE APPROVAL)
 
-## Current status (2026-11-26)
-- Application baseline under test: `f78170388a3c2a91c19d78fc5878efd601cd6395` (`E2E_APP_SHA` in the sandbox workflow).
-  The job reads main's current tip from the GitHub API and fails if the pin differs, so an old main is never reported as the current one.
-- Executed in the hosted disposable sandbox: 8 browser tests (7 before and 1 after a real service restart),
-  all passing on the `ubuntu-24.04` runner (first full pass: run 45899875803 at harness `e9dca10`).
-- Sanitized HTTP evidence is written to `$E2E_EVIDENCE_DIR/<phase>/*.json`, checked by
-  `scripts/verify_evidence.mjs`, and uploaded as the `browser-e2e-http-evidence` artifact. A missing or unsafe
-  evidence file fails the job.
-- Limitations that still apply: the sandbox migrates only to 0009, not to the production minimum 0014; one runner
-  image; synthetic accounts only; this is **not** the historical 61/61 suite and not a release approval.
+## Current status (2026-11-28) — Gate 2: integration candidate, two database profiles
+- Under test: the exact integration candidate pinned in the sandbox workflow (`E2E_APP_SHA` + `E2E_APP_TREE`),
+  built on `E2E_APP_BASE_MAIN` and required to contain every head in `E2E_REQUIRED_HEADS` (#96, #97, #95, #101).
+  The job fails, never skips, when main has moved past `E2E_APP_BASE_MAIN`, the commit or tree differs, or a
+  required head is missing. Re-pin all four values together.
+- Matrix `db_profile`: `0009` (candidate code on a schema without Library RLS: deploy-before-migrate) and `0014`
+  (Library RLS on). Migration target and `CLOUD_STORAGE_MINIMUM_VERSION` are the same value; the preparer refuses
+  a 0014 profile on code that does not approve 0014 and asserts FORCE RLS on exactly the expected tables.
+- Per profile: the original 8 tests (7 before, 1 after a real restart, unchanged) plus the #97 regression in
+  separate phases: `@upgrade` (owner audio served, other account 404, delete item → audio and item 404, the other
+  audio intact) with `scripts/verify_outbox_retention.py` (outbox row pending / 0 attempts / owner-bound, metadata
+  gone, bytes still on disk), and `@upgrade-restart` (state after restart).
+- Evidence per profile: `browser-e2e-http-evidence-<profile>`; manifests record `app_sha`, `app_tree`, `db_profile`.
+- The `e2e-gate` job is the only check to read: it fails unless both profiles ran and passed and every phase
+  manifest names the pinned candidate. A skipped or cancelled profile is a failure, not a pass.
+- Scanner tests: the original 23 plus 3 upgrade-phase tests.
+- Still not covered: the historical 61/61 suite, production TLS/proxy, real email, audio replacement through the
+  browser (no public upload endpoint; covered by backend tests). Not a release approval.
+
+## Gate 1 status (2026-11-26, superseded)
+- Baseline `f781703`, migration 0009 only, 8 tests passing on `ubuntu-24.04` (run 45899875803 and later).
 
 ## History
 - Original reproduction baseline: `8403a3b76b8cf630109acd2431ff0119929bf30f`.
@@ -21,7 +32,7 @@
 ## Safety preconditions
 - One-time isolated PostgreSQL 16 instance, synthetic test account, sandbox email provider.
 - Never point `E2E_BASE_URL` at production, reuse production secrets, or use real user records.
-- Owner authorized disposable testing on 2026-11-25. Only the dedicated hosted CI sandbox may migrate its fresh loopback PostgreSQL 16 database to 0009; all other database targets remain forbidden.
+- Owner authorized disposable testing on 2026-11-25. Only the dedicated hosted CI sandbox may migrate its fresh loopback PostgreSQL 16 database (to 0009, and to 0014 for the 0014 profile, authorized 2026-11-28); all other database targets remain forbidden.
 - Provide a Playwright `storageState` JSON captured for a dedicated synthetic **authenticated** account outside the repository. Never commit state or secrets.
 - The sandbox domain heuristic in config is a guardrail, NOT a guarantee of isolation. Operator must independently verify routing and credentials.
 

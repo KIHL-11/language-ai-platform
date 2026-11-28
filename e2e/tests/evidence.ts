@@ -16,7 +16,7 @@ function clean(record: EvidenceRecord): EvidenceRecord {
   if (record.code !== undefined) out.code = record.code
   if (record.created !== undefined) out.created = record.created
   // Library item ids and other path parameters are replaced, so paths stay generic.
-  out.path = out.path.replace(/\/api\/library\/items\/[^/]+$/, '/api/library/items/{id}')
+  out.path = out.path.replace(/\/api\/library\/items\/[^/]+(\/audio)?$/, '/api/library/items/{id}$1')
   // Anything that is not a short plain token is redacted rather than written.
   for (const key of ['path', 'method', 'code'] as const) {
     const value = out[key]

@@ -5,9 +5,27 @@ on:
     paths: ['e2e/**', '.github/workflows/cloud-browser-e2e-sandbox.yml']
 permissions:
   contents: read
+
+# Exact integration candidate under test. Every value is checked at run time:
+# the candidate's commit and tree, the main it was built on (which must still
+# be the current main) and the PR heads it must contain. Re-pin all of them
+# together whenever main or any listed head moves.
+env:
+  E2E_APP_SHA: 7c33abbcc43983a021924e6d050f2bd4327b6c28
+  E2E_APP_TREE: 20713855cd1416648a6d351a739bd5a46fabe247
+  E2E_APP_BASE_MAIN: 22cc19c3359043ac928347100ff76ee0cd0a2a11
+  # #96 Library RLS, #97 audio outbox, #95 lockfile, #101 backup tooling
+  E2E_REQUIRED_HEADS: ad97afe335401e17a26a495c736c2ab57c853bdd f2b7fee033e66aa26f2b58044b2d2c3a7bae39e8 03f62bd180e0543164c9df820f603c891872b136 a7906e7e8ae35e34aaf9eb5be7655cecb32cdcdb
 jobs:
   chromium:
-    if: github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' && github.event.pull_request.head.repo.full_name == github.repository
+    name: chromium (PostgreSQL ${{ matrix.db_profile }})
+    if: (github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate1' || github.event.pull_request.head.ref == 'test/cloud-browser-e2e-gate2') && github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0009: candidate code on a schema without Library RLS (deploy-before-migrate).
+        # 0014: candidate code on the upgraded schema with Library RLS.
+        db_profile: ['0009', '0014']
     # Playwright 1.58.2 cannot install Chromium dependencies on ubuntu-latest (26.04).
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -25,7 +43,7 @@ jobs:
     env:
       # The application baseline under test. It must equal the current tip of main; a
       # stale pin fails the job instead of reporting an old main as passing.
-      E2E_APP_SHA: f78170388a3c2a91c19d78fc5878efd601cd6395
+      E2E_DB_PROFILE: ${{ matrix.db_profile }}
       E2E_HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
       E2E_DISPOSABLE_CI: 'yes'
       E2E_ISOLATED_SANDBOX: 'yes'
@@ -36,7 +54,7 @@ jobs:
       CLOUD_STORAGE_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
       CLOUD_SESSION_DATABASE_URL: postgresql://e2e_runtime:e2e_runtime@127.0.0.1:5432/e2e_disposable
       CLOUD_SESSION_ORIGIN: https://localhost:8443
-      CLOUD_STORAGE_MINIMUM_VERSION: '0009'
+      CLOUD_STORAGE_MINIMUM_VERSION: ${{ matrix.db_profile }}
       LANGUAGE_AI_DEPLOYMENT_MODE: cloud
       LANGUAGE_AI_STAGING: '1'
       CLOUD_EMAIL_DELIVERY: sandbox-directory
@@ -48,16 +66,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          echo "pinned app baseline: $E2E_APP_SHA"
-          echo "current main:        $CURRENT_MAIN"
-          if [ "$E2E_APP_SHA" != "$CURRENT_MAIN" ]; then
-            echo "::error::E2E_APP_SHA is stale: it is not the current main. Re-pin it and re-run; an old baseline cannot certify the current main."
+          echo "pinned candidate:        $E2E_APP_SHA (tree $E2E_APP_TREE)"
+          echo "candidate built on main: $E2E_APP_BASE_MAIN"
+          echo "current main:            $CURRENT_MAIN"
+          if [ "$E2E_APP_BASE_MAIN" != "$CURRENT_MAIN" ]; then
+            echo "::error::The pinned candidate was built on a main that is no longer current. Rebuild it on the current main, re-pin and re-run; an old baseline cannot certify the current main."
             exit 1
           fi
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.E2E_APP_SHA }}
           path: app
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -76,6 +96,16 @@ jobs:
           echo "app=$app harness=$harness"
           test "$app" = "$E2E_APP_SHA"
           test "$harness" = "$E2E_HARNESS_SHA"
+          tree="$(git -C app rev-parse 'HEAD^{tree}')"
+          echo "app_tree=$tree"
+          test "$tree" = "$E2E_APP_TREE"
+          git -C app merge-base --is-ancestor "$E2E_APP_BASE_MAIN" HEAD
+          echo "candidate contains main $E2E_APP_BASE_MAIN"
+          for head in $E2E_REQUIRED_HEADS; do
+            git -C app merge-base --is-ancestor "$head" HEAD
+            echo "candidate contains required head $head"
+          done
+          echo "database profile: $E2E_DB_PROFILE"
       - name: Install backend and frontend dependencies
         run: |
           python -m pip install -r app/backend/requirements.txt
@@ -125,7 +155,7 @@ jobs:
             echo "E2E_STORAGE_STATE_REPLAY=$RUNNER_TEMP/e2e-state/replay.json"
           } >> "$GITHUB_ENV"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$RUNNER_TEMP/localhost.key" -out "$RUNNER_TEMP/localhost.crt" -subj /CN=localhost -addext subjectAltName=DNS:localhost
-      - name: Verify isolated PostgreSQL, migrate 0001–0009, seed synthetic fixtures
+      - name: Verify isolated PostgreSQL, migrate to the profile, seed synthetic fixtures
         env:
           PYTHONPATH: app/backend:app/backend/tests
         run: python harness/e2e/scripts/prepare_ci_sandbox.py
@@ -144,10 +174,20 @@ jobs:
         working-directory: harness/e2e
         env:
           E2E_EVIDENCE_PHASE: pre-restart
-        run: npm test -- --grep-invert 'after service restart'
+        run: npm test -- --grep-invert 'after service restart|@upgrade'
       - name: Require sanitized pre-restart evidence
         working-directory: harness/e2e
         run: node scripts/verify_evidence.mjs pre-restart
+      - name: Execute the #97 audio reference and outbox regression
+        working-directory: harness/e2e
+        env:
+          E2E_EVIDENCE_PHASE: upgrade
+        run: npm test -- --grep '@upgrade$' --output=test-results-upgrade
+      - name: Verify retired audio is queued in the outbox and its bytes are retained
+        run: python harness/e2e/scripts/verify_outbox_retention.py
+      - name: Require sanitized upgrade evidence
+        working-directory: harness/e2e
+        run: node scripts/verify_evidence.mjs upgrade
       - name: Restart the real app against the same isolated database
         working-directory: app/backend
         run: |
@@ -171,6 +211,14 @@ jobs:
       - name: Require sanitized post-restart evidence
         working-directory: harness/e2e
         run: node scripts/verify_evidence.mjs post-restart
+      - name: Verify audio state after restart
+        working-directory: harness/e2e
+        env:
+          E2E_EVIDENCE_PHASE: upgrade-restart
+        run: npm test -- --grep '@upgrade-restart$' --output=test-results-upgrade-restart
+      - name: Require sanitized upgrade-restart evidence
+        working-directory: harness/e2e
+        run: node scripts/verify_evidence.mjs upgrade-restart
       - name: Scan evidence for secret material before any upload
         id: evidence_scan
         if: always()
@@ -190,7 +238,7 @@ jobs:
         if: ${{ always() && steps.evidence_scan.outcome == 'success' && env.E2E_EVIDENCE_DIR != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: browser-e2e-http-evidence
+          name: browser-e2e-http-evidence-${{ matrix.db_profile }}
           path: ${{ runner.temp }}/e2e-evidence/
           if-no-files-found: error
           retention-days: 7
@@ -201,4 +249,67 @@ jobs:
           rm -rf "$RUNNER_TEMP/e2e-state" "$RUNNER_TEMP/mailbox" "$RUNNER_TEMP/e2e-evidence" "$RUNNER_TEMP/localhost.key" "$RUNNER_TEMP/localhost.crt" "$RUNNER_TEMP/mask-probe.out"
           # Local Playwright outputs can hold traces, screenshots and videos with session
           # data; they are never uploaded and are removed here.
-          rm -rf harness/e2e/test-results harness/e2e/test-results-restart harness/e2e/probes/test-results-probe harness/e2e/playwright-report
+          rm -rf harness/e2e/test-results harness/e2e/test-results-restart harness/e2e/test-results-upgrade harness/e2e/test-results-upgrade-restart harness/e2e/probes/test-results-probe harness/e2e/playwright-report
+
+  # One check that is green only when BOTH profiles ran and passed and their
+  # evidence names the pinned candidate. A skipped, cancelled or missing profile
+  # (for example a PR from another branch, where the job's `if` is false) fails
+  # here instead of being reported as a pass.
+  e2e-gate:
+    name: Browser E2E gate (0009 + 0014)
+    needs: chromium
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every database profile to have run and passed
+        env:
+          RESULT: ${{ needs.chromium.result }}
+        run: |
+          echo "chromium matrix result: $RESULT"
+          if [ "$RESULT" != "success" ]; then
+            echo "::error::Browser E2E did not pass for every database profile (result: $RESULT). Skipped is not a pass."
+            exit 1
+          fi
+      - name: Require that main has not moved since the candidate was pinned
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          echo "candidate built on main: $E2E_APP_BASE_MAIN"
+          echo "current main:            $CURRENT_MAIN"
+          if [ "$E2E_APP_BASE_MAIN" != "$CURRENT_MAIN" ]; then
+            echo "::error::main moved while the browser checks ran; this result no longer certifies the current main. Rebuild, re-pin and re-run."
+            exit 1
+          fi
+      - name: Download the sanitized evidence of both profiles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: browser-e2e-http-evidence-*
+          path: ${{ runner.temp }}/gate
+      - name: Require complete evidence naming the pinned candidate
+        run: |
+          python3 - "$RUNNER_TEMP/gate" <<'EOF'
+          import json, os, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          phases = ["pre-restart", "post-restart", "upgrade", "upgrade-restart"]
+          problems = []
+          for profile in ("0009", "0014"):
+              base = root / f"browser-e2e-http-evidence-{profile}"
+              for phase in phases:
+                  path = base / phase / "manifest.json"
+                  if not path.is_file():
+                      problems.append(f"{profile}/{phase}: manifest missing")
+                      continue
+                  manifest = json.loads(path.read_text())
+                  expected = {"phase": phase, "app_sha": os.environ["E2E_APP_SHA"],
+                              "app_tree": os.environ["E2E_APP_TREE"], "db_profile": profile}
+                  for key, value in expected.items():
+                      if manifest.get(key) != value:
+                          problems.append(f"{profile}/{phase}: {key}={manifest.get(key)!r}")
+                  print(f"{profile}/{phase}: {len(manifest.get('files', []))} evidence files")
+          if problems:
+              print("\n".join(problems))
+              sys.exit("Evidence is incomplete or does not name the pinned candidate")
+          print("Browser E2E gate OK: both profiles, all phases, pinned candidate")
+          EOF
