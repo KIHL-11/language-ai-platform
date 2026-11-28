@@ -1,0 +1,90 @@
+name: Cloud backup and recovery drill (disposable PostgreSQL 16)
+
+# backup -> migrate -> restore -> re-migrate on a throwaway service container,
+# synthetic data only. No secrets, no deployment, no external database.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/cloud-backup-drill.yml'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Exact commit SHA to drill (defaults to the workflow ref)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-backup-drill-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drill:
+    name: Backup, restore and 0014 rollback drill
+    # Pinned: this image ships the PostgreSQL 16 client tools; the tooling
+    # refuses a pg_dump/pg_restore whose major version differs from the server.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: drill_superuser
+          POSTGRES_PASSWORD: drill_superuser
+          POSTGRES_DB: drill_superuser
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U drill_superuser -d drill_superuser"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AI_MODE: mock
+      PYTHONPATH: backend
+      TEST_POSTGRES_DSN: postgresql://drill_superuser:drill_superuser@127.0.0.1:5432/drill_superuser
+      CLOUD_DRILL_SUPERUSER_DATABASE_URL: postgresql://drill_superuser:drill_superuser@127.0.0.1:5432/drill_superuser
+      CLOUD_DRILL_DISPOSABLE: 'yes'
+      CLOUD_BACKUP_REQUIRE_PG_TOOLS: '1'
+      CLOUD_P1_REQUIRE_POSTGRES: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Record the tested commit
+        run: echo "TESTED=$(git rev-parse HEAD) TREE=$(git rev-parse HEAD^{tree})"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Select PostgreSQL 16 client tools
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+            sudo apt-get update -q && sudo apt-get install -y -q postgresql-client-16
+          fi
+          /usr/lib/postgresql/16/bin/pg_dump --version
+          /usr/lib/postgresql/16/bin/pg_restore --version
+          echo "CLOUD_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
+      - name: Backup tests (tool skips are failures here)
+        run: python -m pytest -q -rs backend/tests/test_cloud_backup.py
+      - name: Run the drill and require every check to pass
+        working-directory: backend
+        run: |
+          status=0; python scripts/cloud_backup.py drill > "$RUNNER_TEMP/drill.json" || status=$?
+          python - "$RUNNER_TEMP/drill.json" <<'EOF'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          for entry in report.get("checks", []):
+              print(("PASS " if entry["ok"] else "FAIL ") + entry["check"])
+          print("approved_top:", report.get("approved_top"))
+          print("timings:", json.dumps(report.get("timings")))
+          print("sizes:", json.dumps(report.get("sizes")))
+          failed = [e for e in report.get("checks", []) if not e["ok"]]
+          print(f"checks: {len(report.get('checks', []))} passed={len(report.get('checks', [])) - len(failed)} failed={len(failed)}")
+          sys.exit(0 if report.get("ok") and report.get("checks") and not failed else 1)
+          EOF
+          exit $status
